@@ -1,0 +1,4 @@
+librosa>=0.10,<1.0
+numpy>=1.24,<3.0
+# optional (for real pitch inference): basic-pitch>=0.4,<1.0
+# note: basic-pitch may require a Python/TensorFlow combination not available on Python 3.12.
