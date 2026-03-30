@@ -3,6 +3,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import List
 
+import librosa
+
 from .config import PitchDetectionConfig
 from .exceptions import (
     AudioTooLongError,
@@ -19,8 +21,6 @@ class PitchDetector:
         self.config = config or PitchDetectionConfig()
 
     def _validate_audio_length(self, audio_path: str) -> float:
-        import librosa
-
         try:
             duration = librosa.get_duration(path=audio_path)
         except Exception as exc:
@@ -36,8 +36,6 @@ class PitchDetector:
         """
         返回原始音符序列（不做量化，不做小节切分）。
         """
-        import librosa
-
         audio_file = Path(audio_path)
         if not audio_file.exists():
             raise PitchDetectionFailedError(f"音频文件不存在: {audio_path}")
