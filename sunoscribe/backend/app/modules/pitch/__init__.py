@@ -1,7 +1,7 @@
 from .config import PitchDetectionConfig
 from .pipeline import PitchPipeline
 from .serializer import PitchResultSerializer
-from .types import MetaInfo, Note, PitchAnalysisResult
+from .types import MetaInfo, Note, NoteType, PitchAnalysisResult, QuantizedNote
 
 __all__ = [
     "PitchDetectionConfig",
@@ -9,5 +9,7 @@ __all__ = [
     "PitchResultSerializer",
     "MetaInfo",
     "Note",
+    "NoteType",
+    "QuantizedNote",
     "PitchAnalysisResult",
 ]

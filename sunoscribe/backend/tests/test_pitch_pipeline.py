@@ -30,14 +30,15 @@ class TestPitchPipeline(unittest.TestCase):
         ):
             result = pipeline.run("dummy.wav")
 
-        self.assertEqual(result.version, "1.0")
+        self.assertEqual(result.version, "1.1")
         self.assertEqual(result.meta.bpm, 120.0)
         self.assertEqual(result.meta.key, "C Major")
         self.assertEqual(result.meta.duration_sec, 12.34)
         self.assertEqual(len(result.raw_notes), 2)
+        self.assertGreaterEqual(len(result.measures), 1)
         self.assertEqual(result.raw_notes[0].pitch, "C4")
-        self.assertEqual(result.analysis_info["quantize_mode"], "disabled")
-        self.assertEqual(result.analysis_info["measure_segmentation"], "disabled")
+        self.assertEqual(result.analysis_info["quantize_mode"], "adaptive")
+        self.assertEqual(result.analysis_info["measure_segmentation"], "enabled")
 
 
 if __name__ == "__main__":
