@@ -209,6 +209,28 @@ py -3.10 -m venv .venv310
 - duration_sec: `246.2506575963719`
 - raw_notes_count: `543`
 
+### 当前输出契约（代码已实现，P1 baseline）
+
+当前 `PitchPipeline.run()` 输出包含：
+
+- `meta`：`bpm`、`bpm_confidence`、`time_signature`、`key`、`key_confidence`、`rhythm_type`、`duration_sec`、`total_measures`
+- `raw_notes`：原始音符序列（basic-pitch）
+- `measures`：按小节分组后的量化音符
+- `analysis_info`：
+    - `stage`（`p1_baseline`）
+    - `has_accompaniment`
+    - `downbeat_method`
+    - `quantize_mode`
+    - `measure_segmentation`
+    - `measure_count`
+    - `rhythm_stability`
+    - `detector` / `beat_backend` / `key_backend`
+
+说明：
+
+- 当前 `time_signature` 为默认 `4/4`（P1 baseline）。
+- `downbeat_method` 目前记录配置后端（默认 `librosa`），madmom 将在后续阶段接入。
+
 ### 已修复兼容点
 
 - `beat_tracker.py` 已兼容 `librosa.beat.beat_track` 在不同版本返回 `tempo` 标量/数组两种形式，避免 `TypeError: only 0-dimensional arrays can be converted to Python scalars`。

@@ -7,6 +7,7 @@ from .config import PitchDetectionConfig
 from .detector import PitchDetector
 from .key_analyzer import KeyAnalyzer
 from .quantizer import NoteQuantizer
+from .rhythm_analyzer import RhythmAnalyzer
 from .types import MetaInfo, PitchAnalysisResult, QuantizedNote
 
 
@@ -27,6 +28,7 @@ class PitchPipeline:
         self.beat_tracker = BeatTracker(self.config)
         self.key_analyzer = KeyAnalyzer(self.config)
         self.quantizer = NoteQuantizer(self.config)
+        self.rhythm_analyzer = RhythmAnalyzer()
 
     @staticmethod
     def _build_measures(notes: list[QuantizedNote]) -> list[dict]:
@@ -68,6 +70,7 @@ class PitchPipeline:
         key_result = self.key_analyzer.analyze(audio_path)
         quantized_notes = self.quantizer.quantize(notes, beat_result.bpm, beat_result.beat_times)
         measures = self._build_measures(quantized_notes)
+        rhythm_result = self.rhythm_analyzer.analyze(beat_result.beat_times)
 
         duration_sec = float(librosa.get_duration(path=audio_path))
 
@@ -77,17 +80,26 @@ class PitchPipeline:
             time_signature="4/4",
             key=key_result.key,
             key_confidence=key_result.confidence,
-            rhythm_type="stable",
+            rhythm_type=rhythm_result.rhythm_type,
             duration_sec=duration_sec,
             total_measures=len(measures) if measures else None,
         )
+
+        # 简化伴奏判断（P1 baseline）：检测到多个小节且音符密度较高，认为更可能有伴奏。
+        note_density = len(notes) / max(duration_sec, 1.0)
+        has_accompaniment = bool(note_density >= 1.8 and len(measures) >= 4)
 
         return PitchAnalysisResult(
             version=self.VERSION,
             meta=meta,
             analysis_info={
+                "stage": "p1_baseline",
+                "has_accompaniment": has_accompaniment,
+                "downbeat_method": self.config.downbeat_backend,
                 "quantize_mode": self.config.quantize_mode,
                 "measure_segmentation": "enabled",
+                "measure_count": len(measures),
+                "rhythm_stability": round(rhythm_result.stability_score, 4),
                 "detector": "basic-pitch",
                 "beat_backend": "librosa",
                 "key_backend": "librosa_chroma",

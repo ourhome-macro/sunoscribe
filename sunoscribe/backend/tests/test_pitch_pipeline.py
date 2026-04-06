@@ -34,11 +34,16 @@ class TestPitchPipeline(unittest.TestCase):
         self.assertEqual(result.meta.bpm, 120.0)
         self.assertEqual(result.meta.key, "C Major")
         self.assertEqual(result.meta.duration_sec, 12.34)
+        self.assertEqual(result.meta.time_signature, "4/4")
+        self.assertIn(result.meta.rhythm_type, {"stable", "unstable", "free"})
         self.assertEqual(len(result.raw_notes), 2)
         self.assertGreaterEqual(len(result.measures), 1)
         self.assertEqual(result.raw_notes[0].pitch, "C4")
         self.assertEqual(result.analysis_info["quantize_mode"], "adaptive")
         self.assertEqual(result.analysis_info["measure_segmentation"], "enabled")
+        self.assertIn("has_accompaniment", result.analysis_info)
+        self.assertIn("downbeat_method", result.analysis_info)
+        self.assertIn("rhythm_stability", result.analysis_info)
 
 
 if __name__ == "__main__":
