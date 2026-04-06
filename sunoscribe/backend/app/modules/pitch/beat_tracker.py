@@ -35,9 +35,10 @@ class BeatTracker:
             start_bpm=self.config.bpm_start_bpm,
             units="frames",
         )
+        tempo_value = float(np.atleast_1d(tempo)[0])
         beat_times = librosa.frames_to_time(beat_frames, sr=sr).tolist()
 
-        if tempo is None or float(tempo) <= 0:
+        if tempo is None or tempo_value <= 0:
             raise NoBeatsDetectedError("未检测到有效 BPM。")
 
         onset_env = librosa.onset.onset_strength(y=y, sr=sr)
@@ -50,7 +51,7 @@ class BeatTracker:
             confidence = 0.2
 
         return BeatTrackingResult(
-            bpm=float(tempo),
+            bpm=tempo_value,
             beat_times=beat_times,
             confidence=confidence,
         )

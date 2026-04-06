@@ -1,0 +1,67 @@
+# =========================
+# Python bytecode / cache
+# =========================
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Unit test / coverage / static analysis
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+
+# Build / package artifacts
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# =========================
+# Virtual environments
+# =========================
+.venv/
+.venv*/
+venv/
+venv*/
+env/
+env*/
+backend/.venv/
+backend/.venv*/
+
+# =========================
+# Runtime / temp files
+# =========================
+*.log
+*.tmp
+*.temp
+*.bak
+*.swp
+*.swo
+
+# Local data/cache artifacts
+.cache/
+*.onnx
+*.tflite
+*.h5
+*.ckpt
+*.pb
+backend/app/modules/pitch/samples/*
+!backend/app/modules/pitch/samples/.gitkeep
+
+# =========================
+# IDE / OS
+# =========================
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# =========================
+# Frontend artifacts
+# =========================
+node_modules/
+*.tsbuildinfo

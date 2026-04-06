@@ -163,6 +163,55 @@ except KeyAnalysisLowConfidenceError as e:
 - **音频格式**：推荐使用 WAV 格式，其他格式依赖 librosa 的后端支持。
 - **性能考虑**：basic-pitch 推理较耗时，长音频会分块处理。
 - **置信度调优**：可根据实际场景调整 `confidence_threshold`，过高可能导致漏检，过低可能产生误检。
+
+## 实测与环境复现（2026-04-06）
+
+### 环境结论
+
+- Python `3.12` 下，`basic-pitch` 依赖链存在兼容问题，无法稳定安装。
+- Python `3.10` 下可正常安装 `basic-pitch` 并完成完整推理（包含 `raw_notes`）。
+- 推荐将 **生产/联调环境固定为 Python 3.10**。
+
+### 清华源 + Python3.10 复现步骤
+
+在 `backend/` 目录执行：
+
+```powershell
+py -3.10 -m venv .venv310
+.\.venv310\Scripts\python.exe -m pip install -i https://pypi.tuna.tsinghua.edu.cn/simple --upgrade pip setuptools wheel
+.\.venv310\Scripts\python.exe -m pip install -i https://pypi.tuna.tsinghua.edu.cn/simple -r requirements.txt
+.\.venv310\Scripts\python.exe -m pip install -i https://pypi.tuna.tsinghua.edu.cn/simple basic-pitch
+.\.venv310\Scripts\python.exe tests/run_pitch_samples.py
+```
+
+### 样本文件
+
+- `backend/app/modules/pitch/samples/song_001_vocals.wav`
+- `backend/app/modules/pitch/samples/song_001_accompaniment.wav`
+
+### 终端实测结果摘要
+
+#### 纯人声 `song_001_vocals.wav`
+
+- mode: `full_pipeline`
+- bpm: `117.45383522727273`
+- key: `A Major`
+- key_confidence: `0.7018047707611877`
+- duration_sec: `246.2506575963719`
+- raw_notes_count: `525`
+
+#### 纯伴奏 `song_001_accompaniment.wav`
+
+- mode: `full_pipeline`
+- bpm: `117.45383522727273`
+- key: `A Major`
+- key_confidence: `0.7299437602123495`
+- duration_sec: `246.2506575963719`
+- raw_notes_count: `543`
+
+### 已修复兼容点
+
+- `beat_tracker.py` 已兼容 `librosa.beat.beat_track` 在不同版本返回 `tempo` 标量/数组两种形式，避免 `TypeError: only 0-dimensional arrays can be converted to Python scalars`。
 ## 开发规划
 ### 当前状态：P0 - 最小可用版本（MVP）
 | 版本 | 状态                       |
