@@ -1,6 +1,7 @@
 import unittest
 from unittest.mock import patch
 
+from app.modules.pitch.config import PitchDetectionConfig
 from app.modules.pitch.pipeline import PitchPipeline
 from app.modules.pitch.types import Note
 
@@ -54,6 +55,45 @@ class TestPitchPipeline(unittest.TestCase):
         self.assertIn("downbeat_confidence", result.analysis_info)
         self.assertIn("downbeat_count", result.analysis_info)
         self.assertIn("rhythm_stability", result.analysis_info)
+
+    def test_time_signature_and_anacrusis_with_downbeats(self):
+        cfg = PitchDetectionConfig(beats_per_bar=3, beat_unit=8)
+        pipeline = PitchPipeline(cfg)
+
+        mock_notes = [
+            Note(pitch="C4", start_time=0.2, end_time=0.6, confidence=0.91),
+            Note(pitch="E4", start_time=1.2, end_time=1.6, confidence=0.88),
+        ]
+
+        class _BeatResult:
+            bpm = 120.0
+            beat_times = [0.0, 0.5, 1.0, 1.5, 2.0]
+            confidence = 0.93
+
+        class _KeyResult:
+            key = "C Major"
+            confidence = 0.89
+
+        class _DownbeatResult:
+            downbeat_times = [0.8, 2.0]
+            method = "librosa"
+            confidence = 0.8
+            beats_per_bar = 3
+
+        with patch.object(pipeline.detector, "detect", return_value=mock_notes), patch.object(
+            pipeline.beat_tracker, "track", return_value=_BeatResult()
+        ), patch.object(pipeline.key_analyzer, "analyze", return_value=_KeyResult()), patch.object(
+            pipeline.downbeat_tracker, "track", return_value=_DownbeatResult()
+        ), patch(
+            "app.modules.pitch.pipeline.librosa.get_duration", return_value=3.2
+        ):
+            result = pipeline.run("dummy.wav")
+
+        self.assertEqual(result.meta.time_signature, "3/8")
+        self.assertGreaterEqual(len(result.measures), 1)
+        self.assertTrue(result.measures[0]["is_anacrusis"])
+        self.assertEqual(result.analysis_info["beats_per_bar"], 3)
+        self.assertEqual(result.analysis_info["beat_unit"], 8)
 
 
 if __name__ == "__main__":

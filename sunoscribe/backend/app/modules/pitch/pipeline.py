@@ -38,6 +38,8 @@ class PitchPipeline:
         notes: list[QuantizedNote],
         downbeat_times: list[float],
         duration_sec: float,
+        beats_per_bar: int,
+        beat_duration_sec: float,
     ) -> list[dict]:
         if not downbeat_times:
             return []
@@ -51,7 +53,12 @@ class PitchPipeline:
             boundaries.append(duration_sec)
 
         measures: list[dict] = []
-        beats_per_bar = max(2, int(self.config.beats_per_bar))
+    beats_per_bar = max(2, int(beats_per_bar))
+
+    first_downbeat = float(downbeat_times[0]) if downbeat_times else 0.0
+    # 弱起判定：第一个 downbeat 与音频起点的间距超过半拍。
+    anacrusis_threshold = max(0.15, beat_duration_sec * 0.5)
+    has_anacrusis = first_downbeat > anacrusis_threshold
 
         for i in range(len(boundaries) - 1):
             m_start, m_end = boundaries[i], boundaries[i + 1]
@@ -81,7 +88,7 @@ class PitchPipeline:
                 {
                     "measure_num": m_num,
                     "start_time": m_start,
-                    "is_anacrusis": i == 0 and boundaries[0] == 0.0 and downbeat_times[0] > 0.2,
+                    "is_anacrusis": i == 0 and boundaries[0] == 0.0 and has_anacrusis,
                     "notes": packed,
                 }
             )
@@ -96,6 +103,7 @@ class PitchPipeline:
         key_result = self.key_analyzer.analyze(audio_path)
         quantized_notes = self.quantizer.quantize(notes, beat_result.bpm, beat_result.beat_times)
         rhythm_result = self.rhythm_analyzer.analyze(beat_result.beat_times)
+    beat_duration_sec = 60.0 / max(1e-6, beat_result.bpm)
 
         duration_sec = float(librosa.get_duration(path=audio_path))
 
@@ -116,11 +124,19 @@ class PitchPipeline:
             )
 
         measures = self._build_measures(quantized_notes, downbeat_result.downbeat_times, duration_sec)
+        effective_beats_per_bar = max(2, int(downbeat_result.beats_per_bar or self.config.beats_per_bar))
+        measures = self._build_measures(
+            quantized_notes,
+            downbeat_result.downbeat_times,
+            duration_sec,
+            effective_beats_per_bar,
+            beat_duration_sec,
+        )
 
         meta = MetaInfo(
             bpm=beat_result.bpm,
             bpm_confidence=beat_result.confidence,
-            time_signature=f"{max(2, int(self.config.beats_per_bar))}/4",
+            time_signature=f"{effective_beats_per_bar}/{max(1, int(self.config.beat_unit))}",
             key=key_result.key,
             key_confidence=key_result.confidence,
             rhythm_type=rhythm_result.rhythm_type,
@@ -141,6 +157,8 @@ class PitchPipeline:
                 "downbeat_method": downbeat_result.method,
                 "downbeat_confidence": round(downbeat_result.confidence, 4),
                 "downbeat_count": len(downbeat_result.downbeat_times),
+                "beats_per_bar": effective_beats_per_bar,
+                "beat_unit": max(1, int(self.config.beat_unit)),
                 "quantize_mode": self.config.quantize_mode,
                 "measure_segmentation": "enabled",
                 "measure_count": len(measures),

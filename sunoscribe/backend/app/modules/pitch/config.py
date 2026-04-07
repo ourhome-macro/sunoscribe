@@ -27,6 +27,7 @@ class PitchDetectionConfig:
     key_min_confidence: float = 0.10
     downbeat_backend: str = "librosa"
     beats_per_bar: int = 4
+    beat_unit: int = 4
 
     def resolved_cache_dir(self) -> Path:
         return Path(self.cache_dir).expanduser().resolve()
