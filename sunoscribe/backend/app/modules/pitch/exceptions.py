@@ -20,3 +20,7 @@ class NoBeatsDetectedError(PitchDetectionError):
 
 class KeyAnalysisLowConfidenceError(PitchDetectionError):
     """调式分析置信度过低。"""
+
+
+class DownbeatTrackingError(PitchDetectionError):
+    """Downbeat 检测失败。"""

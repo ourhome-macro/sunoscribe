@@ -23,14 +23,22 @@ class TestPitchPipeline(unittest.TestCase):
             key = "C Major"
             confidence = 0.89
 
+        class _DownbeatResult:
+            downbeat_times = [0.0]
+            method = "librosa"
+            confidence = 0.8
+            beats_per_bar = 4
+
         with patch.object(pipeline.detector, "detect", return_value=mock_notes), patch.object(
             pipeline.beat_tracker, "track", return_value=_BeatResult()
-        ), patch.object(pipeline.key_analyzer, "analyze", return_value=_KeyResult()), patch(
+        ), patch.object(pipeline.key_analyzer, "analyze", return_value=_KeyResult()), patch.object(
+            pipeline.downbeat_tracker, "track", return_value=_DownbeatResult()
+        ), patch(
             "app.modules.pitch.pipeline.librosa.get_duration", return_value=12.34
         ):
             result = pipeline.run("dummy.wav")
 
-        self.assertEqual(result.version, "1.1")
+        self.assertEqual(result.version, "1.2")
         self.assertEqual(result.meta.bpm, 120.0)
         self.assertEqual(result.meta.key, "C Major")
         self.assertEqual(result.meta.duration_sec, 12.34)
@@ -43,6 +51,8 @@ class TestPitchPipeline(unittest.TestCase):
         self.assertEqual(result.analysis_info["measure_segmentation"], "enabled")
         self.assertIn("has_accompaniment", result.analysis_info)
         self.assertIn("downbeat_method", result.analysis_info)
+        self.assertIn("downbeat_confidence", result.analysis_info)
+        self.assertIn("downbeat_count", result.analysis_info)
         self.assertIn("rhythm_stability", result.analysis_info)
 
 
