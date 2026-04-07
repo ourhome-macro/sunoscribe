@@ -30,6 +30,19 @@ class TestNoteQuantizer(unittest.TestCase):
         quantized = quantizer.quantize(notes, bpm=0.0, beat_times=[])
         self.assertEqual(quantized, [])
 
+    def test_measure_location_uses_configured_beats_per_bar(self):
+        cfg = PitchDetectionConfig(beats_per_bar=3, quantize_precision=0.25)
+        quantizer = NoteQuantizer(cfg)
+
+        notes = [
+            Note(pitch="C4", start_time=0.0, end_time=0.5, confidence=0.9),
+            Note(pitch="D4", start_time=1.6, end_time=2.1, confidence=0.9),
+        ]
+        quantized = quantizer.quantize(notes, bpm=120.0, beat_times=[0.0, 0.5, 1.0, 1.5, 2.0])
+
+        self.assertEqual(quantized[0].measure_num, 1)
+        self.assertEqual(quantized[1].measure_num, 2)
+
 
 if __name__ == "__main__":
     unittest.main()

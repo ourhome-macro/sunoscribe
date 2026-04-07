@@ -71,9 +71,8 @@ class NoteQuantizer:
         ]
         return min(mapping, key=lambda x: abs(x[0] - beats))[1]
 
-    @staticmethod
-    def _locate_measure(start_time: float, beat_duration: float, beat_times: List[float]) -> Tuple[int, float]:
-        measure_length_beats = 4.0
+    def _locate_measure(self, start_time: float, beat_duration: float, beat_times: List[float]) -> Tuple[int, float]:
+        measure_length_beats = float(max(2, int(self.config.beats_per_bar)))
         anchor = beat_times[0] if beat_times else 0.0
         elapsed_beats = max(0.0, (start_time - anchor) / beat_duration)
 

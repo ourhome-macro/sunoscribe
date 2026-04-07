@@ -54,6 +54,7 @@ class TestPitchPipeline(unittest.TestCase):
         self.assertIn("downbeat_method", result.analysis_info)
         self.assertIn("downbeat_confidence", result.analysis_info)
         self.assertIn("downbeat_count", result.analysis_info)
+        self.assertEqual(result.analysis_info["measure_boundary_source"], "downbeat_sequence")
         self.assertIn("rhythm_stability", result.analysis_info)
 
     def test_time_signature_and_anacrusis_with_downbeats(self):
@@ -92,6 +93,11 @@ class TestPitchPipeline(unittest.TestCase):
         self.assertEqual(result.meta.time_signature, "3/8")
         self.assertGreaterEqual(len(result.measures), 1)
         self.assertTrue(result.measures[0]["is_anacrusis"])
+        self.assertAlmostEqual(result.measures[0]["start_time"], 0.0, places=3)
+        self.assertAlmostEqual(result.measures[0]["end_time"], 0.8, places=3)
+        if len(result.measures) >= 2:
+            self.assertAlmostEqual(result.measures[1]["start_time"], 0.8, places=3)
+            self.assertAlmostEqual(result.measures[1]["end_time"], 2.0, places=3)
         self.assertEqual(result.analysis_info["beats_per_bar"], 3)
         self.assertEqual(result.analysis_info["beat_unit"], 8)
 

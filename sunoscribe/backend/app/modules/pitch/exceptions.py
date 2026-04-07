@@ -24,3 +24,7 @@ class KeyAnalysisLowConfidenceError(PitchDetectionError):
 
 class DownbeatTrackingError(PitchDetectionError):
     """Downbeat 检测失败。"""
+
+
+class MidiExportError(PitchDetectionError):
+    """MIDI 导出失败。"""

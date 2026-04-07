@@ -8,6 +8,7 @@ from .detector import PitchDetector
 from .downbeat_tracker import DownbeatTracker
 from .exceptions import DownbeatTrackingError
 from .key_analyzer import KeyAnalyzer
+from .midi_exporter import MidiExporter
 from .quantizer import NoteQuantizer
 from .rhythm_analyzer import RhythmAnalyzer
 from .types import MetaInfo, PitchAnalysisResult, QuantizedNote
@@ -32,18 +33,9 @@ class PitchPipeline:
         self.key_analyzer = KeyAnalyzer(self.config)
         self.quantizer = NoteQuantizer(self.config)
         self.rhythm_analyzer = RhythmAnalyzer()
+        self.midi_exporter = MidiExporter()
 
-    def _build_measures(
-        self,
-        notes: list[QuantizedNote],
-        downbeat_times: list[float],
-        duration_sec: float,
-        beats_per_bar: int,
-        beat_duration_sec: float,
-    ) -> list[dict]:
-        if not downbeat_times:
-            return []
-
+    def _build_measure_boundaries(self, downbeat_times: list[float], duration_sec: float) -> list[float]:
         boundaries = sorted(set(float(t) for t in downbeat_times if 0.0 <= t <= duration_sec))
         if not boundaries:
             return []
@@ -51,14 +43,60 @@ class PitchPipeline:
             boundaries = [0.0] + boundaries
         if boundaries[-1] < duration_sec:
             boundaries.append(duration_sec)
+        return boundaries
+
+    def _recompute_quantized_positions(
+        self,
+        notes: list[QuantizedNote],
+        boundaries: list[float],
+        beats_per_bar: int,
+    ) -> None:
+        if not notes or len(boundaries) < 2:
+            return
+
+        beats_per_bar = max(2, int(beats_per_bar))
+        intervals = list(zip(boundaries[:-1], boundaries[1:]))
+
+        for n in notes:
+            t = float(n.start_time)
+
+            target_idx: int | None = None
+            for i, (m_start, m_end) in enumerate(intervals):
+                if m_start <= t < m_end:
+                    target_idx = i
+                    break
+
+            if target_idx is None:
+                if t >= boundaries[-1]:
+                    target_idx = len(intervals) - 1
+                else:
+                    continue
+
+            m_start, m_end = intervals[target_idx]
+            bar_dur = max(1e-6, m_end - m_start)
+            beat_dur = bar_dur / beats_per_bar
+
+            n.measure_num = target_idx + 1
+            n.beat_position = round(1.0 + (t - m_start) / beat_dur, 3)
+
+    def _build_measures(
+        self,
+        notes: list[QuantizedNote],
+        boundaries: list[float],
+        beats_per_bar: int,
+        beat_duration_sec: float,
+    ) -> list[dict]:
+        if len(boundaries) < 2:
+            return []
+        beats_per_bar = max(2, int(beats_per_bar))
+
+        has_leading_zero_boundary = boundaries[0] == 0.0
+        first_downbeat = boundaries[1] if has_leading_zero_boundary and len(boundaries) > 1 else boundaries[0]
+        # 弱起判定：第一个真实 downbeat 与起点间隔超过半拍。
+        anacrusis_threshold = max(0.15, beat_duration_sec * 0.5)
+        has_anacrusis = has_leading_zero_boundary and first_downbeat > anacrusis_threshold
 
         measures: list[dict] = []
-    beats_per_bar = max(2, int(beats_per_bar))
-
-    first_downbeat = float(downbeat_times[0]) if downbeat_times else 0.0
-    # 弱起判定：第一个 downbeat 与音频起点的间距超过半拍。
-    anacrusis_threshold = max(0.15, beat_duration_sec * 0.5)
-    has_anacrusis = first_downbeat > anacrusis_threshold
 
         for i in range(len(boundaries) - 1):
             m_start, m_end = boundaries[i], boundaries[i + 1]
@@ -70,7 +108,7 @@ class PitchPipeline:
 
             packed = []
             for n in m_notes:
-                beat_pos = 1.0 + (n.start_time - m_start) / beat_dur
+                beat_pos = n.beat_position if n.beat_position is not None else 1.0 + (n.start_time - m_start) / beat_dur
                 packed.append(
                     {
                         "pitch": n.pitch,
@@ -88,7 +126,8 @@ class PitchPipeline:
                 {
                     "measure_num": m_num,
                     "start_time": m_start,
-                    "is_anacrusis": i == 0 and boundaries[0] == 0.0 and has_anacrusis,
+                    "end_time": m_end,
+                    "is_anacrusis": i == 0 and has_anacrusis,
                     "notes": packed,
                 }
             )
@@ -103,7 +142,7 @@ class PitchPipeline:
         key_result = self.key_analyzer.analyze(audio_path)
         quantized_notes = self.quantizer.quantize(notes, beat_result.bpm, beat_result.beat_times)
         rhythm_result = self.rhythm_analyzer.analyze(beat_result.beat_times)
-    beat_duration_sec = 60.0 / max(1e-6, beat_result.bpm)
+        beat_duration_sec = 60.0 / max(1e-6, beat_result.bpm)
 
         duration_sec = float(librosa.get_duration(path=audio_path))
 
@@ -123,12 +162,12 @@ class PitchPipeline:
                 beats_per_bar=max(2, int(self.config.beats_per_bar)),
             )
 
-        measures = self._build_measures(quantized_notes, downbeat_result.downbeat_times, duration_sec)
         effective_beats_per_bar = max(2, int(downbeat_result.beats_per_bar or self.config.beats_per_bar))
+        boundaries = self._build_measure_boundaries(downbeat_result.downbeat_times, duration_sec)
+        self._recompute_quantized_positions(quantized_notes, boundaries, effective_beats_per_bar)
         measures = self._build_measures(
             quantized_notes,
-            downbeat_result.downbeat_times,
-            duration_sec,
+            boundaries,
             effective_beats_per_bar,
             beat_duration_sec,
         )
@@ -161,6 +200,8 @@ class PitchPipeline:
                 "beat_unit": max(1, int(self.config.beat_unit)),
                 "quantize_mode": self.config.quantize_mode,
                 "measure_segmentation": "enabled",
+                "measure_boundary_source": "downbeat_sequence",
+                "quantized_measure_alignment": "downbeat_reindexed",
                 "measure_count": len(measures),
                 "rhythm_stability": round(rhythm_result.stability_score, 4),
                 "detector": "basic-pitch",
@@ -170,4 +211,16 @@ class PitchPipeline:
             measures=measures,
             raw_notes=notes,
             warnings=warnings,
+        )
+
+    def export_midi(
+        self,
+        result: PitchAnalysisResult,
+        output_path: str | None = None,
+    ) -> bytes:
+        """将流水线结果导出为 MIDI 字节流，可选同时写入文件。"""
+        return self.midi_exporter.export_from_measures(
+            measures=result.measures,
+            bpm=result.meta.bpm,
+            output_path=output_path,
         )
