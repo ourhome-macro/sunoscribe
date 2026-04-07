@@ -23,6 +23,7 @@ class TestPitchPipeline(unittest.TestCase):
         class _KeyResult:
             key = "C Major"
             confidence = 0.89
+            method = "librosa"
 
         class _DownbeatResult:
             downbeat_times = [0.0]
@@ -56,6 +57,7 @@ class TestPitchPipeline(unittest.TestCase):
         self.assertIn("downbeat_count", result.analysis_info)
         self.assertEqual(result.analysis_info["measure_boundary_source"], "downbeat_sequence")
         self.assertIn("rhythm_stability", result.analysis_info)
+        self.assertEqual(result.analysis_info["key_backend"], "librosa")
 
     def test_time_signature_and_anacrusis_with_downbeats(self):
         cfg = PitchDetectionConfig(beats_per_bar=3, beat_unit=8)
@@ -74,6 +76,7 @@ class TestPitchPipeline(unittest.TestCase):
         class _KeyResult:
             key = "C Major"
             confidence = 0.89
+            method = "librosa_auto_fallback"
 
         class _DownbeatResult:
             downbeat_times = [0.8, 2.0]
@@ -100,6 +103,8 @@ class TestPitchPipeline(unittest.TestCase):
             self.assertAlmostEqual(result.measures[1]["end_time"], 2.0, places=3)
         self.assertEqual(result.analysis_info["beats_per_bar"], 3)
         self.assertEqual(result.analysis_info["beat_unit"], 8)
+        self.assertEqual(result.analysis_info["key_backend"], "librosa_auto_fallback")
+        self.assertTrue(any("Key backend downgraded" in w for w in result.warnings))
 
 
 if __name__ == "__main__":

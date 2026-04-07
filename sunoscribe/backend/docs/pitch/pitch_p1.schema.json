@@ -1,0 +1,86 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sunoscribe.local/schema/pitch-p1.json",
+  "title": "PitchAnalysisResult P1",
+  "type": "object",
+  "required": ["version", "meta", "analysis_info", "measures", "warnings"],
+  "properties": {
+    "version": { "type": "string" },
+    "meta": {
+      "type": "object",
+      "required": ["bpm", "bpm_confidence", "time_signature", "key", "key_confidence", "rhythm_type", "duration_sec"],
+      "properties": {
+        "bpm": { "type": "number", "exclusiveMinimum": 0 },
+        "bpm_confidence": { "type": "number", "minimum": 0, "maximum": 1 },
+        "time_signature": { "type": "string", "pattern": "^[0-9]+/[0-9]+$" },
+        "key": { "type": "string" },
+        "key_confidence": { "type": "number", "minimum": 0, "maximum": 1 },
+        "rhythm_type": { "type": "string" },
+        "duration_sec": { "type": "number", "minimum": 0 },
+        "total_measures": { "type": ["integer", "null"], "minimum": 0 }
+      },
+      "additionalProperties": true
+    },
+    "analysis_info": {
+      "type": "object",
+      "required": ["downbeat_method", "measure_boundary_source", "quantized_measure_alignment"],
+      "properties": {
+        "downbeat_method": { "type": "string" },
+        "measure_boundary_source": { "type": "string" },
+        "quantized_measure_alignment": { "type": "string" }
+      },
+      "additionalProperties": true
+    },
+    "measures": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["measure_num", "start_time", "end_time", "is_anacrusis", "notes"],
+        "properties": {
+          "measure_num": { "type": "integer", "minimum": 1 },
+          "start_time": { "type": "number", "minimum": 0 },
+          "end_time": { "type": "number", "minimum": 0 },
+          "is_anacrusis": { "type": "boolean" },
+          "notes": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["pitch", "start_time", "end_time", "duration_beats", "note_type", "confidence"],
+              "properties": {
+                "pitch": { "type": "string" },
+                "start_time": { "type": "number", "minimum": 0 },
+                "end_time": { "type": "number", "minimum": 0 },
+                "duration_beats": { "type": "number", "exclusiveMinimum": 0 },
+                "note_type": { "type": "string" },
+                "beat_position": { "type": ["number", "null"] },
+                "lyric": { "type": ["string", "null"] },
+                "confidence": { "type": "number", "minimum": 0, "maximum": 1 }
+              },
+              "additionalProperties": true
+            }
+          }
+        },
+        "additionalProperties": true
+      }
+    },
+    "raw_notes": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["pitch", "start_time", "end_time", "confidence"],
+        "properties": {
+          "pitch": { "type": "string" },
+          "start_time": { "type": "number", "minimum": 0 },
+          "end_time": { "type": "number", "minimum": 0 },
+          "confidence": { "type": "number", "minimum": 0, "maximum": 1 }
+        },
+        "additionalProperties": true
+      }
+    },
+    "warnings": {
+      "type": "array",
+      "items": { "type": "string" }
+    }
+  },
+  "additionalProperties": true
+}

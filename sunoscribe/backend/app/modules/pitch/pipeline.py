@@ -140,6 +140,9 @@ class PitchPipeline:
         notes = self.detector.detect(audio_path)
         beat_result = self.beat_tracker.track(audio_path)
         key_result = self.key_analyzer.analyze(audio_path)
+        key_method = str(getattr(key_result, "method", "librosa"))
+        if "fallback" in key_method:
+            warnings.append(f"Key backend downgraded to {key_method}.")
         quantized_notes = self.quantizer.quantize(notes, beat_result.bpm, beat_result.beat_times)
         rhythm_result = self.rhythm_analyzer.analyze(beat_result.beat_times)
         beat_duration_sec = 60.0 / max(1e-6, beat_result.bpm)
@@ -206,7 +209,7 @@ class PitchPipeline:
                 "rhythm_stability": round(rhythm_result.stability_score, 4),
                 "detector": "basic-pitch",
                 "beat_backend": "librosa",
-                "key_backend": "librosa_chroma",
+                "key_backend": key_method,
             },
             measures=measures,
             raw_notes=notes,
