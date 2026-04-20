@@ -23,7 +23,7 @@ class PitchPipeline:
     - 音符量化 + 小节分组（P1 baseline）
     """
 
-    VERSION = "1.2"
+    VERSION = "1.3"
 
     def __init__(self, config: PitchDetectionConfig | None = None) -> None:
         self.config = config or PitchDetectionConfig()
@@ -207,7 +207,7 @@ class PitchPipeline:
                 "quantized_measure_alignment": "downbeat_reindexed",
                 "measure_count": len(measures),
                 "rhythm_stability": round(rhythm_result.stability_score, 4),
-                "detector": "basic-pitch",
+                "detector": self.detector.backend_name,
                 "beat_backend": "librosa",
                 "key_backend": key_method,
             },

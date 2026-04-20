@@ -16,3 +16,15 @@ class ProjectStatus(str, Enum):
     PROCESSING = "processing"
     COMPLETED = "completed"
     FAILED = "failed"
+
+
+class TaskType(str, Enum):
+    SCORE_GENERATION = "score_generation"
+
+
+class TaskStatus(str, Enum):
+    QUEUED = "queued"
+    RUNNING = "running"
+    SUCCEEDED = "succeeded"
+    FAILED = "failed"
+    RETRYING = "retrying"

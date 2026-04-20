@@ -25,6 +25,7 @@ class Settings(BaseSettings):
     minio_secure: bool = False
     minio_region: str | None = None
     minio_base_path: str = "uploads"
+    task_worker_count: int = 1
 
     # PRD 要求 PostgreSQL；默认值可通过 .env 覆盖。
     # Avoid committing hard-coded credentials in code.
@@ -44,6 +45,14 @@ class Settings(BaseSettings):
         normalized = (value or "").strip().lower()
         if normalized not in {"local", "minio"}:
             raise ValueError("upload_backend must be one of: local, minio")
+        return normalized
+
+    @field_validator("task_worker_count")
+    @classmethod
+    def _validate_task_worker_count(cls, value: int) -> int:
+        normalized = int(value)
+        if normalized < 1:
+            raise ValueError("task_worker_count must be at least 1")
         return normalized
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")

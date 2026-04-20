@@ -40,7 +40,7 @@ class TestPitchPipeline(unittest.TestCase):
         ):
             result = pipeline.run("dummy.wav")
 
-        self.assertEqual(result.version, "1.2")
+        self.assertEqual(result.version, "1.3")
         self.assertEqual(result.meta.bpm, 120.0)
         self.assertEqual(result.meta.key, "C Major")
         self.assertEqual(result.meta.duration_sec, 12.34)

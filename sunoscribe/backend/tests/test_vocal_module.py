@@ -45,7 +45,7 @@ class TestVocalModule(unittest.TestCase):
             fake_wave = torch.randn(2, 3200)
 
             with patch("app.modules.vocal.model_manager.DemucsModelManager.load_model", return_value=_FakeModel()):
-                separator = VocalSeparator(model_manager=DemucsModelManager())
+                separator = VocalSeparator(model_manager=DemucsModelManager(), backend="demucs")
 
             fake_torchaudio = SimpleNamespace(
                 load=lambda _path: (fake_wave, 44100),

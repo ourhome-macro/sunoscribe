@@ -22,3 +22,4 @@ class User(Base):
 
     settings = relationship("UserSettings", back_populates="user", uselist=False, cascade="all, delete-orphan")
     projects = relationship("Project", back_populates="user", cascade="all, delete-orphan")
+    tasks = relationship("Task", back_populates="user", cascade="all, delete-orphan")

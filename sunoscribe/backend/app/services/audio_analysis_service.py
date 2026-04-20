@@ -122,7 +122,7 @@ class AudioAnalysisService:
         self.include_refine_debug = bool(include_refine_debug)
 
         self.audio_processor = audio_processor if audio_processor is not None else self._try_make_audio_processor()
-        self.vocal_separator = vocal_separator
+        self.vocal_separator = vocal_separator if vocal_separator is not None else self._try_make_vocal_separator()
         self.lyrics_recognizer = lyrics_recognizer if lyrics_recognizer is not None else self._try_make_lyrics_recognizer()
         self.pitch_pipeline = pitch_pipeline if pitch_pipeline is not None else self._try_make_pitch_pipeline()
         self.score_ir_builder = score_ir_builder or ScoreIRBuilder()
@@ -589,6 +589,15 @@ class AudioAnalysisService:
             return recognize_lyrics
         except Exception as exc:
             self.logger.warning("Lyrics recognizer unavailable: %s", self._short_exception(exc))
+            return None
+
+    def _try_make_vocal_separator(self) -> Any | None:
+        try:
+            from app.modules.vocal.separator import VocalSeparator
+
+            return VocalSeparator(backend="mdx-net")
+        except Exception as exc:
+            self.logger.warning("VocalSeparator unavailable: %s", self._short_exception(exc))
             return None
 
     def _try_make_pitch_pipeline(self) -> Any | None:

@@ -1,10 +1,12 @@
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, status
 from fastapi.responses import Response
 from sqlalchemy.orm import Session
 
 from app.database import get_db
 from app.schemas.score import GenerateScoreRequest, UpdateScoreRequest
-from app.services.score_service import export_score, generate_or_regenerate_score, get_score_by_project_id, update_score
+from app.services.score_service import export_score, get_score_by_project_id, update_score
+from app.services.task_orchestrator import task_orchestrator
+from app.services.task_service import create_score_generation_task
 from app.utils.dependencies import get_current_user
 from app.utils.responses import success_response
 
@@ -34,34 +36,38 @@ def get_project_score_api(
     )
 
 
-@router.post("/projects/{project_id}/score")
+@router.post("/projects/{project_id}/score", status_code=status.HTTP_202_ACCEPTED)
 def regenerate_project_score_api(
     project_id: str,
     payload: GenerateScoreRequest,
     db: Session = Depends(get_db),
     current_user=Depends(get_current_user),
 ):
-    score = generate_or_regenerate_score(
+    task = create_score_generation_task(
         db,
         user=current_user,
         project_id=project_id,
-        score_type=payload.score_type,
+        score_type=payload.score_type.value,
         key=payload.key,
     )
+    task_orchestrator.enqueue(str(task.id))
+
     return success_response(
         {
-            "id": str(score.id),
-            "project_id": str(score.project_id),
-            "score_type": score.score_type,
-            "key": score.key,
-            "vocal_range": score.vocal_range,
-            "recommended_voice": score.recommended_voice,
-            "emotion": score.emotion,
-            "score_data": score.score_data,
-            "created_at": score.created_at.isoformat(),
-            "updated_at": score.updated_at.isoformat(),
+            "task_id": str(task.id),
+            "project_id": str(task.project_id),
+            "task_type": task.task_type,
+            "status": task.status,
+            "progress": int(task.progress),
+            "retry_count": int(task.retry_count),
+            "max_retries": int(task.max_retries),
+            "can_retry": False,
+            "error_message": task.error_message,
+            "queued_at": task.queued_at.isoformat() if task.queued_at else None,
+            "started_at": task.started_at.isoformat() if task.started_at else None,
+            "finished_at": task.finished_at.isoformat() if task.finished_at else None,
         },
-        "谱子生成成功",
+        "任务已入队",
     )
 
 

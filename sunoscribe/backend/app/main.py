@@ -7,6 +7,7 @@ from fastapi.responses import JSONResponse
 from app.api import api_router
 from app.config import settings
 from app.database import Base, engine
+from app.services.task_orchestrator import task_orchestrator
 from app.utils.errors import AppError
 from app.utils.responses import error_response
 
@@ -17,6 +18,12 @@ app = FastAPI(title=settings.app_name)
 @app.on_event("startup")
 def on_startup():
     Base.metadata.create_all(bind=engine)
+    task_orchestrator.start()
+
+
+@app.on_event("shutdown")
+def on_shutdown():
+    task_orchestrator.stop()
 
 
 @app.exception_handler(AppError)
