@@ -1,3 +1,5 @@
+from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.models.user import User
@@ -15,14 +17,22 @@ def get_or_create_settings(db: Session, user: User) -> UserSettings:
 
     settings = UserSettings(user_id=user.id)
     db.add(settings)
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        settings = user.settings
+        if settings:
+            return settings
+        raise
     db.refresh(settings)
     return settings
 
 
 def update_profile(db: Session, user: User, username: str | None, avatar_url: str | None) -> User:
     if username and username != user.username:
-        exists = db.query(User).filter(User.username == username).first()
+        exists_stmt = select(User.id).where(User.username == username, User.id != user.id)
+        exists = db.execute(exists_stmt).scalar_one_or_none()
         if exists:
             raise ValidationAppError("用户名已存在")
         user.username = username
@@ -31,7 +41,11 @@ def update_profile(db: Session, user: User, username: str | None, avatar_url: st
         user.avatar_url = avatar_url
 
     db.add(user)
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError as exc:
+        db.rollback()
+        raise ValidationAppError("用户名已存在") from exc
     db.refresh(user)
     return user
 
@@ -57,6 +71,10 @@ def update_settings(
         settings.api_keys = api_keys
 
     db.add(settings)
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError as exc:
+        db.rollback()
+        raise ValidationAppError("用户设置更新失败，请稍后重试") from exc
     db.refresh(settings)
     return settings

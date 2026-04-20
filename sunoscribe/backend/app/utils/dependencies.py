@@ -27,7 +27,12 @@ def get_current_user(
     if not user_id:
         raise AuthenticationError("Token 缺少用户信息")
 
-    user = db.get(User, uuid.UUID(user_id))
+    try:
+        user_uuid = uuid.UUID(str(user_id))
+    except (TypeError, ValueError) as exc:
+        raise AuthenticationError("Token 用户标识无效") from exc
+
+    user = db.get(User, user_uuid)
     if not user:
         raise AuthenticationError("用户不存在")
 

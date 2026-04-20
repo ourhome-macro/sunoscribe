@@ -30,12 +30,12 @@ def login_api(payload: LoginRequest, db: Session = Depends(get_db)):
 
 
 @router.post("/refresh")
-def refresh_api(payload: RefreshTokenRequest):
-    tokens = refresh_access_token(payload.refresh_token)
+def refresh_api(payload: RefreshTokenRequest, db: Session = Depends(get_db)):
+    tokens = refresh_access_token(db, payload.refresh_token)
     return success_response(tokens, "刷新成功")
 
 
 @router.post("/logout")
-def logout_api(payload: LogoutRequest):
-    logout(payload.refresh_token)
+def logout_api(payload: LogoutRequest, db: Session = Depends(get_db)):
+    logout(db, payload.refresh_token)
     return success_response({"logged_out": True}, "登出成功")

@@ -1,3 +1,5 @@
+import logging
+
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
@@ -8,6 +10,7 @@ from app.database import Base, engine
 from app.utils.errors import AppError
 from app.utils.responses import error_response
 
+logger = logging.getLogger(__name__)
 app = FastAPI(title=settings.app_name)
 
 
@@ -43,9 +46,11 @@ async def validation_error_handler(_: Request, exc: RequestValidationError):
 
 @app.exception_handler(Exception)
 async def unhandled_error_handler(_: Request, exc: Exception):
+    logger.exception("Unhandled server error")
+    details = {"reason": str(exc)} if settings.expose_internal_errors else {}
     return JSONResponse(
         status_code=500,
-        content=error_response("INTERNAL_ERROR", "服务器内部错误", {"reason": str(exc)}),
+        content=error_response("INTERNAL_ERROR", "服务器内部错误", details),
     )
 
 

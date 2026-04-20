@@ -2,7 +2,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+import re
 import shutil
+
+PROJECT_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 
 
 @dataclass(slots=True)
@@ -16,6 +19,10 @@ class ProjectWorkspace:
         self.project_id = str(self.project_id).strip()
         if not self.project_id:
             raise ValueError("project_id cannot be empty")
+        if not PROJECT_ID_PATTERN.fullmatch(self.project_id):
+            raise ValueError("project_id contains unsupported characters")
+        if not self._is_within_projects_root():
+            raise ValueError("project_id resolves outside projects_root")
 
     @property
     def project_dir(self) -> Path:
@@ -141,3 +148,12 @@ class ProjectWorkspace:
         dst = self.input_dir / f"source{suffix}"
         shutil.copy2(src, dst)
         return dst
+
+    def _is_within_projects_root(self) -> bool:
+        root = self.projects_root.resolve(strict=False)
+        target = (self.projects_root / self.project_id).resolve(strict=False)
+        try:
+            target.relative_to(root)
+            return True
+        except ValueError:
+            return False
