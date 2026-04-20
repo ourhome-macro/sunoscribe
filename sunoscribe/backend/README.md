@@ -27,34 +27,51 @@
 
 - `tests/test_pitch_pipeline.py`
 
-## Auth & Users 模块（初始化）
+## 后端 API 进展
 
-已新增 FastAPI + SQLAlchemy 的认证与用户接口基础实现：
+已实现（可在 `http://localhost:8000/docs` 查看）：
 
-- `POST /api/auth/register`
-- `POST /api/auth/login`
-- `POST /api/auth/logout`
-- `POST /api/auth/refresh`
-- `GET /api/users/me`
-- `PUT /api/users/me`
-- `GET /api/users/me/settings`
-- `PUT /api/users/me/settings`
+- Auth: `register/login/logout/refresh/forgot-password/reset-password`
+- Users: `GET/PUT /api/users/me`、`GET/PUT /api/users/me/settings`
+- Projects: `POST/GET /api/projects`、`GET/PUT/DELETE /api/projects/{id}`
+- Upload: `POST /api/upload/audio`、`POST /api/upload/video`（格式限制 + 100MB）
+- Score: `GET/POST /api/projects/{id}/score`、`PUT /api/scores/{id}`、`GET /api/scores/{id}/export`
+- Lyrics: `GET /api/projects/{id}/lyrics`、`PUT /api/lyrics/{id}`
+- Tasks: `GET /api/tasks/{id}`
 
-核心文件：
+数据模型：
 
-- `app/main.py`
-- `app/api/auth.py`
-- `app/api/users.py`
-- `app/services/auth_service.py`
-- `app/services/user_service.py`
-- `app/utils/security.py`
-- `app/utils/dependencies.py`
-- `app/models/user.py`
-- `app/models/user_settings.py`
+- `users`
+- `user_settings`
+- `projects`
+- `scores`
+- `lyrics`
+- `token_revocations`（鉴权吊销）
+
+## 数据库迁移（Alembic）
+
+初始化后可用以下命令：
+
+1. 生成迁移（可选）：`alembic revision --autogenerate -m "msg"`
+2. 应用迁移：`alembic upgrade head`
+3. 回滚一步：`alembic downgrade -1`
+
+当前已包含初始迁移脚本：`alembic/versions/20260420_0001_initial_schema.py`
 
 ## 本地启动
 
 1. 安装依赖：`pip install -r requirements.txt`
-2. 配置 `.env` 中 `DATABASE_URL`（推荐 PostgreSQL）
-3. 启动：`uvicorn app.main:app --reload`
-4. Swagger：`http://localhost:8000/docs`
+2. 配置 `.env`（推荐 PostgreSQL + Redis）：
+   - `DATABASE_URL=postgresql+psycopg://...`
+   - `REDIS_URL=redis://127.0.0.1:6379/0`
+   - `UPLOADS_ROOT=data/uploads`
+   - `UPLOAD_BACKEND=minio`（或 `local`）
+   - `MINIO_ENDPOINT=127.0.0.1:9000`
+   - `MINIO_ACCESS_KEY=minioadmin`
+   - `MINIO_SECRET_KEY=minioadmin`
+   - `MINIO_BUCKET=sunoscribe`
+   - `MINIO_SECURE=false`
+   - `MINIO_BASE_PATH=uploads`
+3. 执行迁移：`alembic upgrade head`
+4. 启动：`uvicorn app.main:app --reload`
+5. Swagger：`http://localhost:8000/docs`

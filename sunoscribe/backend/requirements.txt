@@ -7,6 +7,10 @@ pydantic-settings>=2.3,<3.0
 python-jose[cryptography]>=3.3,<4.0
 passlib[bcrypt]>=1.7,<2.0
 email-validator>=2.2,<3.0
+redis>=5.0,<6.0
+minio>=7.2,<8.0
+python-multipart>=0.0.9,<1.0
+alembic>=1.13,<2.0
 
 librosa>=0.10,<1.0
 numpy>=1.24,<3.0

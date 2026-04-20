@@ -1,0 +1,268 @@
+import asyncio
+import uuid
+from pathlib import Path
+from typing import Any
+
+from fastapi import UploadFile
+
+from app.utils.errors import FileTooLargeError, UnsupportedFormatError, ValidationAppError
+
+ALLOWED_AUDIO_EXTENSIONS = {"mp3", "wav", "flac", "aac", "ogg", "m4a"}
+ALLOWED_VIDEO_EXTENSIONS = {"mp4", "mkv", "avi", "mov", "webm"}
+MAX_UPLOAD_BYTES = 100 * 1024 * 1024
+
+
+def parse_uuid(value: str, field_name: str) -> uuid.UUID:
+    try:
+        return uuid.UUID(str(value))
+    except (TypeError, ValueError) as exc:
+        raise ValidationAppError(f"{field_name} 不是合法 UUID") from exc
+
+
+def normalize_upload_backend(upload_backend: str) -> str:
+    normalized = str(upload_backend or "").strip().lower()
+    if normalized not in {"local", "minio"}:
+        raise ValidationAppError("upload_backend 必须是 local 或 minio")
+    return normalized
+
+
+def validate_extension(filename: str, media_kind: str) -> str:
+    suffix = Path(filename or "").suffix.lower().lstrip(".")
+    if not suffix:
+        raise UnsupportedFormatError("文件缺少扩展名")
+
+    allowed = ALLOWED_AUDIO_EXTENSIONS if media_kind == "audio" else ALLOWED_VIDEO_EXTENSIONS
+    if suffix not in allowed:
+        raise UnsupportedFormatError(f"不支持的{media_kind}格式: .{suffix}")
+
+    return suffix
+
+
+def build_upload_target_path(
+    *,
+    uploads_root: Path,
+    user_id: uuid.UUID,
+    project_id: uuid.UUID,
+    original_filename: str,
+) -> Path:
+    safe_name = Path(original_filename or "upload.bin").name
+    return uploads_root / str(user_id) / str(project_id) / safe_name
+
+
+def build_upload_object_key(
+    *,
+    user_id: uuid.UUID,
+    project_id: uuid.UUID,
+    original_filename: str,
+    base_path: str,
+) -> str:
+    safe_name = Path(original_filename or "upload.bin").name
+    prefix = str(base_path or "").strip().strip("/")
+    leaf = f"{user_id}/{project_id}/{safe_name}"
+    return f"{prefix}/{leaf}" if prefix else leaf
+
+
+async def save_upload_file(
+    *,
+    upload: UploadFile,
+    media_kind: str,
+    uploads_root: Path,
+    user_id: uuid.UUID,
+    project_id: uuid.UUID,
+    upload_backend: str = "local",
+    minio_endpoint: str | None = None,
+    minio_access_key: str | None = None,
+    minio_secret_key: str | None = None,
+    minio_bucket: str | None = None,
+    minio_secure: bool = False,
+    minio_region: str | None = None,
+    minio_base_path: str = "uploads",
+) -> tuple[str, int]:
+    validate_extension(upload.filename or "", media_kind)
+    backend = normalize_upload_backend(upload_backend)
+
+    if backend == "local":
+        return await _save_upload_file_local(
+            upload=upload,
+            uploads_root=uploads_root,
+            user_id=user_id,
+            project_id=project_id,
+        )
+
+    return await _save_upload_file_minio(
+        upload=upload,
+        uploads_root=uploads_root,
+        user_id=user_id,
+        project_id=project_id,
+        minio_endpoint=minio_endpoint,
+        minio_access_key=minio_access_key,
+        minio_secret_key=minio_secret_key,
+        minio_bucket=minio_bucket,
+        minio_secure=minio_secure,
+        minio_region=minio_region,
+        minio_base_path=minio_base_path,
+    )
+
+
+async def _save_upload_file_local(
+    *,
+    upload: UploadFile,
+    uploads_root: Path,
+    user_id: uuid.UUID,
+    project_id: uuid.UUID,
+) -> tuple[str, int]:
+    target = build_upload_target_path(
+        uploads_root=uploads_root,
+        user_id=user_id,
+        project_id=project_id,
+        original_filename=upload.filename or "upload.bin",
+    )
+    target.parent.mkdir(parents=True, exist_ok=True)
+
+    size = 0
+    with target.open("wb") as out:
+        while True:
+            chunk = await upload.read(1024 * 1024)
+            if not chunk:
+                break
+            size += len(chunk)
+            if size > MAX_UPLOAD_BYTES:
+                out.close()
+                try:
+                    target.unlink(missing_ok=True)
+                except OSError:
+                    pass
+                await upload.close()
+                raise FileTooLargeError("文件大小超过 100MB 限制")
+            out.write(chunk)
+
+    await upload.close()
+    return str(target), size
+
+
+async def _save_upload_file_minio(
+    *,
+    upload: UploadFile,
+    uploads_root: Path,
+    user_id: uuid.UUID,
+    project_id: uuid.UUID,
+    minio_endpoint: str | None,
+    minio_access_key: str | None,
+    minio_secret_key: str | None,
+    minio_bucket: str | None,
+    minio_secure: bool,
+    minio_region: str | None,
+    minio_base_path: str,
+) -> tuple[str, int]:
+    _validate_minio_config(
+        endpoint=minio_endpoint,
+        access_key=minio_access_key,
+        secret_key=minio_secret_key,
+        bucket=minio_bucket,
+    )
+    object_key = build_upload_object_key(
+        user_id=user_id,
+        project_id=project_id,
+        original_filename=upload.filename or "upload.bin",
+        base_path=minio_base_path,
+    )
+
+    temp_dir = uploads_root / ".upload_tmp"
+    temp_dir.mkdir(parents=True, exist_ok=True)
+    temp_path = temp_dir / f"{uuid.uuid4().hex}.bin"
+
+    size = 0
+    try:
+        size = await _read_upload_to_temp_file(upload=upload, temp_path=temp_path)
+        await asyncio.to_thread(
+            _put_file_to_minio,
+            temp_path,
+            size,
+            upload.content_type or "application/octet-stream",
+            minio_endpoint or "",
+            minio_access_key or "",
+            minio_secret_key or "",
+            minio_bucket or "",
+            minio_secure,
+            minio_region,
+            object_key,
+        )
+    finally:
+        try:
+            temp_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+    return f"s3://{minio_bucket}/{object_key}", size
+
+
+async def _read_upload_to_temp_file(*, upload: UploadFile, temp_path: Path) -> int:
+    size = 0
+    with temp_path.open("wb") as out:
+        while True:
+            chunk = await upload.read(1024 * 1024)
+            if not chunk:
+                break
+            size += len(chunk)
+            if size > MAX_UPLOAD_BYTES:
+                out.close()
+                try:
+                    temp_path.unlink(missing_ok=True)
+                except OSError:
+                    pass
+                await upload.close()
+                raise FileTooLargeError("文件大小超过 100MB 限制")
+            out.write(chunk)
+    await upload.close()
+    return size
+
+
+def _put_file_to_minio(
+    temp_path: Path,
+    size: int,
+    content_type: str,
+    minio_endpoint: str,
+    minio_access_key: str,
+    minio_secret_key: str,
+    minio_bucket: str,
+    minio_secure: bool,
+    minio_region: str | None,
+    object_key: str,
+) -> None:
+    try:
+        from minio import Minio
+    except Exception as exc:
+        raise ValidationAppError("未安装 minio 依赖，请先安装 minio 包") from exc
+
+    client_kwargs: dict[str, Any] = {
+        "endpoint": minio_endpoint,
+        "access_key": minio_access_key,
+        "secret_key": minio_secret_key,
+        "secure": bool(minio_secure),
+    }
+    if minio_region:
+        client_kwargs["region"] = minio_region
+    client = Minio(**client_kwargs)
+
+    if not client.bucket_exists(minio_bucket):
+        client.make_bucket(minio_bucket)
+
+    with temp_path.open("rb") as data:
+        client.put_object(
+            bucket_name=minio_bucket,
+            object_name=object_key,
+            data=data,
+            length=size,
+            content_type=content_type,
+        )
+
+
+def _validate_minio_config(*, endpoint: str | None, access_key: str | None, secret_key: str | None, bucket: str | None) -> None:
+    if not endpoint:
+        raise ValidationAppError("缺少 MinIO 配置: minio_endpoint")
+    if not access_key:
+        raise ValidationAppError("缺少 MinIO 配置: minio_access_key")
+    if not secret_key:
+        raise ValidationAppError("缺少 MinIO 配置: minio_secret_key")
+    if not bucket:
+        raise ValidationAppError("缺少 MinIO 配置: minio_bucket")

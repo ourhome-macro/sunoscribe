@@ -68,3 +68,7 @@ node_modules/
 *.wav
 *.mid
 *.json
+
+# Keep backend SQLAlchemy models tracked (parent .gitignore has broad `models/` ignore).
+!backend/app/models/
+!backend/app/models/*.py

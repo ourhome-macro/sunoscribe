@@ -21,3 +21,11 @@ class AuthorizationError(AppError):
 
 class NotFoundError(AppError):
     code = "NOT_FOUND"
+
+
+class FileTooLargeError(AppError):
+    code = "FILE_TOO_LARGE"
+
+
+class UnsupportedFormatError(AppError):
+    code = "UNSUPPORTED_FORMAT"

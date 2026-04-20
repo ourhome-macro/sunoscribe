@@ -58,6 +58,9 @@ class TestAuthTokenRotation(unittest.TestCase):
         ), patch(
             "app.services.auth_service.create_refresh_token",
             return_value="new-refresh-token",
+        ), patch(
+            "app.services.auth_service.is_token_revoked",
+            return_value=False,
         ):
             data = refresh_access_token(db, "dummy-refresh-token")
 
@@ -81,6 +84,9 @@ class TestAuthTokenRotation(unittest.TestCase):
         ), patch(
             "app.services.auth_service.create_refresh_token",
             return_value="refresh-token",
+        ), patch(
+            "app.services.auth_service.is_token_revoked",
+            return_value=False,
         ):
             refresh_access_token(db, "dummy-refresh-token")
             with self.assertRaises(AuthenticationError):
@@ -89,18 +95,51 @@ class TestAuthTokenRotation(unittest.TestCase):
     def test_logout_is_idempotent_for_same_refresh_token(self) -> None:
         user_id = uuid.uuid4()
         db = _FakeSession(user_id)
-        payload = {
+        access_payload = {
+            "type": "access",
+            "sub": str(user_id),
+            "jti": "access-jti-logout",
+            "exp": (datetime.now(timezone.utc) + timedelta(minutes=30)).timestamp(),
+        }
+        refresh_payload = {
             "type": "refresh",
             "sub": str(user_id),
             "jti": "refresh-jti-logout",
             "exp": (datetime.now(timezone.utc) + timedelta(hours=1)).timestamp(),
         }
 
-        with patch("app.services.auth_service.decode_token", return_value=payload):
-            logout(db, "dummy-refresh-token")
-            logout(db, "dummy-refresh-token")
+        with patch(
+            "app.services.auth_service.decode_token",
+            side_effect=[access_payload, refresh_payload, access_payload, refresh_payload],
+        ):
+            logout(db, "dummy-access-token", "dummy-refresh-token")
+            logout(db, "dummy-access-token", "dummy-refresh-token")
 
+        self.assertIn("access-jti-logout", db.revoked_jti)
         self.assertIn("refresh-jti-logout", db.revoked_jti)
+
+    def test_logout_rejects_wrong_refresh_token_type(self) -> None:
+        user_id = uuid.uuid4()
+        db = _FakeSession(user_id)
+        access_payload = {
+            "type": "access",
+            "sub": str(user_id),
+            "jti": "access-jti-2",
+            "exp": (datetime.now(timezone.utc) + timedelta(minutes=30)).timestamp(),
+        }
+        invalid_refresh_payload = {
+            "type": "access",
+            "sub": str(user_id),
+            "jti": "not-refresh-jti",
+            "exp": (datetime.now(timezone.utc) + timedelta(hours=1)).timestamp(),
+        }
+
+        with patch(
+            "app.services.auth_service.decode_token",
+            side_effect=[access_payload, invalid_refresh_payload],
+        ):
+            with self.assertRaises(AuthenticationError):
+                logout(db, "dummy-access-token", "dummy-refresh-token")
 
 
 if __name__ == "__main__":
