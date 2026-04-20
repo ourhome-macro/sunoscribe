@@ -1,7 +1,10 @@
 import json
+import re
 import uuid
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
+from xml.etree import ElementTree as ET
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -11,10 +14,48 @@ from app.models.lyrics import Lyrics
 from app.models.project import Project
 from app.models.score import Score
 from app.models.user import User
+from app.modules.pitch import MidiExporter
+from app.services.workspace import ProjectWorkspace
 from app.utils.errors import NotFoundError, ValidationAppError
 
 
 ALLOWED_EXPORT_FORMATS = {"midi", "pdf", "musicxml"}
+_DIVISIONS = 480
+_PITCH_PATTERN = re.compile(r"^([A-Ga-g])([#b]?)(-?\d+)$")
+_MAJOR_FIFTHS = {
+    "C": 0,
+    "G": 1,
+    "D": 2,
+    "A": 3,
+    "E": 4,
+    "B": 5,
+    "F#": 6,
+    "C#": 7,
+    "F": -1,
+    "Bb": -2,
+    "Eb": -3,
+    "Ab": -4,
+    "Db": -5,
+    "Gb": -6,
+    "Cb": -7,
+}
+_MINOR_FIFTHS = {
+    "A": 0,
+    "E": 1,
+    "B": 2,
+    "F#": 3,
+    "C#": 4,
+    "G#": 5,
+    "D#": 6,
+    "A#": 7,
+    "D": -1,
+    "G": -2,
+    "C": -3,
+    "F": -4,
+    "Bb": -5,
+    "Eb": -6,
+    "Ab": -7,
+}
 
 
 def get_score_by_project_id(db: Session, *, user: User, project_id: str) -> Score:
@@ -131,18 +172,14 @@ def export_score(
     score = get_score_by_id(db, user=user, score_id=score_id)
 
     if fmt == "midi":
-        payload = score.score_data.get("midi_bytes")
-        if isinstance(payload, str):
-            content = payload.encode("utf-8")
-        else:
-            content = json.dumps(score.score_data, ensure_ascii=False).encode("utf-8")
+        content = _export_midi_bytes(score)
         return content, "audio/midi", f"score_{score.id}.mid"
 
     if fmt == "pdf":
-        content = json.dumps(score.score_data, ensure_ascii=False, indent=2).encode("utf-8")
+        content = _export_pdf_bytes(score)
         return content, "application/pdf", f"score_{score.id}.pdf"
 
-    content = json.dumps(score.score_data, ensure_ascii=False, indent=2).encode("utf-8")
+    content = _export_musicxml_bytes(score)
     return content, "application/vnd.recordare.musicxml+xml", f"score_{score.id}.musicxml"
 
 
@@ -164,3 +201,351 @@ def _parse_uuid(raw: str, field_name: str) -> uuid.UUID:
         return uuid.UUID(str(raw))
     except (TypeError, ValueError) as exc:
         raise ValidationAppError(f"{field_name} 不是合法 UUID") from exc
+
+
+def _export_midi_bytes(score: Score) -> bytes:
+    existing_path = _find_existing_midi_path(score)
+    if existing_path is not None:
+        return existing_path.read_bytes()
+
+    generated = _build_midi_from_score_data(score.score_data)
+    if generated is not None:
+        return generated
+
+    raise ValidationAppError("当前谱子没有可导出的 MIDI 产物")
+
+
+def _find_existing_midi_path(score: Score) -> Path | None:
+    return _find_existing_export_path(
+        score,
+        score_data_keys=("midi_path", "final_midi_path", "raw_pitch_midi_path", "export_midi_path"),
+        default_workspace_files=("final_score.mid", "raw_pitch.mid"),
+    )
+
+
+def _export_musicxml_bytes(score: Score) -> bytes:
+    existing_path = _find_existing_export_path(
+        score,
+        score_data_keys=("musicxml_path", "export_musicxml_path", "xml_path"),
+        default_workspace_files=("final_score.musicxml", "final_score.xml"),
+    )
+    if existing_path is not None:
+        return existing_path.read_bytes()
+
+    generated = _build_musicxml_from_score_data(score.score_data)
+    if generated is not None:
+        return generated
+
+    raise ValidationAppError("当前谱子没有可导出的 MusicXML 产物")
+
+
+def _export_pdf_bytes(score: Score) -> bytes:
+    existing_path = _find_existing_export_path(
+        score,
+        score_data_keys=("pdf_path", "export_pdf_path"),
+        default_workspace_files=("final_score.pdf",),
+    )
+    if existing_path is not None:
+        return existing_path.read_bytes()
+
+    return _build_summary_pdf(score)
+
+
+def _build_midi_from_score_data(score_data: dict[str, Any] | None) -> bytes | None:
+    if not isinstance(score_data, dict):
+        return None
+
+    measures = score_data.get("measures")
+    if not isinstance(measures, list) or not measures:
+        return None
+
+    bpm_raw = score_data.get("bpm")
+    if bpm_raw is None and isinstance(score_data.get("meta"), dict):
+        bpm_raw = score_data["meta"].get("bpm")
+
+    try:
+        bpm = float(bpm_raw)
+    except (TypeError, ValueError):
+        return None
+
+    if bpm <= 0:
+        return None
+
+    try:
+        exporter = MidiExporter()
+        return exporter.export_from_measures(measures=measures, bpm=bpm)
+    except Exception:
+        return None
+
+
+def _find_existing_export_path(
+    score: Score,
+    *,
+    score_data_keys: tuple[str, ...],
+    default_workspace_files: tuple[str, ...],
+) -> Path | None:
+    candidates: list[Path] = []
+    score_data = score.score_data if isinstance(score.score_data, dict) else {}
+
+    for key in score_data_keys:
+        raw = score_data.get(key)
+        if isinstance(raw, str) and raw.strip():
+            candidates.append(Path(raw.strip()))
+
+    try:
+        workspace = ProjectWorkspace(project_id=str(score.project_id))
+        for filename in default_workspace_files:
+            candidates.append(workspace.exports_dir / filename)
+        # Keep backward compatibility for historical pitch output.
+        candidates.extend([workspace.final_midi_path, workspace.raw_pitch_midi_path])
+    except Exception:
+        pass
+
+    for path in candidates:
+        if path.exists() and path.is_file():
+            return path
+    return None
+
+
+def _build_musicxml_from_score_data(score_data: dict[str, Any] | None) -> bytes | None:
+    if not isinstance(score_data, dict):
+        return None
+
+    measures = score_data.get("measures")
+    if not isinstance(measures, list) or not measures:
+        return None
+
+    bpm = _extract_bpm(score_data)
+    time_signature = _extract_time_signature(score_data)
+    fifths = _extract_key_fifths(score_data)
+
+    root = ET.Element("score-partwise", version="3.1")
+    part_list = ET.SubElement(root, "part-list")
+    score_part = ET.SubElement(part_list, "score-part", id="P1")
+    ET.SubElement(score_part, "part-name").text = "Voice"
+    part = ET.SubElement(root, "part", id="P1")
+
+    has_any_note = False
+    for idx, measure in enumerate(measures, start=1):
+        if not isinstance(measure, dict):
+            continue
+        measure_num = str(measure.get("measure_num") or idx)
+        m = ET.SubElement(part, "measure", number=measure_num)
+
+        if idx == 1:
+            attrs = ET.SubElement(m, "attributes")
+            ET.SubElement(attrs, "divisions").text = str(_DIVISIONS)
+            key = ET.SubElement(attrs, "key")
+            ET.SubElement(key, "fifths").text = str(fifths)
+            time = ET.SubElement(attrs, "time")
+            ET.SubElement(time, "beats").text = str(time_signature[0])
+            ET.SubElement(time, "beat-type").text = str(time_signature[1])
+            clef = ET.SubElement(attrs, "clef")
+            ET.SubElement(clef, "sign").text = "G"
+            ET.SubElement(clef, "line").text = "2"
+            if bpm and bpm > 0:
+                ET.SubElement(m, "sound", tempo=str(round(float(bpm), 3)))
+
+        note_list = measure.get("notes")
+        if not isinstance(note_list, list):
+            continue
+
+        for note in note_list:
+            if not isinstance(note, dict):
+                continue
+
+            pitch_info = _parse_pitch(note.get("pitch"))
+            duration_beats = _safe_float(note.get("duration_beats"), fallback=1.0)
+            duration_value = max(1, int(round(duration_beats * _DIVISIONS)))
+
+            n = ET.SubElement(m, "note")
+            if pitch_info is None:
+                ET.SubElement(n, "rest")
+            else:
+                step, alter, octave = pitch_info
+                pitch = ET.SubElement(n, "pitch")
+                ET.SubElement(pitch, "step").text = step
+                if alter != 0:
+                    ET.SubElement(pitch, "alter").text = str(alter)
+                ET.SubElement(pitch, "octave").text = str(octave)
+                has_any_note = True
+
+            ET.SubElement(n, "duration").text = str(duration_value)
+            ET.SubElement(n, "voice").text = "1"
+            ET.SubElement(n, "type").text = _map_note_type(note.get("note_type"), duration_beats)
+
+            lyric = note.get("lyric")
+            if isinstance(lyric, str) and lyric.strip():
+                lyric_tag = ET.SubElement(n, "lyric")
+                ET.SubElement(lyric_tag, "text").text = lyric.strip()
+
+    if not has_any_note:
+        return None
+
+    xml_body = ET.tostring(root, encoding="utf-8", xml_declaration=True)
+    return xml_body
+
+
+def _extract_bpm(score_data: dict[str, Any]) -> float | None:
+    bpm_raw = score_data.get("bpm")
+    if bpm_raw is None and isinstance(score_data.get("meta"), dict):
+        bpm_raw = score_data["meta"].get("bpm")
+    try:
+        bpm = float(bpm_raw)
+    except (TypeError, ValueError):
+        return None
+    return bpm if bpm > 0 else None
+
+
+def _extract_time_signature(score_data: dict[str, Any]) -> tuple[int, int]:
+    raw = score_data.get("time_signature")
+    if raw is None and isinstance(score_data.get("meta"), dict):
+        raw = score_data["meta"].get("time_signature")
+    text = str(raw or "4/4")
+    if "/" in text:
+        left, right = text.split("/", 1)
+        try:
+            beats = max(1, int(left))
+            beat_type = max(1, int(right))
+            return beats, beat_type
+        except ValueError:
+            return 4, 4
+    return 4, 4
+
+
+def _extract_key_fifths(score_data: dict[str, Any]) -> int:
+    raw = score_data.get("key")
+    if raw is None and isinstance(score_data.get("meta"), dict):
+        raw = score_data["meta"].get("key")
+    text = str(raw or "C Major").strip()
+    if " " in text:
+        tonic, mode = text.split(" ", 1)
+    else:
+        tonic, mode = text, "Major"
+    tonic = tonic.replace("♯", "#").replace("♭", "b")
+    mode_norm = mode.strip().lower()
+    if mode_norm.startswith("min"):
+        return _MINOR_FIFTHS.get(tonic, 0)
+    return _MAJOR_FIFTHS.get(tonic, 0)
+
+
+def _parse_pitch(raw_pitch: Any) -> tuple[str, int, int] | None:
+    if not isinstance(raw_pitch, str):
+        return None
+    m = _PITCH_PATTERN.match(raw_pitch.strip())
+    if not m:
+        return None
+    step = m.group(1).upper()
+    accidental = m.group(2)
+    octave = int(m.group(3))
+    alter = 1 if accidental == "#" else (-1 if accidental == "b" else 0)
+    return step, alter, octave
+
+
+def _map_note_type(note_type_raw: Any, duration_beats: float) -> str:
+    if isinstance(note_type_raw, str):
+        normalized = note_type_raw.strip().lower()
+        mapping = {
+            "whole": "whole",
+            "half": "half",
+            "quarter": "quarter",
+            "eighth": "eighth",
+            "sixteenth": "16th",
+            "thirty_second": "32nd",
+            "dotted_quarter": "quarter",
+            "dotted_eighth": "eighth",
+            "triplet": "eighth",
+        }
+        if normalized in mapping:
+            return mapping[normalized]
+
+    if duration_beats >= 3.5:
+        return "whole"
+    if duration_beats >= 1.75:
+        return "half"
+    if duration_beats >= 0.75:
+        return "quarter"
+    if duration_beats >= 0.375:
+        return "eighth"
+    if duration_beats >= 0.1875:
+        return "16th"
+    return "32nd"
+
+
+def _safe_float(value: Any, *, fallback: float) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return fallback
+
+
+def _build_summary_pdf(score: Score) -> bytes:
+    score_data = score.score_data if isinstance(score.score_data, dict) else {}
+    meta = score_data.get("meta") if isinstance(score_data.get("meta"), dict) else {}
+    measures = score_data.get("measures") if isinstance(score_data.get("measures"), list) else []
+    notes_count = 0
+    for measure in measures:
+        if isinstance(measure, dict) and isinstance(measure.get("notes"), list):
+            notes_count += len(measure["notes"])
+
+    lines = [
+        "SunoScribe Score Export",
+        f"Score ID: {score.id}",
+        f"Project ID: {score.project_id}",
+        f"Key: {meta.get('key', score.key)}",
+        f"BPM: {meta.get('bpm', score_data.get('bpm', 'N/A'))}",
+        f"Measures: {len(measures)}",
+        f"Notes: {notes_count}",
+    ]
+    return _build_text_pdf(lines)
+
+
+def _build_text_pdf(lines: list[str]) -> bytes:
+    def esc(text: str) -> str:
+        return text.replace("\\", "\\\\").replace("(", "\\(").replace(")", "\\)")
+
+    y = 800
+    parts = ["BT", "/F1 12 Tf"]
+    for idx, line in enumerate(lines):
+        if idx == 0:
+            parts.append(f"50 {y} Td")
+        else:
+            parts.append("0 -18 Td")
+        parts.append(f"({esc(str(line))}) Tj")
+    parts.append("ET")
+    content = "\n".join(parts).encode("latin-1", errors="replace")
+
+    objects: list[bytes] = []
+    objects.append(b"<< /Type /Catalog /Pages 2 0 R >>")
+    objects.append(b"<< /Type /Pages /Count 1 /Kids [3 0 R] >>")
+    objects.append(
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] "
+        b"/Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>"
+    )
+    objects.append(b"<< /Length " + str(len(content)).encode("ascii") + b" >>\nstream\n" + content + b"\nendstream")
+    objects.append(b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>")
+
+    output = bytearray(b"%PDF-1.4\n")
+    offsets = [0]
+    for idx, obj in enumerate(objects, start=1):
+        offsets.append(len(output))
+        output.extend(f"{idx} 0 obj\n".encode("ascii"))
+        output.extend(obj)
+        output.extend(b"\nendobj\n")
+
+    xref_start = len(output)
+    output.extend(f"xref\n0 {len(objects) + 1}\n".encode("ascii"))
+    output.extend(b"0000000000 65535 f \n")
+    for off in offsets[1:]:
+        output.extend(f"{off:010d} 00000 n \n".encode("ascii"))
+
+    output.extend(
+        (
+            "trailer\n"
+            f"<< /Size {len(objects) + 1} /Root 1 0 R >>\n"
+            "startxref\n"
+            f"{xref_start}\n"
+            "%%EOF\n"
+        ).encode("ascii")
+    )
+    return bytes(output)
