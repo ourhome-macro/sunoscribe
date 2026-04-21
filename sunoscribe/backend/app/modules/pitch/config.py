@@ -48,9 +48,22 @@ class PitchDetectionConfig:
     # Analysis settings
     bpm_start_bpm: float = 120.0
     bpm_refine_enabled: bool = True
-    bpm_refine_ioi_weight: float = 0.8
-    bpm_refine_raw_weight: float = 0.2
+    bpm_refine_ioi_weight: float = 0.85
+    bpm_refine_raw_weight: float = 0.15
     bpm_refine_trim_percent: float = 10.0
+    bpm_refine_min_beats: int = 4
+    bpm_refine_min_intervals: int = 3
+    bpm_refine_min_intervals_for_trim: int = 12
+    bpm_refine_stability_mad_good: float = 0.08
+    bpm_refine_stability_mad_bad: float = 0.18
+    bpm_refine_disagreement_soft: float = 0.10
+    bpm_refine_disagreement_hard: float = 0.35
+    bpm_refine_min_coverage: float = 0.25
+    bpm_candidate_min: float = 35.0
+    bpm_candidate_max: float = 260.0
+    bpm_preferred_min: float = 60.0
+    bpm_preferred_max: float = 200.0
+    bpm_window_size_intervals: int = 4
     key_min_confidence: float = 0.10
     key_backend: str = "librosa"  # "librosa" / "music21" / "auto"
     key_enable_music21_fallback: bool = True

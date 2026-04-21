@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import librosa
+import numpy as np
 
 from .beat_tracker import BeatTracker
 from .config import PitchDetectionConfig
@@ -204,6 +205,23 @@ class PitchPipeline:
             analysis_info={
                 "stage": "p1_downbeat",
                 "has_accompaniment": has_accompaniment,
+                "bpm_raw": float(getattr(beat_result, "raw_bpm"))
+                if getattr(beat_result, "raw_bpm", None) is not None
+                else None,
+                "bpm_ioi": float(getattr(beat_result, "ioi_bpm"))
+                if getattr(beat_result, "ioi_bpm", None) is not None
+                else None,
+                "bpm_final": float(beat_result.bpm),
+                "bpm_refine_used": bool(getattr(beat_result, "used_refine", False)),
+                "bpm_candidates": [round(float(v), 4) for v in getattr(beat_result, "candidate_bpms", [])],
+                "bpm_confidence": round(float(beat_result.confidence), 4),
+                "bpm_ioi_stability": round(float(getattr(beat_result, "ioi_stability")), 4)
+                if getattr(beat_result, "ioi_stability", None) is not None
+                else None,
+                "bpm_local_window_count": len(getattr(beat_result, "local_bpms", [])),
+                "bpm_local_window_std": round(float(np.std(getattr(beat_result, "local_bpms", []))), 4)
+                if len(getattr(beat_result, "local_bpms", [])) >= 2
+                else 0.0,
                 "downbeat_method": downbeat_result.method,
                 "downbeat_confidence": round(downbeat_result.confidence, 4),
                 "downbeat_count": len(downbeat_result.downbeat_times),
