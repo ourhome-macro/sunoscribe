@@ -102,49 +102,133 @@ class PitchDetector:
     def _detect_with_crepe(self, audio_file: Path, *, duration_sec: float) -> List[Note]:
         try:
             import crepe
-        except Exception as exc:
-            raise PitchModelUnavailableError(
-                "CREPE backend is unavailable. Install package `crepe` to enable pitch inference."
-            ) from exc
-
-        try:
-            audio, sr = librosa.load(str(audio_file), sr=int(self.config.sample_rate), mono=True)
-        except Exception as exc:
-            raise PitchDetectionFailedError(f"failed to load audio for CREPE: {exc}") from exc
-
-        if audio.size == 0:
-            return []
+            backend = "crepe"
+        except Exception:
+            crepe = None
+            backend = "torchcrepe"
 
         step_size = max(1, int(self.config.crepe_step_size_ms))
         model_capacity = str(self.config.crepe_model_capacity or "full").strip().lower()
+        chunk_size_sec = max(1.0, float(getattr(self.config, "chunk_size_sec", 30.0)))
+        overlap_sec = max(
+            0.05,
+            float(step_size) / 1000.0 * 2.0,
+            float(self.config.crepe_min_note_duration_sec),
+            float(self.config.crepe_max_unvoiced_gap_sec) * 2.0,
+        )
 
-        try:
-            times, frequencies, confidences, _ = crepe.predict(
-                audio,
-                sr,
-                viterbi=True,
-                step_size=step_size,
-                model_capacity=model_capacity,
-                verbose=0,
-            )
-        except TypeError:
-            # Keep compatibility with older crepe versions without `verbose` argument.
+        # Short inputs keep legacy one-shot path to minimize overhead.
+        if duration_sec <= (chunk_size_sec + overlap_sec):
             try:
-                times, frequencies, confidences, _ = crepe.predict(
-                    audio,
-                    sr,
-                    viterbi=True,
-                    step_size=step_size,
+                audio, sr = librosa.load(str(audio_file), sr=int(self.config.sample_rate), mono=True)
+            except Exception as exc:
+                raise PitchDetectionFailedError(f"failed to load audio for CREPE: {exc}") from exc
+
+            if audio.size == 0:
+                return []
+
+            try:
+                times, frequencies, confidences = self._predict_crepe_frames(
+                    audio=audio,
+                    sample_rate=sr,
+                    backend=backend,
+                    crepe_module=crepe,
                     model_capacity=model_capacity,
+                    step_size_ms=step_size,
                 )
+            except PitchModelUnavailableError:
+                raise
             except Exception as exc:
                 raise PitchDetectionFailedError(f"CREPE inference failed: {exc}") from exc
-        except Exception as exc:
-            raise PitchDetectionFailedError(f"CREPE inference failed: {exc}") from exc
 
-        time_arr = np.asarray(times, dtype=float).reshape(-1)
-        freq_arr = np.asarray(frequencies, dtype=float).reshape(-1)
-        conf_arr = np.asarray(confidences, dtype=float).reshape(-1)
+            time_arr = np.asarray(times, dtype=float).reshape(-1)
+            freq_arr = np.asarray(frequencies, dtype=float).reshape(-1)
+            conf_arr = np.asarray(confidences, dtype=float).reshape(-1)
+        else:
+            time_chunks: list[np.ndarray] = []
+            freq_chunks: list[np.ndarray] = []
+            conf_chunks: list[np.ndarray] = []
+
+            cursor = 0.0
+            sample_rate = int(self.config.sample_rate)
+
+            while cursor < (duration_sec - 1e-6):
+                core_start = float(cursor)
+                core_end = float(min(duration_sec, core_start + chunk_size_sec))
+                load_start = float(max(0.0, core_start - overlap_sec))
+                load_end = float(min(duration_sec, core_end + overlap_sec))
+
+                try:
+                    audio, sr = librosa.load(
+                        str(audio_file),
+                        sr=sample_rate,
+                        mono=True,
+                        offset=load_start,
+                        duration=max(0.01, load_end - load_start),
+                    )
+                except Exception as exc:
+                    raise PitchDetectionFailedError(f"failed to load audio chunk for CREPE: {exc}") from exc
+
+                if audio.size == 0:
+                    cursor = core_end
+                    continue
+
+                try:
+                    times, frequencies, confidences = self._predict_crepe_frames(
+                        audio=audio,
+                        sample_rate=sr,
+                        backend=backend,
+                        crepe_module=crepe,
+                        model_capacity=model_capacity,
+                        step_size_ms=step_size,
+                    )
+                except PitchModelUnavailableError:
+                    raise
+                except Exception as exc:
+                    raise PitchDetectionFailedError(f"CREPE inference failed: {exc}") from exc
+
+                time_arr_chunk = np.asarray(times, dtype=float).reshape(-1) + load_start
+                freq_arr_chunk = np.asarray(frequencies, dtype=float).reshape(-1)
+                conf_arr_chunk = np.asarray(confidences, dtype=float).reshape(-1)
+                frame_count_chunk = int(min(time_arr_chunk.size, freq_arr_chunk.size, conf_arr_chunk.size))
+                if frame_count_chunk <= 0:
+                    cursor = core_end
+                    continue
+
+                time_arr_chunk = time_arr_chunk[:frame_count_chunk]
+                freq_arr_chunk = freq_arr_chunk[:frame_count_chunk]
+                conf_arr_chunk = conf_arr_chunk[:frame_count_chunk]
+
+                if core_end >= (duration_sec - 1e-6):
+                    keep = (time_arr_chunk >= core_start) & (time_arr_chunk <= core_end + 1e-6)
+                else:
+                    keep = (time_arr_chunk >= core_start) & (time_arr_chunk < core_end)
+
+                if np.any(keep):
+                    time_chunks.append(time_arr_chunk[keep])
+                    freq_chunks.append(freq_arr_chunk[keep])
+                    conf_chunks.append(conf_arr_chunk[keep])
+
+                cursor = core_end
+
+            if not time_chunks:
+                return []
+
+            time_arr = np.concatenate(time_chunks, axis=0)
+            freq_arr = np.concatenate(freq_chunks, axis=0)
+            conf_arr = np.concatenate(conf_chunks, axis=0)
+
+            order = np.argsort(time_arr, kind="mergesort")
+            time_arr = time_arr[order]
+            freq_arr = freq_arr[order]
+            conf_arr = conf_arr[order]
+
+            dedup_mask = np.ones(time_arr.shape[0], dtype=bool)
+            if time_arr.shape[0] > 1:
+                dedup_mask[1:] = np.diff(time_arr) > 1e-7
+            time_arr = time_arr[dedup_mask]
+            freq_arr = freq_arr[dedup_mask]
+            conf_arr = conf_arr[dedup_mask]
 
         frame_count = int(min(time_arr.size, freq_arr.size, conf_arr.size))
         if frame_count <= 0:
@@ -160,6 +244,53 @@ class PitchDetector:
             confidences=conf_arr,
             duration_sec=float(duration_sec),
         )
+
+    def _predict_crepe_frames(
+        self,
+        *,
+        audio: np.ndarray,
+        sample_rate: int,
+        backend: str,
+        crepe_module: object | None,
+        model_capacity: str,
+        step_size_ms: int,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        if backend == "crepe" and crepe_module is not None:
+            try:
+                times, frequencies, confidences, _ = crepe_module.predict(
+                    audio,
+                    sample_rate,
+                    viterbi=True,
+                    step_size=step_size_ms,
+                    model_capacity=model_capacity,
+                    verbose=0,
+                )
+            except TypeError:
+                # Keep compatibility with older crepe versions without `verbose` argument.
+                times, frequencies, confidences, _ = crepe_module.predict(
+                    audio,
+                    sample_rate,
+                    viterbi=True,
+                    step_size=step_size_ms,
+                    model_capacity=model_capacity,
+                )
+            return (
+                np.asarray(times, dtype=float).reshape(-1),
+                np.asarray(frequencies, dtype=float).reshape(-1),
+                np.asarray(confidences, dtype=float).reshape(-1),
+            )
+
+        try:
+            return self._predict_with_torchcrepe(
+                audio=audio,
+                sample_rate=sample_rate,
+                model_capacity=model_capacity,
+                step_size_ms=step_size_ms,
+            )
+        except Exception as exc:
+            raise PitchModelUnavailableError(
+                "CREPE backend is unavailable. Install package `crepe` or `torchcrepe`."
+            ) from exc
 
     def _frames_to_notes(
         self,
@@ -268,6 +399,42 @@ class PitchDetector:
             if diffs.size > 0:
                 return float(np.median(diffs))
         return max(0.001, float(self.config.crepe_step_size_ms) / 1000.0)
+
+    def _predict_with_torchcrepe(
+        self,
+        *,
+        audio: np.ndarray,
+        sample_rate: int,
+        model_capacity: str,
+        step_size_ms: int,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        import torch
+        import torchcrepe
+
+        model = "full" if model_capacity not in {"tiny", "small", "medium", "large", "full"} else model_capacity
+        hop_length = max(1, int(round(sample_rate * (step_size_ms / 1000.0))))
+
+        audio_tensor = torch.from_numpy(audio).float().unsqueeze(0)
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        audio_tensor = audio_tensor.to(device)
+
+        with torch.no_grad():
+            pitch_hz, periodicity = torchcrepe.predict(
+                audio_tensor,
+                sample_rate,
+                hop_length,
+                fmin=32.7,
+                fmax=1975.5,
+                model=model,
+                batch_size=1024,
+                device=device,
+                return_periodicity=True,
+            )
+
+        pitch = pitch_hz.squeeze(0).detach().cpu().numpy().astype(float)
+        confidence = periodicity.squeeze(0).detach().cpu().numpy().astype(float)
+        times = (np.arange(pitch.shape[0], dtype=float) * hop_length) / float(sample_rate)
+        return times, pitch, confidence
 
     @staticmethod
     def _median_filter_nan(values: np.ndarray, *, window: int) -> np.ndarray:

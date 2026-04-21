@@ -60,3 +60,32 @@ async def test_recognizer_async_and_singleton(monkeypatch, tmp_path: Path) -> No
     assert called_kwargs["word_timestamps"] is False
 
     monkeypatch.setattr(module.asyncio, "to_thread", original_to_thread)
+
+
+def test_get_recognizer_reloads_when_explicit_config_changes(monkeypatch) -> None:
+    loaded_models: list[str] = []
+
+    class _Model:
+        def transcribe(self, audio_path: str, **kwargs):
+            return {"audio_path": audio_path, "kwargs": kwargs}
+
+    def _fake_load_model(name: str):
+        loaded_models.append(name)
+        return _Model()
+
+    monkeypatch.setitem(sys.modules, "whisper", SimpleNamespace(load_model=_fake_load_model))
+
+    module = importlib.import_module("app.modules.lyrics.recognizer")
+    module.reset_recognizer_singleton()
+
+    r1 = module.get_recognizer()
+    r2 = module.get_recognizer()
+    assert r1 is r2
+
+    r3 = module.get_recognizer(module.WhisperLyricsConfig(model_name="small"))
+    assert r3 is not r1
+
+    r4 = module.get_recognizer(module.WhisperLyricsConfig(model_name="small"))
+    assert r4 is r3
+
+    assert loaded_models == ["medium", "small"]

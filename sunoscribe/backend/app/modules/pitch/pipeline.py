@@ -7,7 +7,7 @@ from .config import PitchDetectionConfig
 from .detector import PitchDetector
 from .downbeat_tracker import DownbeatTracker
 from .exceptions import DownbeatTrackingError
-from .key_analyzer import KeyAnalyzer
+from .key_analyzer import KeyAnalysisResult, KeyAnalyzer
 from .midi_exporter import MidiExporter
 from .quantizer import NoteQuantizer
 from .rhythm_analyzer import RhythmAnalyzer
@@ -139,7 +139,15 @@ class PitchPipeline:
 
         notes = self.detector.detect(audio_path)
         beat_result = self.beat_tracker.track(audio_path)
-        key_result = self.key_analyzer.analyze(audio_path)
+        try:
+            key_result = self.key_analyzer.analyze(audio_path)
+        except Exception as exc:
+            warnings.append(f"Key analysis failed: {str(exc)[:200]}")
+            key_result = KeyAnalysisResult(
+                key="Unknown",
+                confidence=0.0,
+                method="key_failed_fallback",
+            )
         key_method = str(getattr(key_result, "method", "librosa"))
         if "fallback" in key_method:
             warnings.append(f"Key backend downgraded to {key_method}.")

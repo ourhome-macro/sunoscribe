@@ -119,12 +119,11 @@ class VocalSeparator:
         raw_output_dir = out_dir / "_mdx_raw"
         raw_output_dir.mkdir(parents=True, exist_ok=True)
 
-        lock = self._cpu_lock if self.device.type == "cpu" else None
-
-        if lock is not None:
-            lock.acquire()
-        else:
-            _ = _GLOBAL_CPU_LOCK
+        cpu_locks: list[threading.Semaphore] = []
+        if self.device.type == "cpu":
+            cpu_locks = [_GLOBAL_CPU_LOCK, self._cpu_lock]
+            for lock in cpu_locks:
+                lock.acquire()
 
         try:
             result = self._invoke_mdx_separator(src=src, output_dir=raw_output_dir)
@@ -155,7 +154,7 @@ class VocalSeparator:
         except Exception as exc:
             raise SeparationError(f"Failed during MDX-Net separation: {exc}") from exc
         finally:
-            if lock is not None:
+            for lock in reversed(cpu_locks):
                 lock.release()
 
     def _invoke_mdx_separator(self, *, src: Path, output_dir: Path) -> Any:
@@ -309,9 +308,10 @@ class VocalSeparator:
 
         logger.info("Demucs separation started: input=%s device=%s", src, self.device)
 
-        lock = self._cpu_lock if self.device.type == "cpu" else None
-        if lock is not None:
+        cpu_locks: list[threading.Semaphore] = []
+        if self.device.type == "cpu":
             logger.info("CPU mode detected, waiting for inference slot...")
+            cpu_locks = [_GLOBAL_CPU_LOCK, self._cpu_lock]
 
         try:
             if torchaudio is None:
@@ -321,10 +321,8 @@ class VocalSeparator:
             if demucs_apply_model is None:
                 raise SeparationError("demucs runtime is not installed. Please install `demucs` package.")
 
-            if lock is not None:
+            for lock in cpu_locks:
                 lock.acquire()
-            else:
-                _ = _GLOBAL_CPU_LOCK
 
             waveform, sr = self._load_audio(str(src))
             waveform = self._normalize_channels(waveform)
@@ -368,7 +366,7 @@ class VocalSeparator:
         except Exception as exc:
             raise SeparationError(f"Failed during Demucs separation: {exc}") from exc
         finally:
-            if lock is not None:
+            for lock in reversed(cpu_locks):
                 lock.release()
 
     @staticmethod
@@ -401,9 +399,10 @@ class VocalSeparator:
 
     @staticmethod
     def _save_audio(path: str, waveform: torch.Tensor, sample_rate: int) -> None:
+        prepared = VocalSeparator._prepare_waveform_for_save(waveform)
         if torchaudio is not None:
             try:
-                torchaudio.save(path, waveform, sample_rate=sample_rate)
+                torchaudio.save(path, prepared, sample_rate=sample_rate)
                 return
             except ImportError as exc:
                 if "TorchCodec" not in str(exc) and "torchcodec" not in str(exc).lower():
@@ -421,10 +420,26 @@ class VocalSeparator:
             ) from exc
 
         try:
-            data = waveform.detach().cpu().numpy().T
+            data = prepared.detach().cpu().numpy().T
             sf.write(path, data, int(sample_rate), subtype="PCM_16")
         except Exception as exc:
             raise SeparationError(f"Failed to write audio via soundfile: {exc}") from exc
+
+    @staticmethod
+    def _prepare_waveform_for_save(waveform: torch.Tensor) -> torch.Tensor:
+        if waveform.dim() != 2:
+            raise SeparationError(f"Unexpected waveform shape for save: {tuple(waveform.shape)}")
+
+        prepared = waveform.detach().cpu().float()
+        if prepared.numel() == 0:
+            return prepared
+
+        peak = float(prepared.abs().max().item())
+        target_peak = 0.98
+        if peak > target_peak:
+            prepared = prepared * (target_peak / peak)
+
+        return prepared.clamp(-1.0, 1.0)
 
     @staticmethod
     def _normalize_channels(waveform: torch.Tensor) -> torch.Tensor:

@@ -138,6 +138,52 @@ class TestPitchDetector(unittest.TestCase):
                 with self.assertRaises(PitchModelUnavailableError):
                     detector.detect(str(audio_path))
 
+    def test_detect_with_crepe_uses_chunked_loading_for_long_audio(self):
+        cfg = PitchDetectionConfig(
+            pitch_backend="crepe",
+            sample_rate=100,
+            chunk_size_sec=1.0,
+            confidence_threshold=0.0,
+            crepe_vuv_confidence_threshold=0.0,
+            crepe_step_size_ms=100,
+            crepe_min_note_duration_sec=0.01,
+            crepe_min_voiced_frames=1,
+            crepe_smoothing_window=1,
+        )
+        detector = PitchDetector(cfg)
+
+        fake_crepe = types.ModuleType("crepe")
+
+        def _predict(audio, sr, **_kwargs):
+            frame_count = max(1, int(np.ceil(float(audio.shape[0]) / max(1.0, sr * 0.1))))
+            times = np.arange(frame_count, dtype=float) * 0.1
+            freqs = np.full(frame_count, 440.0, dtype=float)
+            confs = np.full(frame_count, 0.9, dtype=float)
+            return times, freqs, confs, None
+
+        fake_crepe.predict = _predict
+        load_calls: list[tuple[float, float | None]] = []
+
+        def _fake_load(_path, sr, mono, offset=0.0, duration=None):
+            self.assertTrue(mono)
+            load_calls.append((float(offset), None if duration is None else float(duration)))
+            samples = max(1, int(round(float((duration or 0.1)) * float(sr))))
+            return np.zeros(samples, dtype=np.float32), int(sr)
+
+        with patch("app.modules.pitch.detector.librosa.load", side_effect=_fake_load), patch(
+            "app.modules.pitch.detector.librosa.midi_to_note", return_value="A4"
+        ), patch.dict(
+            sys.modules,
+            {"crepe": fake_crepe},
+            clear=False,
+        ):
+            notes = detector._detect_with_crepe(Path("dummy.wav"), duration_sec=3.2)
+
+        self.assertGreaterEqual(len(load_calls), 3)
+        self.assertGreaterEqual(len(notes), 1)
+        self.assertGreaterEqual(notes[0].start_time, 0.0)
+        self.assertLessEqual(notes[-1].end_time, 3.2)
+
 
 if __name__ == "__main__":
     unittest.main()

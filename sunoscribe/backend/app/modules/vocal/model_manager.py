@@ -90,7 +90,7 @@ class MdxNetModelManager:
 
     def __init__(
         self,
-        model_name: str = "UVR_MDXNET_Main_340.onnx",
+        model_name: str = "UVR_MDXNET_Main.onnx",
         cache_root: Optional[Path] = None,
         prefer_cuda: bool = True,
     ) -> None:

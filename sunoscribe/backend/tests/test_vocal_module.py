@@ -64,6 +64,13 @@ class TestVocalModule(unittest.TestCase):
             self.assertTrue(result.accompaniment_path.endswith("x_accompaniment.wav"))
             self.assertEqual(mocked_save.call_count, 2)
 
+    def test_prepare_waveform_for_save_limited_to_target_peak(self) -> None:
+        waveform = torch.tensor([[2.0, -2.0, 0.5], [1.5, -1.5, 0.25]], dtype=torch.float32)
+        prepared = VocalSeparator._prepare_waveform_for_save(waveform)
+
+        self.assertLessEqual(float(prepared.abs().max()), 1.0)
+        self.assertAlmostEqual(float(prepared.abs().max()), 0.98, places=3)
+
 
 if __name__ == "__main__":
     unittest.main()

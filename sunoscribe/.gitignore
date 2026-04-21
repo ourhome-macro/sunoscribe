@@ -43,6 +43,13 @@ backend/.venv*/
 
 # Local data/cache artifacts
 .cache/
+.tmp_pip/
+.tmp_pip*/
+.tmp_pip_global/
+.tmp_pip_global*/
+.vendor_py310/
+pytest-cache-files-*/
+backend/.tmp_tests/
 *.onnx
 *.tflite
 *.h5
