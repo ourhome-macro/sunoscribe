@@ -50,6 +50,32 @@ class ScoreMeasure:
 
 
 @dataclass
+class ScoreChord:
+    id: str
+    start_time: float
+    end_time: float
+    measure_num: Optional[int]
+    symbol: str
+    root: str
+    quality: str
+    bass: Optional[str]
+    confidence: float
+    evidence: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class ScoreSection:
+    id: str
+    label: str
+    start_time: float
+    end_time: float
+    measure_start: Optional[int]
+    measure_end: Optional[int]
+    confidence: float
+    evidence: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
 class LyricsToken:
     id: str
     text: str
@@ -94,7 +120,10 @@ class AnalysisHints:
 class ScoreIR:
     meta: ScoreMeta
     notes: List[ScoreNote] = field(default_factory=list)
+    bassline_notes: List[ScoreNote] = field(default_factory=list)
     measures: List[ScoreMeasure] = field(default_factory=list)
+    chord_timeline: List[ScoreChord] = field(default_factory=list)
+    form_sections: List[ScoreSection] = field(default_factory=list)
     lyrics_segments: List[LyricsSegment] = field(default_factory=list)
     analysis_hints: AnalysisHints = field(
         default_factory=lambda: AnalysisHints(

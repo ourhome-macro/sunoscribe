@@ -5,9 +5,11 @@ from .types import (
     LyricsSegment,
     LyricsToken,
     ScoreIR,
+    ScoreChord,
     ScoreMeasure,
     ScoreMeta,
     ScoreNote,
+    ScoreSection,
 )
 
 __all__ = [
@@ -15,7 +17,9 @@ __all__ = [
     "ScoreIRBuilder",
     "ScoreMeta",
     "ScoreNote",
+    "ScoreChord",
     "ScoreMeasure",
+    "ScoreSection",
     "LyricsSegment",
     "LyricsToken",
     "IssueSpot",

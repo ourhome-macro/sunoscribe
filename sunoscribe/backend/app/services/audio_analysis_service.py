@@ -337,7 +337,12 @@ class AudioAnalysisService:
         else:
             try:
                 # TODO: 按真实接口调整
-                score_ir_obj = await asyncio.to_thread(self.score_ir_builder.build, pitch_result_obj, lyrics_segments)
+                score_ir_obj = await asyncio.to_thread(
+                    self._invoke_score_ir_builder,
+                    pitch_result_obj,
+                    lyrics_segments,
+                    analysis_ir_obj,
+                )
             except Exception as exc:
                 warnings.append(f"score_ir_build_failed:{self._short_exception(exc)}")
 
@@ -616,6 +621,32 @@ class AudioAnalysisService:
         if inspect.isawaitable(result):
             return await result
         return result
+
+    def _invoke_score_ir_builder(
+        self,
+        pitch_result_obj: Any,
+        lyrics_segments: list[dict],
+        analysis_ir_obj: AnalysisIR | None,
+    ) -> ScoreIR:
+        builder = self.score_ir_builder
+        if builder is None:
+            raise RuntimeError("score_ir_builder is not configured")
+
+        build_fn = getattr(builder, "build", builder)
+        if analysis_ir_obj is None:
+            return build_fn(pitch_result_obj, lyrics_segments)
+
+        try:
+            signature = inspect.signature(build_fn)
+            parameters = signature.parameters
+            if "analysis_ir" in parameters or any(
+                param.kind == inspect.Parameter.VAR_KEYWORD for param in parameters.values()
+            ):
+                return build_fn(pitch_result_obj, lyrics_segments, analysis_ir=analysis_ir_obj)
+        except Exception:
+            pass
+
+        return build_fn(pitch_result_obj, lyrics_segments)
 
     def _build_empty_score_ir(self, warnings: list[str]) -> ScoreIR:
         return ScoreIR(

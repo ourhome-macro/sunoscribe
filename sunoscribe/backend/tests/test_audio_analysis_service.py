@@ -50,7 +50,13 @@ class _CapturePitchPipeline:
 
 
 class _FakeScoreIRBuilder:
+    def __init__(self) -> None:
+        self.last_args = None
+        self.last_kwargs = None
+
     def build(self, *_args, **_kwargs):
+        self.last_args = _args
+        self.last_kwargs = _kwargs
         return ScoreIR(
             meta=ScoreMeta(
                 source_version="test",
@@ -87,12 +93,13 @@ class TestAudioAnalysisService(unittest.TestCase):
                 path.write_bytes(b"stem")
 
             pitch_pipeline = _CapturePitchPipeline()
+            score_ir_builder = _FakeScoreIRBuilder()
             service = AudioAnalysisService(
                 audio_processor=_PassthroughAudioProcessor(),
                 vocal_separator=_FakeSeparator(stem_files),
                 lyrics_recognizer=lambda _path: [],
                 pitch_pipeline=pitch_pipeline,
-                score_ir_builder=_FakeScoreIRBuilder(),
+                score_ir_builder=score_ir_builder,
                 midi_exporter=None,
                 projects_root=root / "projects",
             )
@@ -114,6 +121,10 @@ class TestAudioAnalysisService(unittest.TestCase):
             self.assertEqual(perception.stem_paths["bass"], workspace.stem_path("bass"))
             self.assertIn("other", pitch_pipeline.last_request.source_stems)
             self.assertIsNotNone(perception.analysis_ir_dict)
+            self.assertIsNotNone(score_ir_builder.last_args)
+            self.assertEqual(len(score_ir_builder.last_args), 2)
+            self.assertIn("analysis_ir", score_ir_builder.last_kwargs)
+            self.assertIsNotNone(score_ir_builder.last_kwargs["analysis_ir"])
             self.assertEqual(perception.semantic_audio_dict["source_stems"]["bass"], str(workspace.stem_path("bass")))
 
 
