@@ -24,6 +24,10 @@ class PitchDetectionConfig:
     crepe_pitch_jump_semitones: float = 1.2
     crepe_max_unvoiced_gap_sec: float = 0.03
     crepe_smoothing_window: int = 7
+    crepe_note_mad_good_semitones: float = 0.18
+    crepe_note_mad_bad_semitones: float = 0.75
+    crepe_note_span_soft_semitones: float = 0.8
+    crepe_note_span_hard_semitones: float = 3.0
 
     # Quantization settings (P1)
     quantize_mode: str = "adaptive"  # "strict" / "adaptive"
@@ -44,6 +48,21 @@ class PitchDetectionConfig:
     # Cache settings
     enable_cache: bool = True
     cache_dir: str = "~/.cache/sunoscribe/pitch"
+
+    # Melody selection settings
+    melody_selector_enabled: bool = True
+    melody_pitch_min_midi: int = 48
+    melody_pitch_max_midi: int = 84
+    melody_min_confidence: float = 0.52
+    melody_min_duration_sec: float = 0.12
+    melody_short_note_sec: float = 0.18
+    melody_short_note_min_confidence: float = 0.62
+    melody_merge_gap_sec: float = 0.08
+    melody_merge_pitch_tolerance_semitones: int = 1
+    melody_conflict_window_sec: float = 0.10
+    melody_large_jump_semitones: int = 12
+    melody_isolated_note_max_duration_sec: float = 0.25
+    melody_isolated_note_min_confidence: float = 0.62
 
     # Analysis settings
     bpm_start_bpm: float = 120.0

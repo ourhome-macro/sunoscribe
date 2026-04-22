@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import logging
+import re
 import shutil
 import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable, Optional
 
@@ -29,6 +30,7 @@ if torchaudio is not None:
 from .model_manager import DemucsModelManager, MdxNetModelManager, ModelManagerError
 
 logger = logging.getLogger(__name__)
+STEM_NAME_PATTERN = re.compile(r"^[a-z0-9_]{1,64}$")
 
 
 class SeparationError(RuntimeError):
@@ -37,8 +39,19 @@ class SeparationError(RuntimeError):
 
 @dataclass(slots=True)
 class SeparationResult:
-    vocal_path: str
-    accompaniment_path: str
+    stem_paths: dict[str, str] = field(default_factory=dict)
+
+    @property
+    def vocal_path(self) -> str | None:
+        return self.stem_paths.get("vocals")
+
+    @property
+    def vocals_path(self) -> str | None:
+        return self.vocal_path
+
+    @property
+    def accompaniment_path(self) -> str | None:
+        return self.stem_paths.get("accompaniment")
 
 
 _GLOBAL_CPU_LOCK = threading.Semaphore(1)
@@ -113,9 +126,6 @@ class VocalSeparator:
 
         out_dir = Path(output_dir)
         out_dir.mkdir(parents=True, exist_ok=True)
-
-        vocal_path = out_dir / f"{stem_prefix}_vocals.wav"
-        accompaniment_path = out_dir / f"{stem_prefix}_accompaniment.wav"
         raw_output_dir = out_dir / "_mdx_raw"
         raw_output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -132,23 +142,38 @@ class VocalSeparator:
                 fallback=raw_output_dir.glob("**/*"),
                 base_dir=raw_output_dir,
             )
-            vocals_src, accompaniment_src = self._pick_mdx_stems(candidates)
+            stem_sources = self._pick_mdx_stem_map(candidates)
 
-            if vocals_src is None or accompaniment_src is None:
+            if stem_sources.get("vocals") is None:
                 raise SeparationError(
-                    "MDX-Net output does not contain both vocals and accompaniment stems. "
+                    "MDX-Net output does not contain a vocals stem. "
                     f"candidates={[p.name for p in candidates]}"
                 )
 
-            shutil.copyfile(vocals_src, vocal_path)
-            shutil.copyfile(accompaniment_src, accompaniment_path)
+            if stem_sources.get("accompaniment") is None:
+                accompaniment_mix_sources = [
+                    stem_sources.get(name)
+                    for name in ("drums", "bass", "other")
+                    if stem_sources.get(name) is not None
+                ]
+                if accompaniment_mix_sources:
+                    accompaniment_path = out_dir / f"{stem_prefix}_accompaniment.wav"
+                    self._mix_audio_files(accompaniment_mix_sources, accompaniment_path)
+                    stem_sources["accompaniment"] = accompaniment_path
+
+            if stem_sources.get("accompaniment") is None:
+                raise SeparationError(
+                    "MDX-Net output does not contain accompaniment-compatible stems. "
+                    f"candidates={[p.name for p in candidates]}"
+                )
+
+            persisted_stems = self._persist_named_stems(stem_sources, out_dir=out_dir, stem_prefix=stem_prefix)
 
             logger.info(
-                "MDX-Net separation completed: vocals=%s accompaniment=%s",
-                vocal_path,
-                accompaniment_path,
+                "MDX-Net separation completed: stems=%s",
+                persisted_stems,
             )
-            return SeparationResult(vocal_path=str(vocal_path), accompaniment_path=str(accompaniment_path))
+            return SeparationResult(stem_paths={name: str(path) for name, path in persisted_stems.items()})
         except ModelManagerError:
             raise
         except Exception as exc:
@@ -250,43 +275,43 @@ class VocalSeparator:
 
         return normalized
 
-    def _pick_mdx_stems(self, candidates: list[Path]) -> tuple[Path | None, Path | None]:
+    def _pick_mdx_stem_map(self, candidates: list[Path]) -> dict[str, Path]:
         if not candidates:
-            return None, None
+            return {}
 
-        vocals_keys = ("vocal", "vocals", "voice", "acapella")
-        accompaniment_keys = ("instrumental", "inst", "accompaniment", "karaoke", "no_vocals", "music")
+        keyword_map = {
+            "vocals": ("vocal", "vocals", "voice", "acapella"),
+            "drums": ("drum", "drums", "percussion"),
+            "bass": ("bass",),
+            "other": ("other", "others"),
+            "accompaniment": ("instrumental", "inst", "accompaniment", "karaoke", "no_vocals", "music"),
+        }
 
-        vocals: Path | None = None
-        accompaniment: Path | None = None
-
+        stem_map: dict[str, Path] = {}
         for path in candidates:
             name = path.name.lower()
-            if vocals is None and any(k in name for k in vocals_keys):
-                vocals = path
-                continue
-            if accompaniment is None and any(k in name for k in accompaniment_keys):
-                accompaniment = path
+            for stem_name, keywords in keyword_map.items():
+                if stem_name in stem_map:
+                    continue
+                if any(keyword in name for keyword in keywords):
+                    stem_map[stem_name] = path
+                    break
 
-        if vocals is not None and accompaniment is not None:
-            return vocals, accompaniment
-
-        if len(candidates) == 2:
+        if len(candidates) == 2 and "vocals" not in stem_map:
             first, second = candidates
-            first_name = first.name.lower()
-            second_name = second.name.lower()
-
-            if any(k in first_name for k in vocals_keys):
-                return first, second
-            if any(k in second_name for k in vocals_keys):
-                return second, first
-
-            # Fallback heuristic: choose larger file as accompaniment.
             if first.stat().st_size >= second.stat().st_size:
-                return second, first
-            return first, second
+                stem_map["vocals"] = second
+                stem_map.setdefault("accompaniment", first)
+            else:
+                stem_map["vocals"] = first
+                stem_map.setdefault("accompaniment", second)
 
-        return vocals, accompaniment
+        if len(candidates) == 2 and "vocals" in stem_map and "accompaniment" not in stem_map:
+            remaining = [path for path in candidates if path != stem_map["vocals"]]
+            if remaining:
+                stem_map["accompaniment"] = remaining[0]
+
+        return stem_map
 
     def _separate_with_demucs(
         self,
@@ -302,9 +327,6 @@ class VocalSeparator:
 
         out_dir = Path(output_dir)
         out_dir.mkdir(parents=True, exist_ok=True)
-
-        vocal_path = out_dir / f"{stem_prefix}_vocals.wav"
-        accompaniment_path = out_dir / f"{stem_prefix}_accompaniment.wav"
 
         logger.info("Demucs separation started: input=%s device=%s", src, self.device)
 
@@ -351,16 +373,23 @@ class VocalSeparator:
                 if name != "vocals":
                     accompaniment = accompaniment + tensor
 
-            self._save_audio(str(vocal_path), vocals, sr)
+            persisted_stems: dict[str, Path] = {}
+            for name, tensor in stem_map.items():
+                stem_name = self._normalize_stem_name(name)
+                stem_path = out_dir / f"{stem_prefix}_{stem_name}.wav"
+                self._save_audio(str(stem_path), tensor, sr)
+                persisted_stems[stem_name] = stem_path
+
+            accompaniment_path = out_dir / f"{stem_prefix}_accompaniment.wav"
             self._save_audio(str(accompaniment_path), accompaniment, sr)
+            persisted_stems["accompaniment"] = accompaniment_path
 
             logger.info(
-                "Demucs separation completed: vocals=%s accompaniment=%s",
-                vocal_path,
-                accompaniment_path,
+                "Demucs separation completed: stems=%s",
+                persisted_stems,
             )
 
-            return SeparationResult(vocal_path=str(vocal_path), accompaniment_path=str(accompaniment_path))
+            return SeparationResult(stem_paths={name: str(path) for name, path in persisted_stems.items()})
         except ModelManagerError:
             raise
         except Exception as exc:
@@ -368,6 +397,70 @@ class VocalSeparator:
         finally:
             for lock in reversed(cpu_locks):
                 lock.release()
+
+    @staticmethod
+    def _normalize_stem_name(raw_name: str) -> str:
+        value = str(raw_name or "").strip().lower().replace("-", "_").replace(" ", "_")
+        if value in {"vocal", "voice"}:
+            value = "vocals"
+        value = re.sub(r"[^a-z0-9_]+", "_", value).strip("_")
+        if not value:
+            raise SeparationError("stem name cannot be empty")
+        if not STEM_NAME_PATTERN.fullmatch(value):
+            raise SeparationError(f"unsupported stem name: {raw_name}")
+        return value
+
+    def _persist_named_stems(
+        self,
+        stem_sources: dict[str, Path],
+        *,
+        out_dir: Path,
+        stem_prefix: str,
+    ) -> dict[str, Path]:
+        persisted: dict[str, Path] = {}
+        for name, src_path in stem_sources.items():
+            stem_name = self._normalize_stem_name(name)
+            dst_path = out_dir / f"{stem_prefix}_{stem_name}.wav"
+            if src_path.resolve(strict=False) != dst_path.resolve(strict=False):
+                shutil.copyfile(src_path, dst_path)
+            persisted[stem_name] = dst_path
+        return persisted
+
+    def _mix_audio_files(self, source_paths: list[Path], output_path: Path) -> None:
+        if not source_paths:
+            raise SeparationError("No source stems provided for accompaniment mix.")
+
+        mixed_waveform: torch.Tensor | None = None
+        mixed_sr: int | None = None
+
+        for stem_path in source_paths:
+            waveform, sr = self._load_audio(str(stem_path))
+            waveform = self._normalize_channels(waveform)
+
+            if mixed_waveform is None:
+                mixed_waveform = waveform
+                mixed_sr = sr
+                continue
+
+            assert mixed_sr is not None
+            if sr != mixed_sr:
+                if torchaudio is None:
+                    raise SeparationError(
+                        "Cannot mix stems with mismatched sample rates without torchaudio resample support."
+                    )
+                waveform = torchaudio.functional.resample(waveform, sr, mixed_sr)
+
+            current_len = int(mixed_waveform.shape[-1])
+            next_len = int(waveform.shape[-1])
+            if current_len < next_len:
+                mixed_waveform = torch.nn.functional.pad(mixed_waveform, (0, next_len - current_len))
+            elif next_len < current_len:
+                waveform = torch.nn.functional.pad(waveform, (0, current_len - next_len))
+
+            mixed_waveform = mixed_waveform + waveform
+
+        assert mixed_waveform is not None and mixed_sr is not None
+        self._save_audio(str(output_path), mixed_waveform, mixed_sr)
 
     @staticmethod
     def _load_audio(path: str) -> tuple[torch.Tensor, int]:

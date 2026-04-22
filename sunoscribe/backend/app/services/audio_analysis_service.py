@@ -22,6 +22,7 @@ from app.modules.alignment import (
     InitialLyricsAligner,
     StubAlignmentLLMClient,
 )
+from app.modules.analysis_ir import AnalysisIR, BaselineAnalysisInferencer
 from app.modules.score_ir import AnalysisHints, ScoreIR, ScoreMeta
 from app.modules.score_ir import ScoreIRBuilder
 
@@ -47,6 +48,7 @@ class AudioAnalysisResult:
     accompaniment_path: str | None
     lyrics_segments: list[dict]
     pitch_result: dict | None
+    analysis_ir: dict | None
     score_ir: dict | None
     baseline_alignment: dict
     baseline_validator_warnings: list[str]
@@ -59,6 +61,8 @@ class AudioAnalysisResult:
     validator_warnings_after: list[str]
     refine_debug: dict | None
     midi_path: str | None
+    stem_paths: dict[str, str] = field(default_factory=dict)
+    semantic_audio: dict | None = None
     warnings: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
@@ -75,9 +79,13 @@ class _PerceptionStageResult:
     whisper_raw: dict[str, Any] | None
     pitch_result_obj: Any | None
     pitch_result_dict: dict | None
+    analysis_ir_obj: AnalysisIR | None
+    analysis_ir_dict: dict | None
     score_ir_obj: ScoreIR
     score_ir_dict: dict
     raw_pitch_midi_path: Path | None
+    stem_paths: dict[str, Path] = field(default_factory=dict)
+    semantic_audio_dict: dict | None = None
     warnings: list[str] = field(default_factory=list)
 
 
@@ -104,6 +112,7 @@ class AudioAnalysisService:
         vocal_separator: Any | None = None,
         lyrics_recognizer: Any | None = None,
         pitch_pipeline: Any | None = None,
+        analysis_inferencer: Any | None = None,
         score_ir_builder: ScoreIRBuilder | None = None,
         midi_exporter: Any | None = None,
         initial_aligner: InitialLyricsAligner | None = None,
@@ -125,6 +134,9 @@ class AudioAnalysisService:
         self.vocal_separator = vocal_separator if vocal_separator is not None else self._try_make_vocal_separator()
         self.lyrics_recognizer = lyrics_recognizer if lyrics_recognizer is not None else self._try_make_lyrics_recognizer()
         self.pitch_pipeline = pitch_pipeline if pitch_pipeline is not None else self._try_make_pitch_pipeline()
+        self.analysis_inferencer = (
+            analysis_inferencer if analysis_inferencer is not None else self._try_make_analysis_inferencer()
+        )
         self.score_ir_builder = score_ir_builder or ScoreIRBuilder()
         self.midi_exporter = midi_exporter if midi_exporter is not None else self._try_make_midi_exporter()
 
@@ -167,6 +179,8 @@ class AudioAnalysisService:
             accompaniment_path=str(perception.accompaniment_path) if perception.accompaniment_path else None,
             lyrics_segments=perception.lyrics_segments,
             pitch_result=perception.pitch_result_dict,
+            analysis_ir=perception.analysis_ir_dict,
+            semantic_audio=perception.semantic_audio_dict,
             score_ir=perception.score_ir_dict,
             baseline_alignment=self._serialize(perception_obj=alignment.baseline_draft),
             baseline_validator_warnings=alignment.baseline_validator_warnings,
@@ -181,6 +195,7 @@ class AudioAnalysisService:
             validator_warnings_after=alignment.validator_warnings_after,
             refine_debug=alignment.refine_debug,
             midi_path=str(final_midi_path) if final_midi_path else None,
+            stem_paths={name: str(path) for name, path in perception.stem_paths.items()},
             warnings=all_warnings,
         )
         return result
@@ -196,6 +211,8 @@ class AudioAnalysisService:
         vocals_path: Path | None = None
         accompaniment_path: Path | None = None
         raw_pitch_midi_path: Path | None = None
+        stem_paths: dict[str, Path] = {}
+        semantic_audio_dict: dict | None = None
 
         current_audio_path = source_audio_path
 
@@ -226,18 +243,9 @@ class AudioAnalysisService:
                         str(workspace.separation_dir),
                         "separated",
                     )
-                    vocals_raw = getattr(sep, "vocal_path", None) or getattr(sep, "vocals_path", None)
-                    acc_raw = getattr(sep, "accompaniment_path", None)
-
-                    if vocals_raw:
-                        vocals_path = Path(vocals_raw)
-                        shutil.copyfile(vocals_path, workspace.vocals_path)
-                        vocals_path = workspace.vocals_path
-
-                    if acc_raw:
-                        accompaniment_path = Path(acc_raw)
-                        shutil.copyfile(accompaniment_path, workspace.accompaniment_path)
-                        accompaniment_path = workspace.accompaniment_path
+                    stem_paths = self._collect_and_persist_stems(sep, workspace)
+                    vocals_path = stem_paths.get("vocals")
+                    accompaniment_path = stem_paths.get("accompaniment")
                 except Exception as exc:
                     warnings.append(f"vocal_separation_failed:{self._short_exception(exc)}")
 
@@ -265,16 +273,32 @@ class AudioAnalysisService:
 
         pitch_result_obj: Any | None = None
         pitch_result_dict: dict | None = None
+        analysis_ir_obj: AnalysisIR | None = None
+        analysis_ir_dict: dict | None = None
 
-        pitch_audio_path = vocals_path or current_audio_path
         if self.pitch_pipeline is None:
             warnings.append("pitch_pipeline_missing: skip pitch")
         else:
             try:
                 # TODO: 按真实接口调整
-                pitch_result_obj = await asyncio.to_thread(self.pitch_pipeline.run, str(pitch_audio_path))
+                pitch_request = self._build_pitch_pipeline_request(
+                    source_audio_path=current_audio_path,
+                    vocals_path=vocals_path,
+                    accompaniment_path=accompaniment_path,
+                    stem_paths=stem_paths,
+                )
+                pitch_result_obj = await asyncio.to_thread(self.pitch_pipeline.run, pitch_request)
                 serialized = self._serialize(perception_obj=pitch_result_obj)
                 pitch_result_dict = serialized if isinstance(serialized, dict) else {"value": serialized}
+                semantic_audio_serialized = self._serialize(
+                    perception_obj=getattr(pitch_result_obj, "semantic_audio", None)
+                )
+                if semantic_audio_serialized is not None:
+                    semantic_audio_dict = (
+                        semantic_audio_serialized
+                        if isinstance(semantic_audio_serialized, dict)
+                        else {"value": semantic_audio_serialized}
+                    )
 
                 if hasattr(self.pitch_pipeline, "export_midi"):
                     try:
@@ -288,6 +312,22 @@ class AudioAnalysisService:
                         warnings.append(f"raw_midi_export_failed:{self._short_exception(exc)}")
             except Exception as exc:
                 warnings.append(f"pitch_pipeline_failed:{self._short_exception(exc)}")
+
+        if self.analysis_inferencer is None:
+            warnings.append("analysis_inferencer_missing: skip analysis_ir")
+        elif pitch_result_obj is None:
+            warnings.append("analysis_ir_skipped_no_pitch_result")
+        else:
+            try:
+                analysis_ir_obj = await asyncio.to_thread(
+                    self.analysis_inferencer.infer,
+                    pitch_result_obj,
+                    lyrics_segments,
+                )
+                serialized = self._serialize(perception_obj=analysis_ir_obj)
+                analysis_ir_dict = serialized if isinstance(serialized, dict) else {"value": serialized}
+            except Exception as exc:
+                warnings.append(f"analysis_ir_failed:{self._short_exception(exc)}")
 
         score_ir_obj: ScoreIR | None = None
         if self.score_ir_builder is None:
@@ -316,10 +356,83 @@ class AudioAnalysisService:
             whisper_raw=whisper_raw,
             pitch_result_obj=pitch_result_obj,
             pitch_result_dict=pitch_result_dict,
+            analysis_ir_obj=analysis_ir_obj,
+            analysis_ir_dict=analysis_ir_dict,
+            semantic_audio_dict=semantic_audio_dict,
             score_ir_obj=score_ir_obj,
             score_ir_dict=score_ir_dict,
             raw_pitch_midi_path=raw_pitch_midi_path,
+            stem_paths=stem_paths,
             warnings=warnings,
+        )
+
+    def _normalize_stem_name(self, raw_name: str) -> str:
+        return ProjectWorkspace.normalize_stem_name(raw_name)
+
+    def _collect_and_persist_stems(self, separation_result: Any, workspace: ProjectWorkspace) -> dict[str, Path]:
+        collected: dict[str, Path] = {}
+
+        raw_stem_paths = getattr(separation_result, "stem_paths", None)
+        if isinstance(raw_stem_paths, dict):
+            for stem_name, stem_path in raw_stem_paths.items():
+                normalized_name = self._normalize_stem_name(str(stem_name))
+                candidate = Path(str(stem_path))
+                if candidate.exists() and candidate.is_file():
+                    collected[normalized_name] = candidate
+
+        vocals_raw = getattr(separation_result, "vocal_path", None) or getattr(separation_result, "vocals_path", None)
+        accompaniment_raw = getattr(separation_result, "accompaniment_path", None)
+
+        if vocals_raw:
+            candidate = Path(str(vocals_raw))
+            if candidate.exists() and candidate.is_file():
+                collected.setdefault("vocals", candidate)
+
+        if accompaniment_raw:
+            candidate = Path(str(accompaniment_raw))
+            if candidate.exists() and candidate.is_file():
+                collected.setdefault("accompaniment", candidate)
+
+        persisted: dict[str, Path] = {}
+        for stem_name, source_path in collected.items():
+            destination_path = workspace.stem_path(stem_name)
+            if source_path.resolve(strict=False) != destination_path.resolve(strict=False):
+                shutil.copyfile(source_path, destination_path)
+            persisted[stem_name] = destination_path
+
+        if "vocals" in persisted:
+            persisted["vocals"] = workspace.vocals_path
+        if "accompaniment" in persisted:
+            persisted["accompaniment"] = workspace.accompaniment_path
+
+        return persisted
+
+    def _build_pitch_pipeline_request(
+        self,
+        *,
+        source_audio_path: Path,
+        vocals_path: Path | None,
+        accompaniment_path: Path | None,
+        stem_paths: dict[str, Path],
+    ) -> Any:
+        try:
+            from app.modules.pitch import PitchPipelineRequest
+        except Exception:
+            return str(vocals_path or source_audio_path)
+
+        stem_map = {name: str(path) for name, path in stem_paths.items()}
+        rhythm_path = stem_paths.get("drums") or accompaniment_path or source_audio_path
+        key_path = stem_paths.get("other") or accompaniment_path or source_audio_path
+        harmony_path = stem_paths.get("other") or accompaniment_path
+        bass_path = stem_paths.get("bass") or accompaniment_path
+        return PitchPipelineRequest(
+            lead_audio_path=str(vocals_path or source_audio_path),
+            source_audio_path=str(source_audio_path),
+            rhythm_audio_path=str(rhythm_path),
+            key_audio_path=str(key_path),
+            harmony_audio_path=str(harmony_path) if harmony_path else None,
+            bass_audio_path=str(bass_path) if bass_path else None,
+            source_stems=stem_map,
         )
 
     async def _run_alignment_stage(
@@ -455,11 +568,19 @@ class AudioAnalysisService:
         warnings: list[str] = []
 
         try:
+            self._write_json(
+                workspace.separation_manifest_path,
+                {name: str(path) for name, path in perception.stem_paths.items()},
+            )
             self._write_json(workspace.lyrics_segments_path, perception.lyrics_segments)
             if perception.whisper_raw is not None:
                 self._write_json(workspace.whisper_raw_path, perception.whisper_raw)
 
             self._write_json(workspace.pitch_result_path, perception.pitch_result_dict)
+            if perception.analysis_ir_dict is not None:
+                self._write_json(workspace.analysis_ir_path, perception.analysis_ir_dict)
+            if perception.semantic_audio_dict is not None:
+                self._write_json(workspace.semantic_audio_path, perception.semantic_audio_dict)
             self._write_json(workspace.score_ir_path, perception.score_ir_dict)
 
             self._write_json(workspace.baseline_alignment_path, self._serialize(perception_obj=alignment.baseline_draft))
@@ -607,6 +728,13 @@ class AudioAnalysisService:
             return PitchPipeline()
         except Exception as exc:
             self.logger.warning("PitchPipeline unavailable: %s", self._short_exception(exc))
+            return None
+
+    def _try_make_analysis_inferencer(self) -> Any | None:
+        try:
+            return BaselineAnalysisInferencer()
+        except Exception as exc:
+            self.logger.warning("BaselineAnalysisInferencer unavailable: %s", self._short_exception(exc))
             return None
 
     def _try_make_midi_exporter(self) -> Any | None:

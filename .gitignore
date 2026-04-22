@@ -51,3 +51,5 @@ cache/
 logs/
 output/
 sunoscribe/backend/后端开发prd.md
+sunoscribe/Miniconda3-py310.exe
+*.exe

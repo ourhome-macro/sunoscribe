@@ -3,8 +3,7 @@ from __future__ import annotations
 import re
 from typing import Any, Dict, List, Optional, Tuple
 
-import librosa
-
+from ..pitch.note_utils import note_to_midi
 from ..pitch.types import PitchAnalysisResult
 from .types import (
     AnalysisHints,
@@ -121,7 +120,15 @@ class ScoreIRBuilder:
         notes: List[ScoreNote] = []
         note_index = 1
 
-        for raw_note in pitch_result.raw_notes or []:
+        lead_like_notes = list(getattr(pitch_result, "lead_notes", None) or [])
+        fallback_source = "lead_note"
+        is_raw_note = False
+        if not lead_like_notes:
+            lead_like_notes = list(pitch_result.raw_notes or [])
+            fallback_source = "raw_note"
+            is_raw_note = True
+
+        for raw_note in lead_like_notes:
             start_time = self._safe_float(getattr(raw_note, "start_time", 0.0), 0.0)
             end_time = self._safe_float(getattr(raw_note, "end_time", start_time), start_time)
             if end_time < start_time:
@@ -145,10 +152,10 @@ class ScoreIRBuilder:
                     beat_position=None,
                     confidence=confidence,
                     lyric=None,
-                    is_raw=True,
+                    is_raw=is_raw_note,
                     is_candidate_ornament=self._is_candidate_ornament(None, confidence),
                     tie_candidate=False,
-                    source="raw_note",
+                    source=fallback_source,
                 )
             )
 
@@ -415,7 +422,7 @@ class ScoreIRBuilder:
         if not pitch:
             return None
         try:
-            return int(librosa.note_to_midi(str(pitch)))
+            return int(note_to_midi(str(pitch)))
         except Exception:
             return None
 

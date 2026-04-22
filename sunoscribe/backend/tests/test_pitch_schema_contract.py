@@ -49,12 +49,14 @@ class TestPitchSchemaContract(unittest.TestCase):
             pipeline.beat_tracker, "track", return_value=_BeatResult()
         ), patch.object(pipeline.key_analyzer, "analyze", return_value=_KeyResult()), patch.object(
             pipeline.downbeat_tracker, "track", return_value=_DownbeatResult()
-        ), patch("app.modules.pitch.pipeline.librosa.get_duration", return_value=4.0):
+        ), patch("app.modules.pitch.pipeline.get_audio_duration", return_value=4.0):
             result = pipeline.run("dummy.wav").to_dict()
 
         for key in ["version", "meta", "analysis_info", "measures", "warnings"]:
             self.assertIn(key, result)
 
+        self.assertIn("lead_notes", result)
+        self.assertIn("semantic_audio", result)
         self.assertIn("downbeat_method", result["analysis_info"])
         self.assertIn("measure_boundary_source", result["analysis_info"])
         self.assertIn("quantized_measure_alignment", result["analysis_info"])

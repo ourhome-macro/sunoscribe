@@ -77,9 +77,80 @@
         "additionalProperties": true
       }
     },
+    "lead_notes": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["pitch", "start_time", "end_time", "confidence"],
+        "properties": {
+          "pitch": { "type": "string" },
+          "start_time": { "type": "number", "minimum": 0 },
+          "end_time": { "type": "number", "minimum": 0 },
+          "confidence": { "type": "number", "minimum": 0, "maximum": 1 }
+        },
+        "additionalProperties": true
+      }
+    },
+    "semantic_audio": {
+      "type": ["object", "null"],
+      "properties": {
+        "source_stems": {
+          "type": "object",
+          "additionalProperties": { "type": "string" }
+        },
+        "melody_candidates": { "$ref": "#/$defs/noteCandidateSet" },
+        "harmony_candidates": { "$ref": "#/$defs/noteCandidateSet" },
+        "bass_root_candidates": { "$ref": "#/$defs/noteCandidateSet" },
+        "rhythm_grid": {
+          "type": ["object", "null"],
+          "properties": {
+            "source_stem": { "type": ["string", "null"] },
+            "input_audio_path": { "type": ["string", "null"] },
+            "beat_times": {
+              "type": "array",
+              "items": { "type": "number" }
+            },
+            "downbeat_times": {
+              "type": "array",
+              "items": { "type": "number" }
+            },
+            "bpm": { "type": "number" },
+            "bpm_confidence": { "type": "number" },
+            "beats_per_bar": { "type": "integer", "minimum": 1 },
+            "beat_unit": { "type": "integer", "minimum": 1 },
+            "beat_duration_sec": { "type": "number", "minimum": 0 },
+            "rhythm_type": { "type": "string" },
+            "stability_score": { "type": "number" },
+            "analysis_info": { "type": "object", "additionalProperties": true }
+          },
+          "additionalProperties": true
+        }
+      },
+      "additionalProperties": true
+    },
     "warnings": {
       "type": "array",
       "items": { "type": "string" }
+    }
+  },
+  "$defs": {
+    "noteCandidateSet": {
+      "type": "object",
+      "properties": {
+        "role": { "type": "string" },
+        "source_stem": { "type": ["string", "null"] },
+        "input_audio_path": { "type": ["string", "null"] },
+        "notes": {
+          "type": "array",
+          "items": { "$ref": "#/properties/raw_notes/items" }
+        },
+        "selected_notes": {
+          "type": "array",
+          "items": { "$ref": "#/properties/raw_notes/items" }
+        },
+        "analysis_info": { "type": "object", "additionalProperties": true }
+      },
+      "additionalProperties": true
     }
   },
   "additionalProperties": true

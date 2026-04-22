@@ -2,9 +2,8 @@ from __future__ import annotations
 
 from typing import List, Tuple
 
-import librosa
-
 from .config import PitchDetectionConfig
+from .note_utils import note_to_midi
 from .types import Note, NoteType, QuantizedNote
 
 
@@ -119,8 +118,8 @@ class NoteQuantizer:
             return False
 
         try:
-            left_midi = int(round(float(librosa.note_to_midi(left))))
-            right_midi = int(round(float(librosa.note_to_midi(right))))
+            left_midi = int(round(float(note_to_midi(left))))
+            right_midi = int(round(float(note_to_midi(right))))
         except Exception:
             return False
         return abs(left_midi - right_midi) <= max_semitone

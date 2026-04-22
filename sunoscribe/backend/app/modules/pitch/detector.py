@@ -6,12 +6,14 @@ from typing import List
 import librosa
 import numpy as np
 
+from .audio_utils import get_audio_duration
 from .config import PitchDetectionConfig
 from .exceptions import (
     AudioTooLongError,
     PitchDetectionFailedError,
     PitchModelUnavailableError,
 )
+from .note_utils import hz_to_midi, midi_to_note
 from .types import Note
 
 
@@ -33,7 +35,7 @@ class PitchDetector:
 
     def _validate_audio_length(self, audio_path: str) -> float:
         try:
-            duration = librosa.get_duration(path=audio_path)
+            duration = get_audio_duration(audio_path)
         except Exception as exc:
             raise PitchDetectionFailedError(f"failed to read audio duration: {exc}") from exc
 
@@ -86,7 +88,7 @@ class PitchDetector:
             if float(confidence) < self.config.confidence_threshold:
                 continue
 
-            pitch_name = librosa.midi_to_note(int(round(float(pitch_midi))))
+            pitch_name = midi_to_note(int(round(float(pitch_midi))))
             notes.append(
                 Note(
                     pitch=pitch_name,
@@ -120,7 +122,7 @@ class PitchDetector:
         # Short inputs keep legacy one-shot path to minimize overhead.
         if duration_sec <= (chunk_size_sec + overlap_sec):
             try:
-                audio, sr = librosa.load(str(audio_file), sr=int(self.config.sample_rate), mono=True)
+                audio, sr = self._load_audio_mono(str(audio_file), sample_rate=int(self.config.sample_rate))
             except Exception as exc:
                 raise PitchDetectionFailedError(f"failed to load audio for CREPE: {exc}") from exc
 
@@ -159,10 +161,9 @@ class PitchDetector:
                 load_end = float(min(duration_sec, core_end + overlap_sec))
 
                 try:
-                    audio, sr = librosa.load(
+                    audio, sr = self._load_audio_mono(
                         str(audio_file),
-                        sr=sample_rate,
-                        mono=True,
+                        sample_rate=sample_rate,
                         offset=load_start,
                         duration=max(0.01, load_end - load_start),
                     )
@@ -292,6 +293,22 @@ class PitchDetector:
                 "CREPE backend is unavailable. Install package `crepe` or `torchcrepe`."
             ) from exc
 
+    def _load_audio_mono(
+        self,
+        audio_path: str,
+        *,
+        sample_rate: int,
+        offset: float = 0.0,
+        duration: float | None = None,
+    ) -> tuple[np.ndarray, int]:
+        return librosa.load(
+            audio_path,
+            sr=int(sample_rate),
+            mono=True,
+            offset=float(offset),
+            duration=None if duration is None else float(duration),
+        )
+
     def _frames_to_notes(
         self,
         *,
@@ -315,7 +332,7 @@ class PitchDetector:
         midi = np.full(frequencies.shape, np.nan, dtype=float)
         hz_valid = np.isfinite(frequencies) & (frequencies > 0.0)
         if np.any(hz_valid):
-            midi[hz_valid] = librosa.hz_to_midi(frequencies[hz_valid])
+            midi[hz_valid] = hz_to_midi(frequencies[hz_valid])
 
         voiced = (confidences >= voiced_threshold) & np.isfinite(midi)
         voiced = self._bridge_short_unvoiced(voiced, max_gap_frames=max_unvoiced_gap_frames)
@@ -370,7 +387,17 @@ class PitchDetector:
                 continue
 
             avg_conf = float(np.mean(seg_conf)) if seg_conf.size > 0 else 0.0
-            if avg_conf < float(self.config.confidence_threshold):
+            median_midi = float(np.median(seg_midi))
+            mad_semitones = self._median_absolute_deviation(seg_midi, median_midi)
+            span_semitones = self._pitch_span(seg_midi)
+            stability_factor = self._stability_factor(mad_semitones)
+            span_factor = self._span_factor(span_semitones)
+            quality_factor = max(0.0, min(1.0, 0.55 * stability_factor + 0.45 * span_factor))
+            adjusted_conf = avg_conf * (0.35 + 0.65 * quality_factor)
+
+            if quality_factor < 0.10 and avg_conf < max(0.8, float(self.config.confidence_threshold)):
+                continue
+            if adjusted_conf < float(self.config.confidence_threshold):
                 continue
 
             start_time = max(0.0, float(times[start_idx]) - frame_hop_sec * 0.5)
@@ -378,14 +405,14 @@ class PitchDetector:
             if (end_time - start_time) < min_note_duration:
                 continue
 
-            pitch_midi = int(round(float(np.median(seg_midi))))
-            pitch_name = librosa.midi_to_note(pitch_midi)
+            pitch_midi = int(round(median_midi))
+            pitch_name = midi_to_note(pitch_midi)
             notes.append(
                 Note(
                     pitch=pitch_name,
                     start_time=start_time,
                     end_time=end_time,
-                    confidence=avg_conf,
+                    confidence=adjusted_conf,
                 )
             )
 
@@ -399,6 +426,38 @@ class PitchDetector:
             if diffs.size > 0:
                 return float(np.median(diffs))
         return max(0.001, float(self.config.crepe_step_size_ms) / 1000.0)
+
+    @staticmethod
+    def _median_absolute_deviation(values: np.ndarray, center: float) -> float:
+        if values.size == 0:
+            return 0.0
+        return float(np.median(np.abs(values - center)))
+
+    @staticmethod
+    def _pitch_span(values: np.ndarray) -> float:
+        if values.size == 0:
+            return 0.0
+        lo = float(np.percentile(values, 10))
+        hi = float(np.percentile(values, 90))
+        return max(0.0, hi - lo)
+
+    def _stability_factor(self, mad_semitones: float) -> float:
+        good = max(1e-6, float(self.config.crepe_note_mad_good_semitones))
+        bad = max(good + 1e-6, float(self.config.crepe_note_mad_bad_semitones))
+        if mad_semitones <= good:
+            return 1.0
+        if mad_semitones >= bad:
+            return 0.0
+        return max(0.0, min(1.0, (bad - mad_semitones) / (bad - good)))
+
+    def _span_factor(self, span_semitones: float) -> float:
+        soft = max(1e-6, float(self.config.crepe_note_span_soft_semitones))
+        hard = max(soft + 1e-6, float(self.config.crepe_note_span_hard_semitones))
+        if span_semitones <= soft:
+            return 1.0
+        if span_semitones >= hard:
+            return 0.0
+        return max(0.0, min(1.0, (hard - span_semitones) / (hard - soft)))
 
     def _predict_with_torchcrepe(
         self,

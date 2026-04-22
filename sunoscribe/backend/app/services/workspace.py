@@ -6,6 +6,7 @@ import re
 import shutil
 
 PROJECT_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+STEM_NAME_PATTERN = re.compile(r"^[a-z0-9_]{1,64}$")
 
 
 @dataclass(slots=True)
@@ -77,6 +78,10 @@ class ProjectWorkspace:
         return self.separation_dir / "accompaniment.wav"
 
     @property
+    def separation_manifest_path(self) -> Path:
+        return self.separation_dir / "stems.json"
+
+    @property
     def lyrics_segments_path(self) -> Path:
         return self.lyrics_dir / "lyrics_segments.json"
 
@@ -95,6 +100,14 @@ class ProjectWorkspace:
     @property
     def score_ir_path(self) -> Path:
         return self.score_dir / "score_ir.json"
+
+    @property
+    def semantic_audio_path(self) -> Path:
+        return self.score_dir / "semantic_audio.json"
+
+    @property
+    def analysis_ir_path(self) -> Path:
+        return self.score_dir / "analysis_ir.json"
 
     @property
     def baseline_alignment_path(self) -> Path:
@@ -123,6 +136,29 @@ class ProjectWorkspace:
     @property
     def pipeline_log_path(self) -> Path:
         return self.logs_dir / "pipeline.log"
+
+    @staticmethod
+    def normalize_stem_name(stem_name: str) -> str:
+        normalized = str(stem_name or "").strip().lower().replace("-", "_").replace(" ", "_")
+        if normalized in {"voice", "vocal"}:
+            normalized = "vocals"
+        normalized = re.sub(r"[^a-z0-9_]+", "_", normalized).strip("_")
+        if not normalized:
+            raise ValueError("stem_name cannot be empty")
+        if not STEM_NAME_PATTERN.fullmatch(normalized):
+            raise ValueError("stem_name contains unsupported characters")
+        return normalized
+
+    def stem_path(self, stem_name: str) -> Path:
+        normalized = self.normalize_stem_name(stem_name)
+        path = self.separation_dir / f"{normalized}.wav"
+        resolved_root = self.separation_dir.resolve(strict=False)
+        resolved_path = path.resolve(strict=False)
+        try:
+            resolved_path.relative_to(resolved_root)
+        except ValueError as exc:
+            raise ValueError("stem_name resolves outside separation_dir") from exc
+        return path
 
     def ensure_structure(self) -> None:
         for folder in (

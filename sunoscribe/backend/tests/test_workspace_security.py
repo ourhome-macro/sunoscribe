@@ -18,6 +18,15 @@ class TestProjectWorkspaceSecurity(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     ProjectWorkspace(project_id=project_id, projects_root=Path("data/projects"))
 
+    def test_stem_path_sanitizes_unsafe_names_inside_separation_dir(self) -> None:
+        ws = ProjectWorkspace(project_id="test_001", projects_root=Path("data/projects"))
+
+        stem_path = ws.stem_path(r"..\Bass Stem!!.wav")
+
+        self.assertEqual(stem_path, ws.separation_dir / "bass_stem_wav.wav")
+        resolved = stem_path.resolve(strict=False)
+        self.assertTrue(resolved.is_relative_to(ws.separation_dir.resolve(strict=False)))
+
 
 if __name__ == "__main__":
     unittest.main()

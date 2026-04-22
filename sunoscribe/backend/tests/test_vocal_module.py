@@ -55,14 +55,21 @@ class TestVocalModule(unittest.TestCase):
                 ),
             )
 
-            with patch("app.modules.vocal.separator.torchaudio", fake_torchaudio):
+            with patch(
+                "app.modules.vocal.separator.demucs_apply_model",
+                side_effect=lambda model, mix, progress=False: model.separate_tensor(mix),
+            ), patch("app.modules.vocal.separator.torchaudio", fake_torchaudio):
                 with patch("app.modules.vocal.separator.torchaudio.save") as mocked_save:
                     input_wav.write_bytes(b"dummy")
                     result = separator.separate(str(input_wav), str(out_dir), stem_prefix="x")
 
             self.assertTrue(result.vocal_path.endswith("x_vocals.wav"))
             self.assertTrue(result.accompaniment_path.endswith("x_accompaniment.wav"))
-            self.assertEqual(mocked_save.call_count, 2)
+            self.assertIn("drums", result.stem_paths)
+            self.assertIn("bass", result.stem_paths)
+            self.assertIn("other", result.stem_paths)
+            self.assertIn("accompaniment", result.stem_paths)
+            self.assertEqual(mocked_save.call_count, 5)
 
     def test_prepare_waveform_for_save_limited_to_target_peak(self) -> None:
         waveform = torch.tensor([[2.0, -2.0, 0.5], [1.5, -1.5, 0.25]], dtype=torch.float32)
