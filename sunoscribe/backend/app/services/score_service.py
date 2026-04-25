@@ -1,20 +1,25 @@
+import asyncio
 import json
 import re
+import tempfile
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
+from urllib.parse import unquote, urlparse
 from typing import Any
 from xml.etree import ElementTree as ET
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.models.enums import ProjectStatus, ScoreType
+from app.models.enums import ScoreType
 from app.models.lyrics import Lyrics
 from app.models.project import Project
 from app.models.score import Score
 from app.models.user import User
+from app.config import settings
 from app.modules.pitch import MidiExporter
+from app.services.audio_analysis_service import AudioAnalysisOptions, AudioAnalysisResult, AudioAnalysisService
 from app.services.workspace import ProjectWorkspace
 from app.utils.errors import NotFoundError, ValidationAppError
 
@@ -91,26 +96,28 @@ def generate_or_regenerate_score(
         score = Score(project_id=project.id)
         db.add(score)
 
+    analysis_result = _run_audio_analysis(project)
     now = datetime.now(timezone.utc).isoformat()
     score.score_type = score_type.value
     score.key = key
-    score.score_data = {
-        "generated_by": "backend_stub",
-        "generated_at": now,
-        "notes": [],
-        "meta": {"project_id": str(project.id), "score_type": score.score_type, "key": score.key},
-    }
-
-    # Placeholder orchestration status transition for PRD flow.
-    project.status = ProjectStatus.COMPLETED.value
-    project.progress = 100
+    score.score_data = _build_score_payload(
+        analysis_result=analysis_result,
+        generated_at=now,
+        project_id=project.id,
+        score_type=score_type,
+        requested_key=key,
+    )
     db.add(project)
     db.add(score)
 
     lyrics_stmt = select(Lyrics).where(Lyrics.project_id == project.id)
     lyrics = db.execute(lyrics_stmt).scalar_one_or_none()
     if lyrics is None:
-        db.add(Lyrics(project_id=project.id, text="", timeline=[]))
+        lyrics = Lyrics(project_id=project.id, text="", timeline=[])
+
+    lyrics.text = _build_lyrics_text(analysis_result.lyrics_segments)
+    lyrics.timeline = list(analysis_result.lyrics_segments)
+    db.add(lyrics)
 
     db.commit()
     db.refresh(score)
@@ -286,24 +293,178 @@ def _find_existing_export_path(
 ) -> Path | None:
     candidates: list[Path] = []
     score_data = score.score_data if isinstance(score.score_data, dict) else {}
-
-    for key in score_data_keys:
-        raw = score_data.get(key)
-        if isinstance(raw, str) and raw.strip():
-            candidates.append(Path(raw.strip()))
+    workspace: ProjectWorkspace | None = None
+    workspace_root: Path | None = None
 
     try:
         workspace = ProjectWorkspace(project_id=str(score.project_id))
+        workspace_root = workspace.project_dir.resolve(strict=False)
+    except Exception:
+        workspace = None
+        workspace_root = None
+
+    for key in score_data_keys:
+        raw = score_data.get(key)
+        candidate = _resolve_workspace_scoped_path(raw, workspace_root=workspace_root)
+        if candidate is not None:
+            candidates.append(candidate)
+
+    if workspace is not None:
         for filename in default_workspace_files:
             candidates.append(workspace.exports_dir / filename)
         # Keep backward compatibility for historical pitch output.
         candidates.extend([workspace.final_midi_path, workspace.raw_pitch_midi_path])
-    except Exception:
-        pass
 
     for path in candidates:
         if path.exists() and path.is_file():
             return path
+    return None
+
+
+def _run_audio_analysis(project: Project) -> AudioAnalysisResult:
+    raw_audio_path = str(project.audio_path or "").strip()
+    if not raw_audio_path:
+        raise ValidationAppError("项目缺少可分析的音视频文件")
+
+    with _materialize_analysis_input(raw_audio_path) as input_path:
+        service = AudioAnalysisService()
+        options = AudioAnalysisOptions(project_id=str(project.id))
+        result = asyncio.run(service.process_audio(input_path, options))
+
+    score_ir = result.score_ir if isinstance(result.score_ir, dict) else {}
+    meta = score_ir.get("meta") if isinstance(score_ir.get("meta"), dict) else {}
+    analysis_info = meta.get("analysis_info") if isinstance(meta.get("analysis_info"), dict) else {}
+    if analysis_info.get("fallback"):
+        raise ValidationAppError("音频分析失败，未生成有效谱面")
+
+    notes = score_ir.get("notes")
+    if not isinstance(notes, list) or not notes:
+        raise ValidationAppError("音频分析未产出可用音符，无法生成谱子")
+
+    return result
+
+
+class _LocalAnalysisInput:
+    def __init__(self, path: Path) -> None:
+        self.path = path
+
+    def __enter__(self) -> Path:
+        if not self.path.exists() or not self.path.is_file():
+            raise ValidationAppError("项目音视频文件不存在或不可访问")
+        return self.path
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        return None
+
+
+class _TemporaryAnalysisInput:
+    def __init__(self, source_uri: str) -> None:
+        self.source_uri = source_uri
+        self._temp_dir: tempfile.TemporaryDirectory[str] | None = None
+
+    def __enter__(self) -> Path:
+        bucket, object_name = _parse_s3_uri(self.source_uri)
+        self._temp_dir = tempfile.TemporaryDirectory(prefix="sunoscribe-analysis-")
+        target = Path(self._temp_dir.name) / Path(object_name).name
+        if not target.suffix:
+            target = target.with_suffix(".bin")
+        _download_minio_object(bucket=bucket, object_name=object_name, target_path=target)
+        return target
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        if self._temp_dir is not None:
+            self._temp_dir.cleanup()
+
+
+def _materialize_analysis_input(raw_audio_path: str) -> _LocalAnalysisInput | _TemporaryAnalysisInput:
+    if raw_audio_path.lower().startswith("s3://"):
+        return _TemporaryAnalysisInput(raw_audio_path)
+    return _LocalAnalysisInput(Path(raw_audio_path))
+
+
+def _parse_s3_uri(uri: str) -> tuple[str, str]:
+    parsed = urlparse(uri)
+    if parsed.scheme.lower() != "s3" or not parsed.netloc or not parsed.path.strip("/"):
+        raise ValidationAppError("项目音视频对象存储路径无效")
+    return parsed.netloc, unquote(parsed.path.lstrip("/"))
+
+
+def _download_minio_object(*, bucket: str, object_name: str, target_path: Path) -> None:
+    if not settings.minio_endpoint or not settings.minio_access_key or not settings.minio_secret_key:
+        raise ValidationAppError("对象存储配置不完整，无法读取项目音视频文件")
+
+    try:
+        from minio import Minio
+    except Exception as exc:
+        raise ValidationAppError("未安装 minio 依赖，请先安装 minio 包") from exc
+
+    client_kwargs: dict[str, Any] = {
+        "endpoint": settings.minio_endpoint,
+        "access_key": settings.minio_access_key,
+        "secret_key": settings.minio_secret_key,
+        "secure": bool(settings.minio_secure),
+    }
+    if settings.minio_region:
+        client_kwargs["region"] = settings.minio_region
+    client = Minio(**client_kwargs)
+
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        client.fget_object(bucket, object_name, str(target_path))
+    except Exception as exc:
+        raise ValidationAppError("项目音视频对象不存在或不可访问") from exc
+
+
+def _build_score_payload(
+    *,
+    analysis_result: AudioAnalysisResult,
+    generated_at: str,
+    project_id: uuid.UUID,
+    score_type: ScoreType,
+    requested_key: str,
+) -> dict[str, Any]:
+    score_data = analysis_result.score_ir if isinstance(analysis_result.score_ir, dict) else {}
+    payload = dict(score_data)
+    meta = payload.get("meta")
+    payload_meta = dict(meta) if isinstance(meta, dict) else {}
+    payload_meta["project_id"] = str(project_id)
+    payload_meta["score_type"] = score_type.value
+    payload_meta["requested_key"] = requested_key
+    payload_meta["generated_at"] = generated_at
+    payload["meta"] = payload_meta
+    payload["generated_by"] = "audio_analysis_service"
+    if analysis_result.midi_path:
+        payload["final_midi_path"] = analysis_result.midi_path
+    if analysis_result.warnings:
+        payload["warnings"] = list(analysis_result.warnings)
+    return payload
+
+
+def _build_lyrics_text(lyrics_segments: list[dict[str, Any]]) -> str:
+    lines = [
+        str(segment.get("text", "")).strip()
+        for segment in lyrics_segments
+        if isinstance(segment, dict) and str(segment.get("text", "")).strip()
+    ]
+    return "\n".join(lines)
+
+
+def _resolve_workspace_scoped_path(raw: Any, *, workspace_root: Path | None) -> Path | None:
+    if workspace_root is None or not isinstance(raw, str) or not raw.strip():
+        return None
+
+    raw_path = Path(raw.strip()).expanduser()
+    candidate_paths = [raw_path.resolve(strict=False)]
+    if not raw_path.is_absolute():
+        candidate_paths.append((workspace_root / raw_path).resolve(strict=False))
+
+    for candidate in candidate_paths:
+        try:
+            candidate.relative_to(workspace_root)
+            return candidate
+        except ValueError:
+            continue
+
     return None
 
 

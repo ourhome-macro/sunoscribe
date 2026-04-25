@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import shutil
+import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -84,6 +85,30 @@ class TestScoreExportService(unittest.TestCase):
                     score_id="dummy",
                     export_format="midi",
                 )
+
+    def test_export_midi_ignores_score_data_path_outside_workspace(self) -> None:
+        external_dir = tempfile.TemporaryDirectory()
+        external_path = Path(external_dir.name) / "outside.mid"
+        external_path.write_bytes(b"MThd-outside")
+
+        fake_score = SimpleNamespace(
+            id="score-escape",
+            project_id="test_export_project_006",
+            score_data={"midi_path": str(external_path)},
+        )
+        db = MagicMock()
+
+        try:
+            with patch("app.services.score_service.get_score_by_id", return_value=fake_score):
+                with self.assertRaises(ValidationAppError):
+                    export_score(
+                        db,
+                        user=SimpleNamespace(),
+                        score_id="dummy",
+                        export_format="midi",
+                    )
+        finally:
+            external_dir.cleanup()
 
     def test_export_musicxml_generated_from_measures(self) -> None:
         fake_score = SimpleNamespace(

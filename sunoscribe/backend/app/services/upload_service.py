@@ -1,4 +1,6 @@
 import asyncio
+import json
+import subprocess
 import uuid
 from pathlib import Path
 from typing import Any
@@ -10,6 +12,85 @@ from app.utils.errors import FileTooLargeError, UnsupportedFormatError, Validati
 ALLOWED_AUDIO_EXTENSIONS = {"mp3", "wav", "flac", "aac", "ogg", "m4a"}
 ALLOWED_VIDEO_EXTENSIONS = {"mp4", "mkv", "avi", "mov", "webm"}
 MAX_UPLOAD_BYTES = 100 * 1024 * 1024
+
+
+def probe_media_file(path: str | Path, media_kind: str, max_duration_sec: float) -> dict[str, Any]:
+    target = Path(path)
+    if not target.exists() or not target.is_file():
+        raise ValidationAppError("上传文件不存在或不可访问")
+
+    try:
+        completed = subprocess.run(
+            [
+                "ffprobe",
+                "-v",
+                "error",
+                "-print_format",
+                "json",
+                "-show_format",
+                "-show_streams",
+                str(target),
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            check=False,
+            timeout=30,
+        )
+    except FileNotFoundError as exc:
+        raise ValidationAppError("服务器缺少 ffprobe，无法校验媒体文件") from exc
+    except subprocess.TimeoutExpired as exc:
+        raise ValidationAppError("媒体文件探测超时") from exc
+
+    if completed.returncode != 0:
+        raise UnsupportedFormatError("文件不是可解码的音视频媒体")
+
+    try:
+        payload = json.loads(completed.stdout or "{}")
+    except json.JSONDecodeError as exc:
+        raise UnsupportedFormatError("媒体文件探测结果无效") from exc
+
+    streams = payload.get("streams") if isinstance(payload.get("streams"), list) else []
+    has_audio = any(stream.get("codec_type") == "audio" for stream in streams if isinstance(stream, dict))
+    has_video = any(stream.get("codec_type") == "video" for stream in streams if isinstance(stream, dict))
+    if not has_audio:
+        raise UnsupportedFormatError("文件不包含可分析的音频流")
+    if media_kind == "video" and not has_video:
+        raise UnsupportedFormatError("文件不包含视频流")
+
+    duration = _extract_probe_duration(payload)
+    if duration is None or duration <= 0:
+        raise UnsupportedFormatError("无法读取媒体时长")
+    if duration > float(max_duration_sec):
+        raise FileTooLargeError(f"媒体时长超过 {int(max_duration_sec)} 秒限制")
+
+    return {"duration_sec": duration, "has_audio": has_audio, "has_video": has_video}
+
+
+def _extract_probe_duration(payload: dict[str, Any]) -> float | None:
+    format_info = payload.get("format") if isinstance(payload.get("format"), dict) else {}
+    duration_raw = format_info.get("duration")
+    try:
+        duration = float(duration_raw)
+        if duration > 0:
+            return duration
+    except (TypeError, ValueError):
+        pass
+
+    stream_durations: list[float] = []
+    streams = payload.get("streams") if isinstance(payload.get("streams"), list) else []
+    for stream in streams:
+        if not isinstance(stream, dict):
+            continue
+        try:
+            duration = float(stream.get("duration"))
+        except (TypeError, ValueError):
+            continue
+        if duration > 0:
+            stream_durations.append(duration)
+    return max(stream_durations) if stream_durations else None
 
 
 def parse_uuid(value: str, field_name: str) -> uuid.UUID:
@@ -70,6 +151,7 @@ async def save_upload_file(
     user_id: uuid.UUID,
     project_id: uuid.UUID,
     upload_backend: str = "local",
+    max_duration_sec: float = 600.0,
     minio_endpoint: str | None = None,
     minio_access_key: str | None = None,
     minio_secret_key: str | None = None,
@@ -82,12 +164,21 @@ async def save_upload_file(
     backend = normalize_upload_backend(upload_backend)
 
     if backend == "local":
-        return await _save_upload_file_local(
+        file_path, size = await _save_upload_file_local(
             upload=upload,
             uploads_root=uploads_root,
             user_id=user_id,
             project_id=project_id,
         )
+        try:
+            probe_media_file(file_path, media_kind, max_duration_sec)
+        except Exception:
+            try:
+                Path(file_path).unlink(missing_ok=True)
+            except OSError:
+                pass
+            raise
+        return file_path, size
 
     return await _save_upload_file_minio(
         upload=upload,
@@ -101,6 +192,8 @@ async def save_upload_file(
         minio_secure=minio_secure,
         minio_region=minio_region,
         minio_base_path=minio_base_path,
+        media_kind=media_kind,
+        max_duration_sec=max_duration_sec,
     )
 
 
@@ -153,6 +246,8 @@ async def _save_upload_file_minio(
     minio_secure: bool,
     minio_region: str | None,
     minio_base_path: str,
+    media_kind: str,
+    max_duration_sec: float,
 ) -> tuple[str, int]:
     _validate_minio_config(
         endpoint=minio_endpoint,
@@ -174,6 +269,7 @@ async def _save_upload_file_minio(
     size = 0
     try:
         size = await _read_upload_to_temp_file(upload=upload, temp_path=temp_path)
+        probe_media_file(temp_path, media_kind, max_duration_sec)
         await asyncio.to_thread(
             _put_file_to_minio,
             temp_path,
