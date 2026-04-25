@@ -1,9 +1,11 @@
 import asyncio
 import json
 import re
+import tempfile
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
+from urllib.parse import unquote, urlparse
 from typing import Any
 from xml.etree import ElementTree as ET
 
@@ -15,6 +17,7 @@ from app.models.lyrics import Lyrics
 from app.models.project import Project
 from app.models.score import Score
 from app.models.user import User
+from app.config import settings
 from app.modules.pitch import MidiExporter
 from app.services.audio_analysis_service import AudioAnalysisOptions, AudioAnalysisResult, AudioAnalysisService
 from app.services.workspace import ProjectWorkspace
@@ -323,13 +326,10 @@ def _run_audio_analysis(project: Project) -> AudioAnalysisResult:
     if not raw_audio_path:
         raise ValidationAppError("项目缺少可分析的音视频文件")
 
-    input_path = Path(raw_audio_path)
-    if not input_path.exists() or not input_path.is_file():
-        raise ValidationAppError("项目音视频文件不存在或不可访问")
-
-    service = AudioAnalysisService()
-    options = AudioAnalysisOptions(project_id=str(project.id))
-    result = asyncio.run(service.process_audio(input_path, options))
+    with _materialize_analysis_input(raw_audio_path) as input_path:
+        service = AudioAnalysisService()
+        options = AudioAnalysisOptions(project_id=str(project.id))
+        result = asyncio.run(service.process_audio(input_path, options))
 
     score_ir = result.score_ir if isinstance(result.score_ir, dict) else {}
     meta = score_ir.get("meta") if isinstance(score_ir.get("meta"), dict) else {}
@@ -342,6 +342,77 @@ def _run_audio_analysis(project: Project) -> AudioAnalysisResult:
         raise ValidationAppError("音频分析未产出可用音符，无法生成谱子")
 
     return result
+
+
+class _LocalAnalysisInput:
+    def __init__(self, path: Path) -> None:
+        self.path = path
+
+    def __enter__(self) -> Path:
+        if not self.path.exists() or not self.path.is_file():
+            raise ValidationAppError("项目音视频文件不存在或不可访问")
+        return self.path
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        return None
+
+
+class _TemporaryAnalysisInput:
+    def __init__(self, source_uri: str) -> None:
+        self.source_uri = source_uri
+        self._temp_dir: tempfile.TemporaryDirectory[str] | None = None
+
+    def __enter__(self) -> Path:
+        bucket, object_name = _parse_s3_uri(self.source_uri)
+        self._temp_dir = tempfile.TemporaryDirectory(prefix="sunoscribe-analysis-")
+        target = Path(self._temp_dir.name) / Path(object_name).name
+        if not target.suffix:
+            target = target.with_suffix(".bin")
+        _download_minio_object(bucket=bucket, object_name=object_name, target_path=target)
+        return target
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        if self._temp_dir is not None:
+            self._temp_dir.cleanup()
+
+
+def _materialize_analysis_input(raw_audio_path: str) -> _LocalAnalysisInput | _TemporaryAnalysisInput:
+    if raw_audio_path.lower().startswith("s3://"):
+        return _TemporaryAnalysisInput(raw_audio_path)
+    return _LocalAnalysisInput(Path(raw_audio_path))
+
+
+def _parse_s3_uri(uri: str) -> tuple[str, str]:
+    parsed = urlparse(uri)
+    if parsed.scheme.lower() != "s3" or not parsed.netloc or not parsed.path.strip("/"):
+        raise ValidationAppError("项目音视频对象存储路径无效")
+    return parsed.netloc, unquote(parsed.path.lstrip("/"))
+
+
+def _download_minio_object(*, bucket: str, object_name: str, target_path: Path) -> None:
+    if not settings.minio_endpoint or not settings.minio_access_key or not settings.minio_secret_key:
+        raise ValidationAppError("对象存储配置不完整，无法读取项目音视频文件")
+
+    try:
+        from minio import Minio
+    except Exception as exc:
+        raise ValidationAppError("未安装 minio 依赖，请先安装 minio 包") from exc
+
+    client_kwargs: dict[str, Any] = {
+        "endpoint": settings.minio_endpoint,
+        "access_key": settings.minio_access_key,
+        "secret_key": settings.minio_secret_key,
+        "secure": bool(settings.minio_secure),
+    }
+    if settings.minio_region:
+        client_kwargs["region"] = settings.minio_region
+    client = Minio(**client_kwargs)
+
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        client.fget_object(bucket, object_name, str(target_path))
+    except Exception as exc:
+        raise ValidationAppError("项目音视频对象不存在或不可访问") from exc
 
 
 def _build_score_payload(

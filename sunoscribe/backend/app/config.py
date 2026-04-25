@@ -17,6 +17,7 @@ class Settings(BaseSettings):
     refresh_token_expire_days: int = 7
     redis_url: str | None = None
     uploads_root: str = "data/uploads"
+    max_media_duration_sec: float = 600.0
     upload_backend: str = "local"
     minio_endpoint: str | None = None
     minio_access_key: str | None = None
@@ -45,6 +46,14 @@ class Settings(BaseSettings):
         normalized = (value or "").strip().lower()
         if normalized not in {"local", "minio"}:
             raise ValueError("upload_backend must be one of: local, minio")
+        return normalized
+
+    @field_validator("max_media_duration_sec")
+    @classmethod
+    def _validate_max_media_duration_sec(cls, value: float) -> float:
+        normalized = float(value)
+        if normalized <= 0:
+            raise ValueError("max_media_duration_sec must be > 0")
         return normalized
 
     @field_validator("task_worker_count")
