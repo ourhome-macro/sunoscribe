@@ -18,6 +18,8 @@ class TestOpenApiRequiredEndpoints(unittest.TestCase):
                 actual.add((method, route.path))
 
         required = {
+            ("GET", "/api/health"),
+            ("GET", "/api/health/pitch"),
             ("POST", "/api/auth/register"),
             ("POST", "/api/auth/login"),
             ("POST", "/api/auth/logout"),

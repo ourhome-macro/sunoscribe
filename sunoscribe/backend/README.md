@@ -1,77 +1,108 @@
 # SunoScribe Backend
 
-## Pitch 模块（P0）
+FastAPI 后端负责账号、项目、上传、异步任务、歌词、谱面生成和导出。音频处理主链路已经接入 `AudioAnalysisService`，默认音高 backend 为 RMVPE，并配置了 CREPE/basic-pitch fallback。
 
-当前已实现 `app/modules/pitch` 的 P0 能力：
+## 本地环境
 
-- 音高检测：`basic-pitch`
-- BPM 检测：`librosa`
-- 调式分析：`librosa chroma + Krumhansl-Schmuckler`
-- 输出：原始音符序列 + BPM + 调式（不做小节划分，不做量化）
+标准虚拟环境只保留 `backend/.venv310`：
 
-## 主要文件
+```powershell
+py -3.10 -m venv .venv310
+.\.venv310\Scripts\python.exe -m pip install --upgrade pip setuptools wheel
+.\.venv310\Scripts\python.exe -m pip install -r requirements.txt
+```
 
-- `app/modules/pitch/config.py`
-- `app/modules/pitch/exceptions.py`
-- `app/modules/pitch/types.py`
-- `app/modules/pitch/detector.py`
-- `app/modules/pitch/beat_tracker.py`
-- `app/modules/pitch/key_analyzer.py`
-- `app/modules/pitch/serializer.py`
-- `app/modules/pitch/pipeline.py`
-- `tests/test_pitch_pipeline.py`
+`.venv`、`.tmp`、`.tmp_tests`、`.pytest_cache` 都属于可清理本地目录，不应提交。
+
+## 配置
+
+常用 `.env`：
+
+```env
+DATABASE_URL=postgresql+psycopg://localhost:5432/sunoscribe
+REDIS_URL=redis://127.0.0.1:6379/0
+UPLOADS_ROOT=data/uploads
+UPLOAD_BACKEND=local
+MAX_MEDIA_DURATION_SEC=600
+
+PITCH_BACKEND=rmvpe
+PITCH_BACKEND_FALLBACKS=crepe,basic-pitch
+PITCH_CACHE_DIR=~/.cache/sunoscribe/pitch
+RMVPE_MODEL_PATH=
+```
+
+MinIO 上传可选配置：
+
+```env
+UPLOAD_BACKEND=minio
+MINIO_ENDPOINT=127.0.0.1:9000
+MINIO_ACCESS_KEY=minioadmin
+MINIO_SECRET_KEY=minioadmin
+MINIO_BUCKET=sunoscribe
+MINIO_SECURE=false
+MINIO_BASE_PATH=uploads
+```
+
+## 启动
+
+```powershell
+$env:PYTHONPATH='.'
+.\.venv310\Scripts\python.exe -m uvicorn app.main:app --reload
+```
+
+- Swagger：`http://127.0.0.1:8000/docs`
+- 健康检查：`GET /api/health`
+- Pitch/RMVPE 检查：`GET /api/health/pitch`
+- 深度模型加载检查：`GET /api/health/pitch?deep=true`
+
+## API 概览
+
+- Auth：`/api/auth/register`、`/api/auth/login`、`/api/auth/logout`、`/api/auth/refresh`
+- Users：`GET/PUT /api/users/me`、`GET/PUT /api/users/me/settings`
+- Projects：`POST/GET /api/projects`、`GET/PUT/DELETE /api/projects/{project_id}`
+- Upload：`POST /api/upload/audio`、`POST /api/upload/video`
+- Scores：`GET/POST /api/projects/{project_id}/score`、`PUT /api/scores/{score_id}`、`GET /api/scores/{score_id}/export`
+- Lyrics：`GET /api/projects/{project_id}/lyrics`、`PUT /api/lyrics/{lyrics_id}`
+- Tasks：`GET /api/tasks/{task_id}`、`POST /api/tasks/{task_id}/retry`
+- Health：`GET /api/health`、`GET /api/health/pitch`
+
+## 音频链路
+
+`POST /api/upload/audio` 或 `POST /api/upload/video` 会保存媒体文件，并把路径写入 `projects.audio_path`。谱面生成任务随后调用 `AudioAnalysisService`：
+
+1. 复制原始输入到项目 workspace。
+2. 可选人声分离，得到 vocals/accompaniment/stems。
+3. 用 vocals 或归一化 fallback 音频做歌词识别。
+4. 用 RMVPE 默认检测主旋律音高；缺模型或 runtime 时回退。
+5. 生成 Analysis IR、Score IR、歌词对齐和 MIDI/MusicXML/PDF 导出数据。
+
+更详细说明见 [audio_pipeline.md](docs/audio_pipeline.md)。
 
 ## 测试
 
-当前提供了一个最小单测，使用 mock 避免依赖实际模型下载与真实音频：
+```powershell
+$env:PYTHONPATH='.'
+.\.venv310\Scripts\python.exe -m compileall -q app tests
+.\.venv310\Scripts\python.exe -m pytest -q tests -o cache_dir=.tmp_tests\.pytest_cache
+```
 
-- `tests/test_pitch_pipeline.py`
+关键测试文件：
 
-## 后端 API 进展
+- `tests/test_pitch_runtime_health.py`
+- `tests/test_audio_flow_integration.py`
+- `tests/test_audio_analysis_service.py`
+- `tests/test_score_generation_service.py`
+- `tests/test_score_export_service.py`
+- `tests/test_upload_api.py`
 
-已实现（可在 `http://localhost:8000/docs` 查看）：
+## 数据库迁移
 
-- Auth: `register/login/logout/refresh/forgot-password/reset-password`
-- Users: `GET/PUT /api/users/me`、`GET/PUT /api/users/me/settings`
-- Projects: `POST/GET /api/projects`、`GET/PUT/DELETE /api/projects/{id}`
-- Upload: `POST /api/upload/audio`、`POST /api/upload/video`（格式限制 + 100MB）
-- Score: `GET/POST /api/projects/{id}/score`、`PUT /api/scores/{id}`、`GET /api/scores/{id}/export`
-- Lyrics: `GET /api/projects/{id}/lyrics`、`PUT /api/lyrics/{id}`
-- Tasks: `GET /api/tasks/{id}`
+```powershell
+.\.venv310\Scripts\alembic.exe upgrade head
+```
 
-数据模型：
+需要生成迁移时：
 
-- `users`
-- `user_settings`
-- `projects`
-- `scores`
-- `lyrics`
-- `token_revocations`（鉴权吊销）
-
-## 数据库迁移（Alembic）
-
-初始化后可用以下命令：
-
-1. 生成迁移（可选）：`alembic revision --autogenerate -m "msg"`
-2. 应用迁移：`alembic upgrade head`
-3. 回滚一步：`alembic downgrade -1`
-
-当前已包含初始迁移脚本：`alembic/versions/20260420_0001_initial_schema.py`
-
-## 本地启动
-
-1. 安装依赖：`pip install -r requirements.txt`
-2. 配置 `.env`（推荐 PostgreSQL + Redis）：
-   - `DATABASE_URL=postgresql+psycopg://...`
-   - `REDIS_URL=redis://127.0.0.1:6379/0`
-   - `UPLOADS_ROOT=data/uploads`
-   - `UPLOAD_BACKEND=minio`（或 `local`）
-   - `MINIO_ENDPOINT=127.0.0.1:9000`
-   - `MINIO_ACCESS_KEY=minioadmin`
-   - `MINIO_SECRET_KEY=minioadmin`
-   - `MINIO_BUCKET=sunoscribe`
-   - `MINIO_SECURE=false`
-   - `MINIO_BASE_PATH=uploads`
-3. 执行迁移：`alembic upgrade head`
-4. 启动：`uvicorn app.main:app --reload`
-5. Swagger：`http://localhost:8000/docs`
+```powershell
+.\.venv310\Scripts\alembic.exe revision --autogenerate -m "message"
+```

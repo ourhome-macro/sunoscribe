@@ -770,8 +770,9 @@ class AudioAnalysisService:
     def _try_make_pitch_pipeline(self) -> Any | None:
         try:
             from app.modules.pitch import PitchPipeline
+            from app.services.pitch_runtime import build_pitch_detection_config_from_settings
 
-            return PitchPipeline()
+            return PitchPipeline(config=build_pitch_detection_config_from_settings())
         except Exception as exc:
             self.logger.warning("PitchPipeline unavailable: %s", self._short_exception(exc))
             return None

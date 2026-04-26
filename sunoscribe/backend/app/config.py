@@ -27,6 +27,10 @@ class Settings(BaseSettings):
     minio_region: str | None = None
     minio_base_path: str = "uploads"
     task_worker_count: int = 1
+    pitch_backend: str = "rmvpe"
+    pitch_backend_fallbacks: str = "crepe,basic-pitch"
+    pitch_cache_dir: str = "~/.cache/sunoscribe/pitch"
+    rmvpe_model_path: str | None = None
 
     # PRD 要求 PostgreSQL；默认值可通过 .env 覆盖。
     # Avoid committing hard-coded credentials in code.
@@ -46,6 +50,21 @@ class Settings(BaseSettings):
         normalized = (value or "").strip().lower()
         if normalized not in {"local", "minio"}:
             raise ValueError("upload_backend must be one of: local, minio")
+        return normalized
+
+    @field_validator("pitch_backend")
+    @classmethod
+    def _validate_pitch_backend(cls, value: str) -> str:
+        normalized = (value or "").strip().lower()
+        aliases = {
+            "basic_pitch": "basic-pitch",
+            "basicpitch": "basic-pitch",
+            "r-mvpe": "rmvpe",
+            "rvc-rmvpe": "rmvpe",
+        }
+        normalized = aliases.get(normalized, normalized)
+        if normalized not in {"rmvpe", "crepe", "basic-pitch"}:
+            raise ValueError("pitch_backend must be one of: rmvpe, crepe, basic-pitch")
         return normalized
 
     @field_validator("max_media_duration_sec")
