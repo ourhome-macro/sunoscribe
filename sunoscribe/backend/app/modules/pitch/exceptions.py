@@ -7,7 +7,7 @@ class AudioTooLongError(PitchDetectionError):
 
 
 class PitchModelUnavailableError(PitchDetectionError):
-    """basic-pitch 不可用或加载失败。"""
+    """Pitch backend runtime or model is unavailable."""
 
 
 class PitchDetectionFailedError(PitchDetectionError):

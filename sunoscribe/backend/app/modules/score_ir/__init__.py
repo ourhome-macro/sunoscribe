@@ -1,4 +1,5 @@
 from .builder import ScoreIRBuilder
+from .serializer import ScoreIRSerializer
 from .types import (
     AnalysisHints,
     IssueSpot,
@@ -15,6 +16,7 @@ from .types import (
 __all__ = [
     "ScoreIR",
     "ScoreIRBuilder",
+    "ScoreIRSerializer",
     "ScoreMeta",
     "ScoreNote",
     "ScoreChord",

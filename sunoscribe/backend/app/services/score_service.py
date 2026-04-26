@@ -12,7 +12,7 @@ from xml.etree import ElementTree as ET
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.models.enums import ScoreType
+from app.models.enums import ProjectStatus, ScoreType
 from app.models.lyrics import Lyrics
 from app.models.project import Project
 from app.models.score import Score
@@ -96,17 +96,31 @@ def generate_or_regenerate_score(
         score = Score(project_id=project.id)
         db.add(score)
 
-    analysis_result = _run_audio_analysis(project)
     now = datetime.now(timezone.utc).isoformat()
     score.score_type = score_type.value
     score.key = key
-    score.score_data = _build_score_payload(
-        analysis_result=analysis_result,
-        generated_at=now,
-        project_id=project.id,
-        score_type=score_type,
-        requested_key=key,
-    )
+    analysis_result: AudioAnalysisResult | None = None
+    audio_path = str(project.audio_path or "").strip()
+    if audio_path:
+        analysis_result = _run_audio_analysis(project)
+        score.score_data = _build_score_data_from_analysis(
+            analysis_result,
+            project=project,
+            score_type=score_type,
+            key=key,
+            generated_at=now,
+        )
+    else:
+        score.score_data = _build_stub_score_data(
+            project=project,
+            score_type=score_type,
+            key=key,
+            generated_at=now,
+        )
+
+    # Placeholder orchestration status transition for PRD flow.
+    project.status = ProjectStatus.COMPLETED.value
+    project.progress = 100
     db.add(project)
     db.add(score)
 
@@ -115,13 +129,101 @@ def generate_or_regenerate_score(
     if lyrics is None:
         lyrics = Lyrics(project_id=project.id, text="", timeline=[])
 
-    lyrics.text = _build_lyrics_text(analysis_result.lyrics_segments)
-    lyrics.timeline = list(analysis_result.lyrics_segments)
+    if analysis_result is not None:
+        lyrics.text = _build_lyrics_text(analysis_result.lyrics_segments)
+        lyrics.timeline = list(analysis_result.lyrics_segments)
+    else:
+        lyrics.text = str(getattr(lyrics, "text", "") or "")
+        lyrics.timeline = list(getattr(lyrics, "timeline", []) or [])
     db.add(lyrics)
 
     db.commit()
     db.refresh(score)
     return score
+
+
+def _build_score_data_from_analysis(
+    analysis_result: AudioAnalysisResult,
+    *,
+    project: Project,
+    score_type: ScoreType,
+    key: str,
+    generated_at: str,
+) -> dict[str, Any]:
+    source_score_data = analysis_result.score_data
+    if not isinstance(source_score_data, dict):
+        source_score_data = analysis_result.score_ir if isinstance(analysis_result.score_ir, dict) else {}
+
+    score_data = dict(source_score_data)
+    meta = score_data.get("meta") if isinstance(score_data.get("meta"), dict) else {}
+    score_data["meta"] = {
+        **meta,
+        "project_id": str(project.id),
+        "score_type": score_type.value,
+        "requested_key": key,
+        "generated_by": "audio_analysis_service",
+        "generated_at": generated_at,
+        "uploaded_audio_path": project.audio_path,
+        "source_audio_path": analysis_result.source_audio_path,
+    }
+    score_data["generated_by"] = "audio_analysis_service"
+    score_data["generated_at"] = generated_at
+    score_data["audio_path"] = project.audio_path
+    score_data["source_audio_path"] = analysis_result.source_audio_path
+    score_data["normalized_audio_path"] = analysis_result.normalized_audio_path
+    score_data["vocals_path"] = analysis_result.vocals_path
+    score_data["accompaniment_path"] = analysis_result.accompaniment_path
+    score_data["stem_paths"] = dict(analysis_result.stem_paths or {})
+    if analysis_result.midi_path:
+        score_data["midi_path"] = analysis_result.midi_path
+        score_data["final_midi_path"] = analysis_result.midi_path
+    score_data["pitch_result"] = analysis_result.pitch_result
+    score_data["analysis_ir"] = analysis_result.analysis_ir
+    score_data["semantic_audio"] = analysis_result.semantic_audio
+    score_data["score_ir"] = analysis_result.score_ir
+    score_data["alignment"] = {
+        "source": analysis_result.alignment_source,
+        "accepted": analysis_result.alignment_accepted,
+        "baseline": analysis_result.baseline_alignment,
+        "refined": analysis_result.refined_alignment,
+        "final": analysis_result.final_alignment,
+        "warnings_before": list(analysis_result.validator_warnings_before or []),
+        "warnings_after": list(analysis_result.validator_warnings_after or []),
+        "refine_warnings": list(analysis_result.refine_warnings or []),
+    }
+    score_data["warnings"] = _merge_unique_strings(score_data.get("warnings"), analysis_result.warnings)
+    return score_data
+
+
+def _build_stub_score_data(
+    *,
+    project: Project,
+    score_type: ScoreType,
+    key: str,
+    generated_at: str,
+) -> dict[str, Any]:
+    return {
+        "generated_by": "backend_stub",
+        "generated_at": generated_at,
+        "notes": [],
+        "meta": {"project_id": str(project.id), "score_type": score_type.value, "key": key},
+    }
+
+
+def _merge_unique_strings(*chunks: Any) -> list[str]:
+    merged: list[str] = []
+    for chunk in chunks:
+        if isinstance(chunk, str):
+            values = [chunk]
+        elif isinstance(chunk, list):
+            values = chunk
+        else:
+            values = []
+        for item in values:
+            text = str(item).strip()
+            if text and text not in merged:
+                merged.append(text)
+    return merged
 
 
 def update_score(
@@ -485,12 +587,15 @@ def _build_musicxml_from_score_data(score_data: dict[str, Any] | None) -> bytes 
     score_part = ET.SubElement(part_list, "score-part", id="P1")
     ET.SubElement(score_part, "part-name").text = "Voice"
     part = ET.SubElement(root, "part", id="P1")
+    chords_by_measure = _group_items_by_measure(score_data.get("chord_timeline"))
+    sections_by_measure = _group_sections_by_measure(score_data.get("form_sections"))
 
     has_any_note = False
     for idx, measure in enumerate(measures, start=1):
         if not isinstance(measure, dict):
             continue
         measure_num = str(measure.get("measure_num") or idx)
+        measure_num_int = _safe_int(measure.get("measure_num"), fallback=idx)
         m = ET.SubElement(part, "measure", number=measure_num)
 
         if idx == 1:
@@ -506,6 +611,12 @@ def _build_musicxml_from_score_data(score_data: dict[str, Any] | None) -> bytes 
             ET.SubElement(clef, "line").text = "2"
             if bpm and bpm > 0:
                 ET.SubElement(m, "sound", tempo=str(round(float(bpm), 3)))
+
+        for section in sections_by_measure.get(measure_num_int, []):
+            _append_musicxml_section_direction(m, section)
+
+        for chord in chords_by_measure.get(measure_num_int, []):
+            _append_musicxml_harmony(m, chord)
 
         note_list = measure.get("notes")
         if not isinstance(note_list, list):
@@ -533,7 +644,14 @@ def _build_musicxml_from_score_data(score_data: dict[str, Any] | None) -> bytes 
 
             ET.SubElement(n, "duration").text = str(duration_value)
             ET.SubElement(n, "voice").text = "1"
-            ET.SubElement(n, "type").text = _map_note_type(note.get("note_type"), duration_beats)
+            note_type = note.get("note_type")
+            ET.SubElement(n, "type").text = _map_note_type(note_type, duration_beats)
+            if _is_dotted_note(note_type):
+                ET.SubElement(n, "dot")
+            if _is_triplet_note(note_type):
+                time_modification = ET.SubElement(n, "time-modification")
+                ET.SubElement(time_modification, "actual-notes").text = "3"
+                ET.SubElement(time_modification, "normal-notes").text = "2"
 
             lyric = note.get("lyric")
             if isinstance(lyric, str) and lyric.strip():
@@ -633,11 +751,119 @@ def _map_note_type(note_type_raw: Any, duration_beats: float) -> str:
     return "32nd"
 
 
+def _is_dotted_note(note_type_raw: Any) -> bool:
+    return isinstance(note_type_raw, str) and note_type_raw.strip().lower().startswith("dotted_")
+
+
+def _is_triplet_note(note_type_raw: Any) -> bool:
+    return isinstance(note_type_raw, str) and note_type_raw.strip().lower() == "triplet"
+
+
 def _safe_float(value: Any, *, fallback: float) -> float:
     try:
         return float(value)
     except (TypeError, ValueError):
         return fallback
+
+
+def _safe_int(value: Any, *, fallback: int) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return fallback
+
+
+def _group_items_by_measure(items: Any) -> dict[int, list[dict[str, Any]]]:
+    grouped: dict[int, list[dict[str, Any]]] = {}
+    if not isinstance(items, list):
+        return grouped
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        measure_num = _safe_int(item.get("measure_num"), fallback=0)
+        if measure_num <= 0:
+            continue
+        grouped.setdefault(measure_num, []).append(item)
+    return grouped
+
+
+def _group_sections_by_measure(items: Any) -> dict[int, list[dict[str, Any]]]:
+    grouped: dict[int, list[dict[str, Any]]] = {}
+    if not isinstance(items, list):
+        return grouped
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        measure_start = _safe_int(item.get("measure_start"), fallback=0)
+        if measure_start <= 0:
+            continue
+        grouped.setdefault(measure_start, []).append(item)
+    return grouped
+
+
+def _append_musicxml_section_direction(measure_el: ET.Element, section: dict[str, Any]) -> None:
+    label = str(section.get("label") or section.get("id") or "").strip()
+    if not label:
+        return
+    direction = ET.SubElement(measure_el, "direction", placement="above")
+    direction_type = ET.SubElement(direction, "direction-type")
+    ET.SubElement(direction_type, "rehearsal").text = label
+
+
+def _append_musicxml_harmony(measure_el: ET.Element, chord: dict[str, Any]) -> None:
+    root_name = str(chord.get("root") or "").strip()
+    if not root_name:
+        symbol = str(chord.get("symbol") or "").strip()
+        if not symbol:
+            return
+        root_name = symbol.split("/", 1)[0].strip()
+    parsed_root = _parse_chord_root(root_name)
+    if parsed_root is None:
+        return
+
+    harmony = ET.SubElement(measure_el, "harmony")
+    root = ET.SubElement(harmony, "root")
+    ET.SubElement(root, "root-step").text = parsed_root[0]
+    if parsed_root[1] != 0:
+        ET.SubElement(root, "root-alter").text = str(parsed_root[1])
+
+    kind_text = _map_chord_kind(chord.get("quality"))
+    ET.SubElement(harmony, "kind").text = kind_text
+
+    bass_name = chord.get("bass")
+    if isinstance(bass_name, str) and bass_name.strip():
+        parsed_bass = _parse_chord_root(bass_name)
+        if parsed_bass is not None:
+            bass = ET.SubElement(harmony, "bass")
+            ET.SubElement(bass, "bass-step").text = parsed_bass[0]
+            if parsed_bass[1] != 0:
+                ET.SubElement(bass, "bass-alter").text = str(parsed_bass[1])
+
+
+def _parse_chord_root(value: str) -> tuple[str, int] | None:
+    text = str(value or "").strip().replace("♯", "#").replace("♭", "b")
+    if not text:
+        return None
+    m = re.match(r"^([A-Ga-g])([#b]?)(?:.*)$", text)
+    if not m:
+        return None
+    step = m.group(1).upper()
+    accidental = m.group(2)
+    alter = 1 if accidental == "#" else (-1 if accidental == "b" else 0)
+    return step, alter
+
+
+def _map_chord_kind(raw_quality: Any) -> str:
+    quality = str(raw_quality or "").strip().lower()
+    if quality in {"m", "min", "minor"}:
+        return "minor"
+    if quality in {"dim", "diminished"}:
+        return "diminished"
+    if quality in {"aug", "augmented"}:
+        return "augmented"
+    if quality in {"5", "power"}:
+        return "power"
+    return "major"
 
 
 def _build_summary_pdf(score: Score) -> bytes:

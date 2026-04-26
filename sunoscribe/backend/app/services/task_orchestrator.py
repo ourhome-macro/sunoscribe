@@ -211,6 +211,8 @@ class TaskOrchestrator:
                 "project_id": str(project.id),
                 "score_type": score.score_type,
                 "key": score.key,
+                "generated_by": score.score_data.get("generated_by") if isinstance(score.score_data, dict) else None,
+                "midi_path": score.score_data.get("midi_path") if isinstance(score.score_data, dict) else None,
             }
 
     @staticmethod

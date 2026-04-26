@@ -93,6 +93,14 @@ def update_project(
     return project
 
 
+def update_project_audio_path(db: Session, *, project: Project, audio_path: str) -> Project:
+    project.audio_path = audio_path
+    db.add(project)
+    db.commit()
+    db.refresh(project)
+    return project
+
+
 def delete_project(db: Session, *, project: Project) -> None:
     db.delete(project)
     db.commit()

@@ -102,6 +102,10 @@ class ProjectWorkspace:
         return self.score_dir / "score_ir.json"
 
     @property
+    def score_data_path(self) -> Path:
+        return self.score_dir / "score_data.json"
+
+    @property
     def semantic_audio_path(self) -> Path:
         return self.score_dir / "semantic_audio.json"
 

@@ -225,6 +225,11 @@ class PitchPipeline:
             cache[normalized_path] = []
             return []
 
+        for backend_warning in getattr(self.detector, "backend_warnings", []) or []:
+            warning_text = f"{role}_{backend_warning}"
+            if warning_text not in warnings:
+                warnings.append(warning_text)
+
         cache[normalized_path] = list(detected)
         return [
             Note(
@@ -279,6 +284,7 @@ class PitchPipeline:
         )
         if not detected_notes:
             warnings.append("No melody candidates detected from lead audio.")
+        melody_detector_backend = str(getattr(self.detector, "active_backend_name", self.detector.backend_name))
 
         melody_selection = self.melody_selector.select(detected_notes)
         lead_notes = melody_selection.notes
@@ -459,7 +465,8 @@ class PitchPipeline:
                 "quantized_measure_alignment": "downbeat_reindexed",
                 "measure_count": len(measures),
                 "rhythm_stability": round(rhythm_result.stability_score, 4),
-                "detector": self.detector.backend_name,
+                "detector": melody_detector_backend,
+                "configured_detector": self.detector.backend_name,
                 "beat_backend": "librosa",
                 "key_backend": key_method,
             },

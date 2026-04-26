@@ -117,6 +117,30 @@ class TestScoreExportService(unittest.TestCase):
             key="C Major",
             score_data={
                 "meta": {"bpm": 100, "key": "C Major", "time_signature": "4/4"},
+                "chord_timeline": [
+                    {
+                        "measure_num": 1,
+                        "symbol": "C",
+                        "root": "C",
+                        "quality": "",
+                        "bass": None,
+                    },
+                    {
+                        "measure_num": 2,
+                        "symbol": "Dm",
+                        "root": "D",
+                        "quality": "m",
+                        "bass": None,
+                    },
+                ],
+                "form_sections": [
+                    {
+                        "id": "verse_a",
+                        "label": "verse_a",
+                        "measure_start": 1,
+                        "measure_end": 2,
+                    }
+                ],
                 "measures": [
                     {
                         "measure_num": 1,
@@ -128,6 +152,27 @@ class TestScoreExportService(unittest.TestCase):
                                 "duration_beats": 1.0,
                                 "note_type": "quarter",
                                 "confidence": 0.9,
+                            },
+                            {
+                                "pitch": "E4",
+                                "start_time": 0.5,
+                                "end_time": 0.875,
+                                "duration_beats": 0.75,
+                                "note_type": "dotted_eighth",
+                                "confidence": 0.86,
+                            }
+                        ],
+                    },
+                    {
+                        "measure_num": 2,
+                        "notes": [
+                            {
+                                "pitch": "D4",
+                                "start_time": 1.0,
+                                "end_time": 1.5,
+                                "duration_beats": 2.0 / 3.0,
+                                "note_type": "triplet",
+                                "confidence": 0.88,
                             }
                         ],
                     }
@@ -146,6 +191,15 @@ class TestScoreExportService(unittest.TestCase):
         text = content.decode("utf-8", errors="ignore")
         self.assertIn("<score-partwise", text)
         self.assertIn("<measure", text)
+        self.assertIn("<harmony>", text)
+        self.assertIn("<root-step>C</root-step>", text)
+        self.assertIn("<root-step>D</root-step>", text)
+        self.assertIn("<kind>minor</kind>", text)
+        self.assertIn("<rehearsal>verse_a</rehearsal>", text)
+        self.assertIn("<dot", text)
+        self.assertIn("<time-modification>", text)
+        self.assertIn("<actual-notes>3</actual-notes>", text)
+        self.assertIn("<normal-notes>2</normal-notes>", text)
         self.assertEqual(media_type, "application/vnd.recordare.musicxml+xml")
         self.assertTrue(str(filename).endswith(".musicxml"))
 

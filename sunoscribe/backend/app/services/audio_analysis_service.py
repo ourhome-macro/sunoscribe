@@ -23,8 +23,7 @@ from app.modules.alignment import (
     StubAlignmentLLMClient,
 )
 from app.modules.analysis_ir import AnalysisIR, BaselineAnalysisInferencer
-from app.modules.score_ir import AnalysisHints, ScoreIR, ScoreMeta
-from app.modules.score_ir import ScoreIRBuilder
+from app.modules.score_ir import AnalysisHints, ScoreIR, ScoreIRBuilder, ScoreIRSerializer, ScoreMeta
 
 from app.services.workspace import ProjectWorkspace
 
@@ -49,6 +48,7 @@ class AudioAnalysisResult:
     lyrics_segments: list[dict]
     pitch_result: dict | None
     analysis_ir: dict | None
+    score_data: dict | None
     score_ir: dict | None
     baseline_alignment: dict
     baseline_validator_warnings: list[str]
@@ -81,6 +81,7 @@ class _PerceptionStageResult:
     pitch_result_dict: dict | None
     analysis_ir_obj: AnalysisIR | None
     analysis_ir_dict: dict | None
+    score_data_dict: dict | None
     score_ir_obj: ScoreIR
     score_ir_dict: dict
     raw_pitch_midi_path: Path | None
@@ -180,6 +181,7 @@ class AudioAnalysisService:
             lyrics_segments=perception.lyrics_segments,
             pitch_result=perception.pitch_result_dict,
             analysis_ir=perception.analysis_ir_dict,
+            score_data=perception.score_data_dict,
             semantic_audio=perception.semantic_audio_dict,
             score_ir=perception.score_ir_dict,
             baseline_alignment=self._serialize(perception_obj=alignment.baseline_draft),
@@ -214,22 +216,7 @@ class AudioAnalysisService:
         stem_paths: dict[str, Path] = {}
         semantic_audio_dict: dict | None = None
 
-        current_audio_path = source_audio_path
-
-        if self.audio_processor is None:
-            warnings.append("audio_processor_missing: skip normalize")
-        else:
-            try:
-                # TODO: 按真实接口调整
-                normalized_str = await asyncio.to_thread(
-                    self.audio_processor.convert,
-                    str(source_audio_path),
-                    str(workspace.normalized_audio_path),
-                )
-                normalized_audio_path = Path(normalized_str)
-                current_audio_path = normalized_audio_path
-            except Exception as exc:
-                warnings.append(f"audio_normalize_failed:{self._short_exception(exc)}")
+        fallback_audio_path = source_audio_path
 
         if options.enable_vocal_separation:
             if self.vocal_separator is None:
@@ -239,7 +226,7 @@ class AudioAnalysisService:
                     # TODO: 按真实接口调整
                     sep = await asyncio.to_thread(
                         self.vocal_separator.separate,
-                        str(current_audio_path),
+                        str(source_audio_path),
                         str(workspace.separation_dir),
                         "separated",
                     )
@@ -249,7 +236,23 @@ class AudioAnalysisService:
                 except Exception as exc:
                     warnings.append(f"vocal_separation_failed:{self._short_exception(exc)}")
 
-        lyrics_audio_path = vocals_path or current_audio_path
+        needs_normalized_fallback = vocals_path is None or not stem_paths
+        if needs_normalized_fallback:
+            if self.audio_processor is None:
+                warnings.append("audio_processor_missing: skip normalize")
+            else:
+                try:
+                    normalized_str = await asyncio.to_thread(
+                        self.audio_processor.convert,
+                        str(source_audio_path),
+                        str(workspace.normalized_audio_path),
+                    )
+                    normalized_audio_path = Path(normalized_str)
+                    fallback_audio_path = normalized_audio_path
+                except Exception as exc:
+                    warnings.append(f"audio_normalize_failed:{self._short_exception(exc)}")
+
+        lyrics_audio_path = vocals_path or fallback_audio_path
         lyrics_segments: list[dict] = []
         whisper_raw: dict[str, Any] | None = None
 
@@ -275,6 +278,7 @@ class AudioAnalysisService:
         pitch_result_dict: dict | None = None
         analysis_ir_obj: AnalysisIR | None = None
         analysis_ir_dict: dict | None = None
+        score_data_dict: dict | None = None
 
         if self.pitch_pipeline is None:
             warnings.append("pitch_pipeline_missing: skip pitch")
@@ -282,7 +286,8 @@ class AudioAnalysisService:
             try:
                 # TODO: 按真实接口调整
                 pitch_request = self._build_pitch_pipeline_request(
-                    source_audio_path=current_audio_path,
+                    source_audio_path=source_audio_path,
+                    fallback_audio_path=fallback_audio_path,
                     vocals_path=vocals_path,
                     accompaniment_path=accompaniment_path,
                     stem_paths=stem_paths,
@@ -349,6 +354,11 @@ class AudioAnalysisService:
         if score_ir_obj is None:
             score_ir_obj = self._build_empty_score_ir(warnings)
 
+        try:
+            score_data_dict = ScoreIRSerializer.to_score_data(score_ir_obj)
+        except Exception as exc:
+            warnings.append(f"score_data_build_failed:{self._short_exception(exc)}")
+
         score_ir_serialized = self._serialize(perception_obj=score_ir_obj)
         score_ir_dict = score_ir_serialized if isinstance(score_ir_serialized, dict) else {"value": score_ir_serialized}
 
@@ -363,6 +373,7 @@ class AudioAnalysisService:
             pitch_result_dict=pitch_result_dict,
             analysis_ir_obj=analysis_ir_obj,
             analysis_ir_dict=analysis_ir_dict,
+            score_data_dict=score_data_dict,
             semantic_audio_dict=semantic_audio_dict,
             score_ir_obj=score_ir_obj,
             score_ir_dict=score_ir_dict,
@@ -416,22 +427,24 @@ class AudioAnalysisService:
         self,
         *,
         source_audio_path: Path,
+        fallback_audio_path: Path | None = None,
         vocals_path: Path | None,
         accompaniment_path: Path | None,
         stem_paths: dict[str, Path],
     ) -> Any:
+        fallback_path = fallback_audio_path or source_audio_path
         try:
             from app.modules.pitch import PitchPipelineRequest
         except Exception:
-            return str(vocals_path or source_audio_path)
+            return str(vocals_path or fallback_path)
 
         stem_map = {name: str(path) for name, path in stem_paths.items()}
-        rhythm_path = stem_paths.get("drums") or accompaniment_path or source_audio_path
-        key_path = stem_paths.get("other") or accompaniment_path or source_audio_path
+        rhythm_path = stem_paths.get("drums") or accompaniment_path or fallback_path
+        key_path = stem_paths.get("other") or accompaniment_path or fallback_path
         harmony_path = stem_paths.get("other") or accompaniment_path
         bass_path = stem_paths.get("bass") or accompaniment_path
         return PitchPipelineRequest(
-            lead_audio_path=str(vocals_path or source_audio_path),
+            lead_audio_path=str(vocals_path or fallback_path),
             source_audio_path=str(source_audio_path),
             rhythm_audio_path=str(rhythm_path),
             key_audio_path=str(key_path),
@@ -584,6 +597,8 @@ class AudioAnalysisService:
             self._write_json(workspace.pitch_result_path, perception.pitch_result_dict)
             if perception.analysis_ir_dict is not None:
                 self._write_json(workspace.analysis_ir_path, perception.analysis_ir_dict)
+            if perception.score_data_dict is not None:
+                self._write_json(workspace.score_data_path, perception.score_data_dict)
             if perception.semantic_audio_dict is not None:
                 self._write_json(workspace.semantic_audio_path, perception.semantic_audio_dict)
             self._write_json(workspace.score_ir_path, perception.score_ir_dict)

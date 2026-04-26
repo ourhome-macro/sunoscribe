@@ -9,11 +9,18 @@ class PitchDetectionConfig:
     # Base settings
     sample_rate: int = 22050
     confidence_threshold: float = 0.5
-    pitch_backend: str = "crepe"  # "crepe" / "basic-pitch"
+    pitch_backend: str = "rmvpe"  # "rmvpe" / "crepe" / "basic-pitch"
+    pitch_backend_fallbacks: tuple[str, ...] = ("crepe", "basic-pitch")
 
     # Runtime limits
     max_audio_length_sec: float = 600.0
     chunk_size_sec: float = 30.0
+
+    # RMVPE settings
+    rmvpe_model_path: str | None = None
+    rmvpe_sample_rate: int = 16000
+    rmvpe_step_size_ms: int = 10
+    rmvpe_vuv_threshold: float = 0.03
 
     # CREPE settings
     crepe_model_capacity: str = "full"  # tiny/small/medium/large/full

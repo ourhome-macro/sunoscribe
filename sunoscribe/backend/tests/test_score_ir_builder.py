@@ -2,7 +2,7 @@ import unittest
 
 from app.modules.analysis_ir.types import AnalysisIR, AnalysisIRMeta, ChordSpan, FormSection
 from app.modules.pitch.types import MetaInfo, Note, PitchAnalysisResult
-from app.modules.score_ir import ScoreIRBuilder
+from app.modules.score_ir import ScoreIRBuilder, ScoreIRSerializer
 
 
 class TestScoreIRBuilder(unittest.TestCase):
@@ -105,6 +105,12 @@ class TestScoreIRBuilder(unittest.TestCase):
         self.assertEqual(score_ir.meta.analysis_info["analysis_ir_version"], "analysis_ir_v1")
         self.assertEqual(score_ir.meta.analysis_info["analysis_ir_chord_count"], 2)
         self.assertEqual(score_ir.meta.analysis_info["analysis_ir_form_section_count"], 1)
+
+        score_data = ScoreIRSerializer.to_score_data(score_ir)
+        self.assertEqual(len(score_data["chord_timeline"]), 2)
+        self.assertEqual(score_data["chord_timeline"][1]["symbol"], "Dm")
+        self.assertEqual(len(score_data["form_sections"]), 1)
+        self.assertEqual(score_data["form_sections"][0]["label"], "section_a")
 
 
 if __name__ == "__main__":

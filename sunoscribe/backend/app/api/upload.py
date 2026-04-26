@@ -6,7 +6,7 @@ from sqlalchemy.orm import Session
 from app.config import settings
 from app.database import get_db
 from app.schemas.upload import UploadResponse
-from app.services.project_service import get_project_by_id
+from app.services.project_service import get_project_by_id, update_project_audio_path
 from app.services.upload_service import parse_uuid, save_upload_file
 from app.utils.dependencies import get_current_user
 from app.utils.responses import success_response
@@ -21,8 +21,8 @@ async def upload_audio_api(
     db: Session = Depends(get_db),
     current_user=Depends(get_current_user),
 ):
-    project = get_project_by_id(db, user=current_user, project_id=project_id)
     project_uuid = parse_uuid(project_id, "project_id")
+    project = get_project_by_id(db, user=current_user, project_id=str(project_uuid))
     file_path, size = await save_upload_file(
         upload=file,
         media_kind="audio",
@@ -39,10 +39,11 @@ async def upload_audio_api(
         minio_region=settings.minio_region,
         minio_base_path=settings.minio_base_path,
     )
-    project.audio_path = file_path
-    db.add(project)
-    db.commit()
-    db.refresh(project)
+    update_project_audio_path(
+        db,
+        project=project,
+        audio_path=file_path,
+    )
     data = UploadResponse(file_path=file_path, project_id=project_uuid, filename=file.filename or "", size=size)
     return success_response(data.model_dump(), "音频上传成功")
 
@@ -54,8 +55,8 @@ async def upload_video_api(
     db: Session = Depends(get_db),
     current_user=Depends(get_current_user),
 ):
-    project = get_project_by_id(db, user=current_user, project_id=project_id)
     project_uuid = parse_uuid(project_id, "project_id")
+    project = get_project_by_id(db, user=current_user, project_id=str(project_uuid))
     file_path, size = await save_upload_file(
         upload=file,
         media_kind="video",
@@ -72,9 +73,10 @@ async def upload_video_api(
         minio_region=settings.minio_region,
         minio_base_path=settings.minio_base_path,
     )
-    project.audio_path = file_path
-    db.add(project)
-    db.commit()
-    db.refresh(project)
+    update_project_audio_path(
+        db,
+        project=project,
+        audio_path=file_path,
+    )
     data = UploadResponse(file_path=file_path, project_id=project_uuid, filename=file.filename or "", size=size)
     return success_response(data.model_dump(), "视频上传成功")

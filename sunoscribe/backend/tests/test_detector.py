@@ -9,9 +9,16 @@ import numpy as np
 from app.modules.pitch.config import PitchDetectionConfig
 from app.modules.pitch.detector import PitchDetector
 from app.modules.pitch.exceptions import AudioTooLongError, PitchModelUnavailableError
+from app.modules.pitch.types import Note
 
 
 class TestPitchDetector(unittest.TestCase):
+    def test_default_backend_is_rmvpe(self):
+        detector = PitchDetector()
+
+        self.assertEqual(detector.backend_name, "rmvpe")
+        self.assertEqual(PitchDetector._normalize_backend("unknown"), "rmvpe")
+
     def test_detect_filters_by_confidence_and_sorts(self):
         cfg = PitchDetectionConfig(confidence_threshold=0.5, pitch_backend="basic-pitch")
         detector = PitchDetector(cfg)
@@ -72,6 +79,96 @@ class TestPitchDetector(unittest.TestCase):
         ):
             with self.assertRaises(PitchModelUnavailableError):
                 detector.detect(str(audio_path))
+
+    def test_detect_with_rmvpe_segments_notes_from_f0_frames(self):
+        cfg = PitchDetectionConfig(
+            pitch_backend="rmvpe",
+            confidence_threshold=0.5,
+            rmvpe_sample_rate=16000,
+            rmvpe_step_size_ms=10,
+            crepe_vuv_confidence_threshold=0.45,
+            crepe_max_unvoiced_gap_sec=0.02,
+            crepe_pitch_jump_semitones=1.0,
+            crepe_min_note_duration_sec=0.01,
+            crepe_min_voiced_frames=1,
+            crepe_smoothing_window=3,
+        )
+        detector = PitchDetector(cfg)
+        audio_path = Path(__file__)
+
+        midi_vals = np.array([60.0, 60.1, 0.0, 60.0, 60.2, 64.0, 64.1, 64.0], dtype=float)
+        freqs = np.where(midi_vals > 0.0, 440.0 * (2.0 ** ((midi_vals - 69.0) / 12.0)), 0.0)
+
+        class FakeRMVPE:
+            def infer_from_audio(self, _audio, thred=0.03):
+                self.threshold = thred
+                return freqs
+
+        fake_rmvpe = types.ModuleType("rmvpe")
+        fake_rmvpe.RMVPE = FakeRMVPE
+
+        with patch("app.modules.pitch.detector.get_audio_duration", return_value=1.0), patch.object(
+            detector,
+            "_load_audio_mono",
+            return_value=(np.zeros(16000, dtype=np.float32), 16000),
+        ), patch(
+            "app.modules.pitch.detector.midi_to_note", side_effect=lambda midi: f"M{int(midi)}"
+        ), patch.dict(
+            sys.modules,
+            {"rmvpe": fake_rmvpe},
+            clear=False,
+        ):
+            notes = detector.detect(str(audio_path))
+
+        self.assertEqual(len(notes), 2)
+        self.assertEqual([n.pitch for n in notes], ["M60", "M64"])
+        self.assertTrue(all(n.confidence >= 0.5 for n in notes))
+
+    def test_detect_raises_when_rmvpe_missing(self):
+        cfg = PitchDetectionConfig(pitch_backend="rmvpe")
+        detector = PitchDetector(cfg)
+        audio_path = Path(__file__)
+
+        with patch("app.modules.pitch.detector.get_audio_duration", return_value=0.8), patch.object(
+            detector,
+            "_load_audio_mono",
+            return_value=(np.zeros(16000, dtype=np.float32), 16000),
+        ), patch(
+            "app.modules.pitch.detector.importlib.import_module",
+            side_effect=ImportError("rmvpe missing"),
+        ):
+            with self.assertRaises(PitchModelUnavailableError):
+                detector.detect(str(audio_path))
+
+    def test_detect_raises_when_rmvpe_model_path_missing(self):
+        cfg = PitchDetectionConfig(pitch_backend="rmvpe", rmvpe_model_path="missing-rmvpe-model.pt")
+        detector = PitchDetector(cfg)
+        audio_path = Path(__file__)
+
+        with patch("app.modules.pitch.detector.get_audio_duration", return_value=0.8):
+            with self.assertRaises(PitchModelUnavailableError):
+                detector.detect(str(audio_path))
+
+    def test_rmvpe_falls_back_to_crepe_when_model_unavailable(self):
+        cfg = PitchDetectionConfig(pitch_backend="rmvpe", pitch_backend_fallbacks=("crepe",))
+        detector = PitchDetector(cfg)
+        audio_path = Path(__file__)
+        fallback_notes = [Note(pitch="C4", start_time=0.1, end_time=0.5, confidence=0.9)]
+
+        with patch("app.modules.pitch.detector.get_audio_duration", return_value=0.8), patch.object(
+            PitchDetector,
+            "_detect_with_rmvpe",
+            side_effect=PitchModelUnavailableError("rmvpe missing"),
+        ), patch.object(
+            PitchDetector,
+            "_detect_with_crepe",
+            return_value=fallback_notes,
+        ):
+            notes = detector.detect(str(audio_path))
+
+        self.assertEqual(notes, fallback_notes)
+        self.assertEqual(detector.active_backend_name, "crepe")
+        self.assertEqual(detector.backend_warnings, ["pitch_backend_fallback:rmvpe->crepe"])
 
     def test_detect_with_crepe_segments_notes_and_bridges_short_unvoiced_gap(self):
         cfg = PitchDetectionConfig(

@@ -3,7 +3,10 @@ from __future__ import annotations
 import unittest
 import uuid
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import MagicMock
 
+from app.services.project_service import update_project_audio_path
 from app.services.upload_service import (
     build_upload_object_key,
     build_upload_target_path,
@@ -55,6 +58,19 @@ class TestUploadService(unittest.TestCase):
             base_path="uploads",
         )
         self.assertEqual(key, f"uploads/{user_id}/{project_id}/audio.wav")
+
+    def test_update_project_audio_path(self) -> None:
+        db = MagicMock()
+        project = SimpleNamespace(audio_path=None)
+        saved_path = "data/uploads/user/project/song.wav"
+
+        updated = update_project_audio_path(db, project=project, audio_path=saved_path)
+
+        self.assertIs(updated, project)
+        self.assertEqual(project.audio_path, saved_path)
+        db.add.assert_called_once_with(project)
+        db.commit.assert_called_once()
+        db.refresh.assert_called_once_with(project)
 
 
 if __name__ == "__main__":

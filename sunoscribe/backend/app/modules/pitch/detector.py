@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import importlib
+from dataclasses import replace
 from pathlib import Path
 from typing import List
 
@@ -18,20 +20,24 @@ from .types import Note
 
 
 class PitchDetector:
-    """Pitch detector with pluggable backends (CREPE / basic-pitch)."""
+    """Pitch detector with pluggable backends (RMVPE / CREPE / basic-pitch)."""
 
     def __init__(self, config: PitchDetectionConfig | None = None) -> None:
         self.config = config or PitchDetectionConfig()
         self.backend_name = self._normalize_backend(self.config.pitch_backend)
+        self.active_backend_name = self.backend_name
+        self.backend_warnings: list[str] = []
 
     @staticmethod
     def _normalize_backend(raw: str) -> str:
         value = str(raw or "").strip().lower()
-        if value in {"crepe", "basic-pitch"}:
+        if value in {"rmvpe", "crepe", "basic-pitch"}:
             return value
+        if value in {"r-mvpe", "rvc-rmvpe"}:
+            return "rmvpe"
         if value in {"basic_pitch", "basicpitch"}:
             return "basic-pitch"
-        return "crepe"
+        return "rmvpe"
 
     def _validate_audio_length(self, audio_path: str) -> float:
         try:
@@ -47,15 +53,65 @@ class PitchDetector:
 
     def detect(self, audio_path: str) -> List[Note]:
         """Return non-quantized notes from detector backend."""
+        self.active_backend_name = self.backend_name
+        self.backend_warnings = []
+
         audio_file = Path(audio_path)
         if not audio_file.exists():
             raise PitchDetectionFailedError(f"audio file not found: {audio_path}")
 
         duration = self._validate_audio_length(audio_path)
 
+        if self.backend_name == "rmvpe":
+            try:
+                return self._detect_with_rmvpe(audio_file, duration_sec=duration)
+            except PitchModelUnavailableError as exc:
+                return self._detect_with_backend_fallbacks(audio_file, duration_sec=duration, original_error=exc)
         if self.backend_name == "basic-pitch":
             return self._detect_with_basic_pitch(audio_file)
         return self._detect_with_crepe(audio_file, duration_sec=duration)
+
+    def _detect_with_backend_fallbacks(
+        self,
+        audio_file: Path,
+        *,
+        duration_sec: float,
+        original_error: PitchModelUnavailableError,
+    ) -> List[Note]:
+        fallback_backends = tuple(getattr(self.config, "pitch_backend_fallbacks", ("crepe", "basic-pitch")) or ())
+        errors = [f"{self.backend_name}:{original_error}"]
+
+        for raw_backend in fallback_backends:
+            backend = self._normalize_backend(str(raw_backend))
+            if backend == self.backend_name:
+                continue
+
+            fallback_config = replace(self.config, pitch_backend=backend)
+            fallback_detector = PitchDetector(fallback_config)
+            try:
+                if backend == "basic-pitch":
+                    notes = fallback_detector._detect_with_basic_pitch(audio_file)
+                elif backend == "crepe":
+                    notes = fallback_detector._detect_with_crepe(audio_file, duration_sec=duration_sec)
+                elif backend == "rmvpe":
+                    notes = fallback_detector._detect_with_rmvpe(audio_file, duration_sec=duration_sec)
+                else:
+                    continue
+            except PitchModelUnavailableError as exc:
+                errors.append(f"{backend}:{exc}")
+                continue
+            except PitchDetectionFailedError as exc:
+                errors.append(f"{backend}:{exc}")
+                continue
+
+            self.active_backend_name = fallback_detector.active_backend_name
+            self.backend_warnings = [
+                f"pitch_backend_fallback:{self.backend_name}->{self.active_backend_name}",
+            ]
+            return notes
+
+        detail = "; ".join(errors[-3:])
+        raise PitchModelUnavailableError(f"No pitch backend available. {detail}") from original_error
 
     def _detect_with_basic_pitch(self, audio_file: Path) -> List[Note]:
         try:
@@ -100,6 +156,314 @@ class PitchDetector:
 
         notes.sort(key=lambda n: (n.start_time, n.end_time))
         return notes
+
+    def _detect_with_rmvpe(self, audio_file: Path, *, duration_sec: float) -> List[Note]:
+        model_path = self._resolve_rmvpe_model_path()
+        sample_rate = max(
+            1,
+            int(getattr(self.config, "rmvpe_sample_rate", self.config.sample_rate) or self.config.sample_rate),
+        )
+        step_size_ms = max(
+            1,
+            int(
+                getattr(self.config, "rmvpe_step_size_ms", self.config.crepe_step_size_ms)
+                or self.config.crepe_step_size_ms
+            ),
+        )
+
+        model = self._build_rmvpe_model(model_path=model_path)
+
+        try:
+            audio, sr = self._load_audio_mono(str(audio_file), sample_rate=sample_rate)
+        except Exception as exc:
+            raise PitchDetectionFailedError(f"failed to load audio for RMVPE: {exc}") from exc
+
+        if audio.size == 0:
+            return []
+
+        try:
+            times, frequencies, confidences = self._predict_rmvpe_frames(
+                audio=audio,
+                sample_rate=sr,
+                duration_sec=float(duration_sec),
+                step_size_ms=step_size_ms,
+                model=model,
+            )
+        except PitchModelUnavailableError:
+            raise
+        except Exception as exc:
+            raise PitchDetectionFailedError(f"RMVPE inference failed: {exc}") from exc
+
+        time_arr = np.asarray(times, dtype=float).reshape(-1)
+        freq_arr = np.asarray(frequencies, dtype=float).reshape(-1)
+        conf_arr = np.asarray(confidences, dtype=float).reshape(-1)
+        frame_count = int(min(time_arr.size, freq_arr.size, conf_arr.size))
+        if frame_count <= 0:
+            return []
+
+        return self._frames_to_notes(
+            times=time_arr[:frame_count],
+            frequencies=freq_arr[:frame_count],
+            confidences=conf_arr[:frame_count],
+            duration_sec=float(duration_sec),
+        )
+
+    def _resolve_rmvpe_model_path(self) -> str | None:
+        raw_path = getattr(self.config, "rmvpe_model_path", None)
+        if raw_path is None:
+            return None
+
+        value = str(raw_path).strip()
+        if not value:
+            return None
+
+        model_path = Path(value).expanduser()
+        if not model_path.exists():
+            raise PitchModelUnavailableError(f"RMVPE model file is unavailable: {model_path}")
+        return str(model_path.resolve())
+
+    def _predict_rmvpe_frames(
+        self,
+        *,
+        audio: np.ndarray,
+        sample_rate: int,
+        duration_sec: float,
+        step_size_ms: int,
+        model: object,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        raw_output = self._call_rmvpe_model(
+            model,
+            audio=audio,
+            sample_rate=sample_rate,
+            step_size_ms=step_size_ms,
+        )
+        return self._coerce_rmvpe_output(
+            raw_output,
+            duration_sec=duration_sec,
+            step_size_ms=step_size_ms,
+        )
+
+    def _build_rmvpe_model(self, *, model_path: str | None) -> object:
+        candidates = (
+            ("rmvpe", "RMVPE"),
+            ("rmvpe.inference", "RMVPE"),
+            ("rmvpe.model", "RMVPE"),
+            ("infer.lib.rmvpe", "RMVPE"),
+            ("rvc.lib.rmvpe", "RMVPE"),
+            ("rvc.lib.predictors.RMVPE", "RMVPE"),
+            ("rvc.modules.extract_f0.rmvpe", "RMVPE"),
+        )
+        errors: list[str] = []
+
+        for module_name, class_name in candidates:
+            try:
+                module = importlib.import_module(module_name)
+            except Exception as exc:
+                errors.append(f"{module_name}: {exc}")
+                continue
+
+            model_cls = getattr(module, class_name, None)
+            if model_cls is not None:
+                try:
+                    return self._instantiate_rmvpe_model(model_cls, model_path=model_path)
+                except PitchModelUnavailableError as exc:
+                    errors.append(f"{module_name}.{class_name}: {exc}")
+                    continue
+
+            if any(
+                callable(getattr(module, method_name, None))
+                for method_name in ("infer_from_audio", "predict", "get_pitch")
+            ):
+                return module
+
+            errors.append(f"{module_name}: no RMVPE predictor API found")
+
+        detail = "; ".join(errors[-3:])
+        suffix = f" Details: {detail}" if detail else ""
+        raise PitchModelUnavailableError(
+            "RMVPE backend is unavailable. Install an RMVPE runtime and provide a local model file if required."
+            + suffix
+        )
+
+    def _instantiate_rmvpe_model(self, model_cls: object, *, model_path: str | None) -> object:
+        device = self._preferred_rmvpe_device()
+        attempts: list[tuple[tuple[object, ...], dict[str, object]]] = []
+
+        if model_path:
+            attempts.extend(
+                [
+                    ((), {"model_path": model_path, "is_half": False, "device": device}),
+                    ((), {"model_path": model_path, "device": device}),
+                    ((), {"model_path": model_path}),
+                    ((model_path, False, device), {}),
+                    ((model_path,), {}),
+                ]
+            )
+        else:
+            attempts.extend(
+                [
+                    ((), {}),
+                    ((), {"model_path": None, "is_half": False, "device": device}),
+                    ((), {"model_path": None, "device": device}),
+                    ((None, False, device), {}),
+                    ((None,), {}),
+                ]
+            )
+
+        errors: list[str] = []
+        for args, kwargs in attempts:
+            try:
+                return model_cls(*args, **kwargs)  # type: ignore[operator]
+            except TypeError as exc:
+                errors.append(str(exc))
+                continue
+            except Exception as exc:
+                raise PitchModelUnavailableError(f"RMVPE model could not be loaded: {exc}") from exc
+
+        detail = "; ".join(errors[-2:])
+        raise PitchModelUnavailableError(f"RMVPE model could not be constructed. {detail}".strip())
+
+    @staticmethod
+    def _preferred_rmvpe_device() -> str:
+        try:
+            import torch
+
+            return "cuda" if torch.cuda.is_available() else "cpu"
+        except Exception:
+            return "cpu"
+
+    def _call_rmvpe_model(
+        self,
+        model: object,
+        *,
+        audio: np.ndarray,
+        sample_rate: int,
+        step_size_ms: int,
+    ) -> object:
+        threshold = max(0.0, min(1.0, float(getattr(self.config, "rmvpe_vuv_threshold", 0.03))))
+        method_names = ("infer_from_audio", "predict", "get_pitch")
+
+        for method_name in method_names:
+            method = getattr(model, method_name, None)
+            if callable(method):
+                result, matched = self._try_rmvpe_calls(
+                    method,
+                    audio=audio,
+                    sample_rate=sample_rate,
+                    step_size_ms=step_size_ms,
+                    threshold=threshold,
+                )
+                if matched:
+                    return result
+
+        if callable(model):
+            result, matched = self._try_rmvpe_calls(
+                model,
+                audio=audio,
+                sample_rate=sample_rate,
+                step_size_ms=step_size_ms,
+                threshold=threshold,
+            )
+            if matched:
+                return result
+
+        raise PitchModelUnavailableError("RMVPE backend does not expose a supported inference method.")
+
+    def _try_rmvpe_calls(
+        self,
+        func: object,
+        *,
+        audio: np.ndarray,
+        sample_rate: int,
+        step_size_ms: int,
+        threshold: float,
+    ) -> tuple[object | None, bool]:
+        call_attempts = (
+            ((audio,), {"thred": threshold}),
+            ((audio,), {"threshold": threshold}),
+            ((audio,), {"sample_rate": sample_rate, "step_size": step_size_ms}),
+            ((audio, sample_rate), {}),
+            ((audio,), {}),
+        )
+        for args, kwargs in call_attempts:
+            try:
+                return func(*args, **kwargs), True  # type: ignore[operator]
+            except TypeError:
+                continue
+            except Exception as exc:
+                raise PitchModelUnavailableError(f"RMVPE inference runtime is unavailable: {exc}") from exc
+
+        return None, False
+
+    def _coerce_rmvpe_output(
+        self,
+        raw_output: object,
+        *,
+        duration_sec: float,
+        step_size_ms: int,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        times: object | None = None
+        frequencies: object | None = None
+        confidences: object | None = None
+
+        if isinstance(raw_output, dict):
+            times = self._first_present(raw_output, ("times", "time", "timestamps"))
+            frequencies = self._first_present(raw_output, ("frequencies", "frequency", "f0", "pitch", "pitch_hz"))
+            confidences = self._first_present(raw_output, ("confidences", "confidence", "periodicity", "uv", "voiced"))
+        elif isinstance(raw_output, (tuple, list)):
+            values = list(raw_output)
+            if len(values) >= 3:
+                times, frequencies, confidences = values[:3]
+            elif len(values) == 2:
+                first, second = values
+                if self._looks_like_time_axis(first, duration_sec=duration_sec):
+                    times, frequencies = first, second
+                else:
+                    frequencies, confidences = first, second
+            elif len(values) == 1:
+                frequencies = values[0]
+        else:
+            frequencies = raw_output
+
+        if frequencies is None:
+            raise PitchDetectionFailedError("RMVPE did not return pitch frequencies.")
+
+        freq_arr = np.asarray(frequencies, dtype=float).reshape(-1)
+        if times is None:
+            hop_sec = max(0.001, float(step_size_ms) / 1000.0)
+            time_arr = np.arange(freq_arr.size, dtype=float) * hop_sec
+        else:
+            time_arr = np.asarray(times, dtype=float).reshape(-1)
+
+        if confidences is None:
+            conf_arr = np.where(np.isfinite(freq_arr) & (freq_arr > 0.0), 1.0, 0.0).astype(float)
+        else:
+            conf_arr = np.asarray(confidences, dtype=float).reshape(-1)
+            conf_arr = np.nan_to_num(conf_arr, nan=0.0, posinf=0.0, neginf=0.0)
+            conf_arr = np.clip(conf_arr, 0.0, 1.0)
+
+        frame_count = int(min(time_arr.size, freq_arr.size, conf_arr.size))
+        return time_arr[:frame_count], freq_arr[:frame_count], conf_arr[:frame_count]
+
+    @staticmethod
+    def _first_present(values: dict, keys: tuple[str, ...]) -> object | None:
+        for key in keys:
+            if key in values and values[key] is not None:
+                return values[key]
+        return None
+
+    @staticmethod
+    def _looks_like_time_axis(values: object, *, duration_sec: float) -> bool:
+        try:
+            arr = np.asarray(values, dtype=float).reshape(-1)
+        except Exception:
+            return False
+        if arr.size < 2 or not np.all(np.isfinite(arr)):
+            return False
+        diffs = np.diff(arr)
+        if not np.all(diffs >= -1e-7):
+            return False
+        return float(arr[0]) >= -1e-6 and float(arr[-1]) <= max(1.0, float(duration_sec) + 1.0)
 
     def _detect_with_crepe(self, audio_file: Path, *, duration_sec: float) -> List[Note]:
         try:
