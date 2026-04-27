@@ -5,6 +5,7 @@ from typing import Any
 from pydantic import BaseModel, Field
 
 from app.models.enums import ScoreType
+from app.schemas.score_patch import ScorePatch
 
 
 class GenerateScoreRequest(BaseModel):
@@ -18,7 +19,8 @@ class UpdateScoreRequest(BaseModel):
     vocal_range: str | None = Field(default=None, max_length=100)
     recommended_voice: str | None = Field(default=None, max_length=100)
     emotion: str | None = Field(default=None, max_length=100)
-    score_data: dict[str, Any] | None = None
+    revision_id: uuid.UUID | None = None
+    patch: ScorePatch | None = None
 
 
 class ScoreDTO(BaseModel):
@@ -30,5 +32,8 @@ class ScoreDTO(BaseModel):
     recommended_voice: str | None = None
     emotion: str | None = None
     score_data: dict[str, Any]
+    current_revision_id: uuid.UUID | None = None
+    current_revision: dict[str, Any] | None = None
+    revisions: list[dict[str, Any]] = Field(default_factory=list)
     created_at: datetime
     updated_at: datetime

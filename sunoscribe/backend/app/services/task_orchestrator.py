@@ -211,8 +211,7 @@ class TaskOrchestrator:
                 "project_id": str(project.id),
                 "score_type": score.score_type,
                 "key": score.key,
-                "generated_by": score.score_data.get("generated_by") if isinstance(score.score_data, dict) else None,
-                "midi_path": score.score_data.get("midi_path") if isinstance(score.score_data, dict) else None,
+                "current_revision_id": str(score.current_revision_id) if score.current_revision_id else None,
             }
 
     def _claim_task(self, task_uuid: uuid.UUID) -> bool:

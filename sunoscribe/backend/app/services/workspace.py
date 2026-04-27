@@ -61,6 +61,15 @@ class ProjectWorkspace:
     def exports_dir(self) -> Path:
         return self.project_dir / "exports"
 
+    def revision_dir(self, revision_id: str) -> Path:
+        normalized_revision_id = str(revision_id).strip()
+        if not normalized_revision_id:
+            raise ValueError("revision_id cannot be empty")
+        return self.project_dir / "revisions" / normalized_revision_id
+
+    def revision_exports_dir(self, revision_id: str) -> Path:
+        return self.revision_dir(revision_id) / "exports"
+
     @property
     def logs_dir(self) -> Path:
         return self.project_dir / "logs"

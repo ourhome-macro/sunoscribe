@@ -4,7 +4,7 @@ from sqlalchemy.orm import Session
 
 from app.database import get_db
 from app.schemas.score import GenerateScoreRequest, UpdateScoreRequest
-from app.services.score_service import export_score, get_score_by_project_id, update_score
+from app.services.score_service import build_score_response, export_score, get_score_by_project_id, update_score
 from app.services.task_orchestrator import task_orchestrator
 from app.services.task_service import create_score_generation_task
 from app.utils.dependencies import get_current_user
@@ -20,20 +20,7 @@ def get_project_score_api(
     current_user=Depends(get_current_user),
 ):
     score = get_score_by_project_id(db, user=current_user, project_id=project_id)
-    return success_response(
-        {
-            "id": str(score.id),
-            "project_id": str(score.project_id),
-            "score_type": score.score_type,
-            "key": score.key,
-            "vocal_range": score.vocal_range,
-            "recommended_voice": score.recommended_voice,
-            "emotion": score.emotion,
-            "score_data": score.score_data,
-            "created_at": score.created_at.isoformat(),
-            "updated_at": score.updated_at.isoformat(),
-        }
-    )
+    return success_response(build_score_response(score))
 
 
 @router.post("/projects/{project_id}/score", status_code=status.HTTP_202_ACCEPTED)
@@ -67,7 +54,7 @@ def regenerate_project_score_api(
             "started_at": task.started_at.isoformat() if task.started_at else None,
             "finished_at": task.finished_at.isoformat() if task.finished_at else None,
         },
-        "任务已入队",
+        "score generation task queued",
     )
 
 
@@ -87,29 +74,17 @@ def update_score_api(
         vocal_range=payload.vocal_range,
         recommended_voice=payload.recommended_voice,
         emotion=payload.emotion,
-        score_data=payload.score_data,
+        patch=payload.patch,
+        revision_id=str(payload.revision_id) if payload.revision_id else None,
     )
-    return success_response(
-        {
-            "id": str(score.id),
-            "project_id": str(score.project_id),
-            "score_type": score.score_type,
-            "key": score.key,
-            "vocal_range": score.vocal_range,
-            "recommended_voice": score.recommended_voice,
-            "emotion": score.emotion,
-            "score_data": score.score_data,
-            "created_at": score.created_at.isoformat(),
-            "updated_at": score.updated_at.isoformat(),
-        },
-        "谱子更新成功",
-    )
+    return success_response(build_score_response(score), "score updated")
 
 
 @router.get("/scores/{score_id}/export")
 def export_score_api(
     score_id: str,
     format: str = Query(default="midi"),
+    revision_id: str | None = Query(default=None),
     db: Session = Depends(get_db),
     current_user=Depends(get_current_user),
 ):
@@ -118,6 +93,7 @@ def export_score_api(
         user=current_user,
         score_id=score_id,
         export_format=format,
+        revision_id=revision_id,
     )
     headers = {"Content-Disposition": f'attachment; filename="{filename}"'}
     return Response(content=content, media_type=media_type, headers=headers)

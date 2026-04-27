@@ -31,3 +31,4 @@ class Project(Base):
     score = relationship("Score", back_populates="project", uselist=False, cascade="all, delete-orphan")
     lyrics = relationship("Lyrics", back_populates="project", uselist=False, cascade="all, delete-orphan")
     tasks = relationship("Task", back_populates="project", cascade="all, delete-orphan")
+    artifacts = relationship("Artifact", back_populates="project", cascade="all, delete-orphan")

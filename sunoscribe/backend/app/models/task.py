@@ -45,3 +45,4 @@ class Task(Base):
 
     user = relationship("User", back_populates="tasks")
     project = relationship("Project", back_populates="tasks")
+    artifacts = relationship("Artifact", back_populates="task")

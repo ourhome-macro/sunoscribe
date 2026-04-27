@@ -19,6 +19,12 @@ class Score(Base):
         nullable=False,
         index=True,
     )
+    current_revision_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("score_revisions.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
     score_type: Mapped[str] = mapped_column(String(20), default=ScoreType.JIANPU.value, nullable=False)
     key: Mapped[str] = mapped_column(String(50), default="C Major", nullable=False)
     vocal_range: Mapped[str | None] = mapped_column(String(100), nullable=True)
@@ -34,3 +40,12 @@ class Score(Base):
     )
 
     project = relationship("Project", back_populates="score")
+    revisions = relationship(
+        "ScoreRevision",
+        back_populates="score",
+        foreign_keys="ScoreRevision.score_id",
+        cascade="all, delete-orphan",
+        order_by="ScoreRevision.revision_number",
+    )
+    current_revision = relationship("ScoreRevision", foreign_keys=[current_revision_id], post_update=True)
+    artifacts = relationship("Artifact", back_populates="score")
