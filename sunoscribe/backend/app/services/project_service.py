@@ -16,14 +16,12 @@ def create_project(
     name: str,
     source_type: SourceType,
     source_url: str | None,
-    audio_path: str | None,
 ) -> Project:
     project = Project(
         user_id=user.id,
         name=name,
         source_type=source_type.value,
         source_url=source_url,
-        audio_path=audio_path,
         status=ProjectStatus.PENDING.value,
         progress=0,
     )
@@ -69,7 +67,6 @@ def update_project(
     project: Project,
     name: str | None,
     source_url: str | None,
-    audio_path: str | None,
     status: ProjectStatus | None,
     progress: int | None,
 ) -> Project:
@@ -77,8 +74,6 @@ def update_project(
         project.name = name
     if source_url is not None:
         project.source_url = source_url
-    if audio_path is not None:
-        project.audio_path = audio_path
     if status is not None:
         project.status = status.value
     if progress is not None:

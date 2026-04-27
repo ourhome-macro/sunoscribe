@@ -5,6 +5,7 @@ psycopg[binary]>=3.2,<4.0
 pydantic>=2.8,<3.0
 pydantic-settings>=2.3,<3.0
 python-jose[cryptography]>=3.3,<4.0
+cryptography>=42,<45
 passlib[bcrypt]>=1.7,<2.0
 email-validator>=2.2,<3.0
 redis>=5.0,<6.0
@@ -12,6 +13,7 @@ minio>=7.2,<8.0
 python-multipart>=0.0.9,<1.0
 alembic>=1.13,<2.0
 
+# Runtime baseline: Python 3.10, matching README and Dockerfile.
 librosa>=0.10,<1.0
 numpy>=1.24,<3.0
 pretty_midi>=0.2.10,<1.0
@@ -19,5 +21,5 @@ openai-whisper>=20240930
 # optional (default pitch backend): RMVPE runtime + local RMVPE model file
 # optional (fallback pitch backend): crepe>=0.0.16
 # optional (fallback pitch backend): basic-pitch>=0.4,<1.0
-# note: basic-pitch may require a Python/TensorFlow combination not available on Python 3.12.
+# note: keep the runtime on Python 3.10 for TensorFlow/basic-pitch compatibility.
 # optional (default vocal separation backend): audio-separator

@@ -21,9 +21,20 @@ py -3.10 -m venv .venv310
 ```env
 DATABASE_URL=postgresql+psycopg://localhost:5432/sunoscribe
 REDIS_URL=redis://127.0.0.1:6379/0
+SECRET_KEY=replace-with-a-stable-32-plus-char-secret
+API_KEYS_ENCRYPTION_KEY=replace-with-a-stable-32-plus-char-secret
 UPLOADS_ROOT=data/uploads
 UPLOAD_BACKEND=local
 MAX_MEDIA_DURATION_SEC=600
+TASK_STALE_AFTER_MINUTES=120
+
+PASSWORD_RESET_BASE_URL=https://example.com/reset-password
+SMTP_HOST=smtp.example.com
+SMTP_PORT=587
+SMTP_USERNAME=
+SMTP_PASSWORD=
+SMTP_FROM_EMAIL=no-reply@example.com
+SMTP_USE_TLS=true
 
 PITCH_BACKEND=rmvpe
 PITCH_BACKEND_FALLBACKS=crepe,basic-pitch

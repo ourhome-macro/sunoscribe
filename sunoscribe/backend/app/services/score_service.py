@@ -90,6 +90,10 @@ def generate_or_regenerate_score(
     if project is None:
         raise NotFoundError("项目不存在")
 
+    audio_path = str(project.audio_path or "").strip()
+    if not audio_path:
+        raise ValidationAppError("项目缺少可分析的音视频文件")
+
     score_stmt = select(Score).where(Score.project_id == project.id)
     score = db.execute(score_stmt).scalar_one_or_none()
     if score is None:
@@ -99,26 +103,16 @@ def generate_or_regenerate_score(
     now = datetime.now(timezone.utc).isoformat()
     score.score_type = score_type.value
     score.key = key
-    analysis_result: AudioAnalysisResult | None = None
-    audio_path = str(project.audio_path or "").strip()
-    if audio_path:
-        analysis_result = _run_audio_analysis(project)
-        score.score_data = _build_score_data_from_analysis(
-            analysis_result,
-            project=project,
-            score_type=score_type,
-            key=key,
-            generated_at=now,
-        )
-    else:
-        score.score_data = _build_stub_score_data(
-            project=project,
-            score_type=score_type,
-            key=key,
-            generated_at=now,
-        )
+    analysis_result = _run_audio_analysis(project)
+    score.score_data = _build_score_data_from_analysis(
+        analysis_result,
+        project=project,
+        score_type=score_type,
+        key=key,
+        generated_at=now,
+    )
 
-    # Placeholder orchestration status transition for PRD flow.
+    # The task worker marks failure paths; reaching this point means analysis produced a usable score.
     project.status = ProjectStatus.COMPLETED.value
     project.progress = 100
     db.add(project)
@@ -129,12 +123,8 @@ def generate_or_regenerate_score(
     if lyrics is None:
         lyrics = Lyrics(project_id=project.id, text="", timeline=[])
 
-    if analysis_result is not None:
-        lyrics.text = _build_lyrics_text(analysis_result.lyrics_segments)
-        lyrics.timeline = list(analysis_result.lyrics_segments)
-    else:
-        lyrics.text = str(getattr(lyrics, "text", "") or "")
-        lyrics.timeline = list(getattr(lyrics, "timeline", []) or [])
+    lyrics.text = _build_lyrics_text(analysis_result.lyrics_segments)
+    lyrics.timeline = list(analysis_result.lyrics_segments)
     db.add(lyrics)
 
     db.commit()
@@ -193,21 +183,6 @@ def _build_score_data_from_analysis(
     }
     score_data["warnings"] = _merge_unique_strings(score_data.get("warnings"), analysis_result.warnings)
     return score_data
-
-
-def _build_stub_score_data(
-    *,
-    project: Project,
-    score_type: ScoreType,
-    key: str,
-    generated_at: str,
-) -> dict[str, Any]:
-    return {
-        "generated_by": "backend_stub",
-        "generated_at": generated_at,
-        "notes": [],
-        "meta": {"project_id": str(project.id), "score_type": score_type.value, "key": key},
-    }
 
 
 def _merge_unique_strings(*chunks: Any) -> list[str]:

@@ -119,14 +119,21 @@ def validate_extension(filename: str, media_kind: str) -> str:
     return suffix
 
 
+def build_upload_storage_filename(extension: str) -> str:
+    normalized_extension = str(extension or "").lower().lstrip(".")
+    if not normalized_extension:
+        raise UnsupportedFormatError("file extension is required")
+    return f"{uuid.uuid4().hex}.{normalized_extension}"
+
+
 def build_upload_target_path(
     *,
     uploads_root: Path,
     user_id: uuid.UUID,
     project_id: uuid.UUID,
-    original_filename: str,
+    stored_filename: str,
 ) -> Path:
-    safe_name = Path(original_filename or "upload.bin").name
+    safe_name = Path(stored_filename).name
     return uploads_root / str(user_id) / str(project_id) / safe_name
 
 
@@ -134,10 +141,10 @@ def build_upload_object_key(
     *,
     user_id: uuid.UUID,
     project_id: uuid.UUID,
-    original_filename: str,
+    stored_filename: str,
     base_path: str,
 ) -> str:
-    safe_name = Path(original_filename or "upload.bin").name
+    safe_name = Path(stored_filename).name
     prefix = str(base_path or "").strip().strip("/")
     leaf = f"{user_id}/{project_id}/{safe_name}"
     return f"{prefix}/{leaf}" if prefix else leaf
@@ -160,7 +167,8 @@ async def save_upload_file(
     minio_region: str | None = None,
     minio_base_path: str = "uploads",
 ) -> tuple[str, int]:
-    validate_extension(upload.filename or "", media_kind)
+    extension = validate_extension(upload.filename or "", media_kind)
+    stored_filename = build_upload_storage_filename(extension)
     backend = normalize_upload_backend(upload_backend)
 
     if backend == "local":
@@ -169,6 +177,7 @@ async def save_upload_file(
             uploads_root=uploads_root,
             user_id=user_id,
             project_id=project_id,
+            stored_filename=stored_filename,
         )
         try:
             probe_media_file(file_path, media_kind, max_duration_sec)
@@ -185,6 +194,7 @@ async def save_upload_file(
         uploads_root=uploads_root,
         user_id=user_id,
         project_id=project_id,
+        stored_filename=stored_filename,
         minio_endpoint=minio_endpoint,
         minio_access_key=minio_access_key,
         minio_secret_key=minio_secret_key,
@@ -203,12 +213,13 @@ async def _save_upload_file_local(
     uploads_root: Path,
     user_id: uuid.UUID,
     project_id: uuid.UUID,
+    stored_filename: str,
 ) -> tuple[str, int]:
     target = build_upload_target_path(
         uploads_root=uploads_root,
         user_id=user_id,
         project_id=project_id,
-        original_filename=upload.filename or "upload.bin",
+        stored_filename=stored_filename,
     )
     target.parent.mkdir(parents=True, exist_ok=True)
 
@@ -239,6 +250,7 @@ async def _save_upload_file_minio(
     uploads_root: Path,
     user_id: uuid.UUID,
     project_id: uuid.UUID,
+    stored_filename: str,
     minio_endpoint: str | None,
     minio_access_key: str | None,
     minio_secret_key: str | None,
@@ -258,13 +270,13 @@ async def _save_upload_file_minio(
     object_key = build_upload_object_key(
         user_id=user_id,
         project_id=project_id,
-        original_filename=upload.filename or "upload.bin",
+        stored_filename=stored_filename,
         base_path=minio_base_path,
     )
 
     temp_dir = uploads_root / ".upload_tmp"
     temp_dir.mkdir(parents=True, exist_ok=True)
-    temp_path = temp_dir / f"{uuid.uuid4().hex}.bin"
+    temp_path = temp_dir / stored_filename
 
     size = 0
     try:

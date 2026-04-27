@@ -1,6 +1,6 @@
 import secrets
 
-from pydantic import Field, field_validator
+from pydantic import field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -10,12 +10,19 @@ class Settings(BaseSettings):
     app_env: str = "development"
     expose_internal_errors: bool = False
 
-    # Use a strong random key by default to avoid predictable JWT secrets.
-    secret_key: str = Field(default_factory=lambda: secrets.token_urlsafe(48))
+    secret_key: str | None = None
     algorithm: str = "HS256"
     access_token_expire_minutes: int = 30
     refresh_token_expire_days: int = 7
     redis_url: str | None = None
+    api_keys_encryption_key: str | None = None
+    password_reset_base_url: str | None = None
+    smtp_host: str | None = None
+    smtp_port: int = 587
+    smtp_username: str | None = None
+    smtp_password: str | None = None
+    smtp_from_email: str | None = None
+    smtp_use_tls: bool = True
     uploads_root: str = "data/uploads"
     max_media_duration_sec: float = 600.0
     upload_backend: str = "local"
@@ -27,6 +34,7 @@ class Settings(BaseSettings):
     minio_region: str | None = None
     minio_base_path: str = "uploads"
     task_worker_count: int = 1
+    task_stale_after_minutes: int = 120
     pitch_backend: str = "rmvpe"
     pitch_backend_fallbacks: str = "crepe,basic-pitch"
     pitch_cache_dir: str = "~/.cache/sunoscribe/pitch"
@@ -36,13 +44,16 @@ class Settings(BaseSettings):
     # Avoid committing hard-coded credentials in code.
     database_url: str = "postgresql+psycopg://localhost:5432/sunoscribe"
 
-    @field_validator("secret_key")
+    @field_validator("app_env")
     @classmethod
-    def _validate_secret_key(cls, value: str) -> str:
-        normalized = (value or "").strip()
-        if len(normalized) < 32:
-            raise ValueError("secret_key must be at least 32 characters")
-        return normalized
+    def _validate_app_env(cls, value: str) -> str:
+        return str(value or "development").strip().lower()
+
+    @field_validator("secret_key", "api_keys_encryption_key")
+    @classmethod
+    def _strip_secret_value(cls, value: str | None) -> str | None:
+        normalized = str(value or "").strip()
+        return normalized or None
 
     @field_validator("upload_backend")
     @classmethod
@@ -82,6 +93,47 @@ class Settings(BaseSettings):
         if normalized < 1:
             raise ValueError("task_worker_count must be at least 1")
         return normalized
+
+    @field_validator("task_stale_after_minutes")
+    @classmethod
+    def _validate_task_stale_after_minutes(cls, value: int) -> int:
+        normalized = int(value)
+        if normalized < 1:
+            raise ValueError("task_stale_after_minutes must be at least 1")
+        return normalized
+
+    @model_validator(mode="after")
+    def _validate_production_settings(self) -> "Settings":
+        if not self.secret_key:
+            if self.app_env == "production":
+                raise ValueError("secret_key must be configured in production")
+            self.secret_key = secrets.token_urlsafe(48)
+        elif len(self.secret_key) < 32:
+            raise ValueError("secret_key must be at least 32 characters")
+
+        if not self.api_keys_encryption_key:
+            if self.app_env == "production":
+                raise ValueError("api_keys_encryption_key must be configured in production")
+            self.api_keys_encryption_key = secrets.token_urlsafe(48)
+        elif len(self.api_keys_encryption_key) < 32:
+            raise ValueError("api_keys_encryption_key must be at least 32 characters")
+
+        if self.app_env == "production":
+            missing_password_reset = [
+                name
+                for name, value in {
+                    "redis_url": self.redis_url,
+                    "password_reset_base_url": self.password_reset_base_url,
+                    "smtp_host": self.smtp_host,
+                    "smtp_from_email": self.smtp_from_email,
+                }.items()
+                if not str(value or "").strip()
+            ]
+            if missing_password_reset:
+                joined = ", ".join(missing_password_reset)
+                raise ValueError(f"password reset production config missing: {joined}")
+
+        return self
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 

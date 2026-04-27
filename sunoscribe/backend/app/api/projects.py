@@ -28,7 +28,6 @@ def create_project_api(
         name=payload.name,
         source_type=payload.source_type,
         source_url=payload.source_url,
-        audio_path=payload.audio_path,
     )
     return success_response(
         {
@@ -109,7 +108,6 @@ def update_project_api(
         project=project,
         name=payload.name,
         source_url=payload.source_url,
-        audio_path=payload.audio_path,
         status=payload.status,
         progress=payload.progress,
     )

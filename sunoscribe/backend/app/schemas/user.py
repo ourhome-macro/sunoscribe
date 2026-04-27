@@ -21,10 +21,10 @@ class UpdateMeRequest(BaseModel):
 class UserSettingsDTO(BaseModel):
     default_score_type: str
     default_key: str
-    api_keys: dict = Field(default_factory=dict)
+    api_keys: dict[str, dict[str, bool]] = Field(default_factory=dict)
 
 
 class UpdateSettingsRequest(BaseModel):
     default_score_type: str | None = None
     default_key: str | None = None
-    api_keys: dict | None = None
+    api_keys: dict[str, str] | None = None

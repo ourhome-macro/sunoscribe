@@ -4,10 +4,10 @@ import logging
 import queue
 import threading
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 
 from app.config import settings
 from app.database import SessionLocal
@@ -35,12 +35,19 @@ class TaskOrchestrator:
                 return
             self._running = True
             self._threads = []
+
+        try:
+            self._recover_pending_tasks()
+        except Exception:
+            with self._lock:
+                self._running = False
+            raise
+
+        with self._lock:
             for index in range(self.worker_count):
                 worker = threading.Thread(target=self._worker_loop, name=f"task-worker-{index}", daemon=True)
                 worker.start()
                 self._threads.append(worker)
-
-        self._recover_pending_tasks()
 
     def stop(self) -> None:
         with self._lock:
@@ -60,8 +67,20 @@ class TaskOrchestrator:
     def _recover_pending_tasks(self) -> None:
         with SessionLocal() as db:
             now = datetime.now(timezone.utc)
+            stale_before = now - timedelta(minutes=settings.task_stale_after_minutes)
 
-            recovering = db.execute(select(Task).where(Task.status == TaskStatus.RUNNING.value)).scalars().all()
+            recovering = (
+                db.execute(
+                    select(Task)
+                    .where(
+                        Task.status == TaskStatus.RUNNING.value,
+                        or_(Task.started_at.is_(None), Task.started_at < stale_before),
+                    )
+                    .with_for_update(skip_locked=True)
+                )
+                .scalars()
+                .all()
+            )
             for task in recovering:
                 task.status = TaskStatus.QUEUED.value
                 task.progress = min(95, max(0, int(task.progress)))
@@ -102,27 +121,8 @@ class TaskOrchestrator:
         if task_uuid is None:
             return
 
-        with SessionLocal() as db:
-            task = db.get(Task, task_uuid)
-            if task is None:
-                return
-            if task.status not in {TaskStatus.QUEUED.value, TaskStatus.RETRYING.value}:
-                return
-
-            task.status = TaskStatus.RUNNING.value
-            task.progress = max(5, int(task.progress))
-            task.error_message = None
-            task.started_at = datetime.now(timezone.utc)
-            task.finished_at = None
-
-            project = db.get(Project, task.project_id)
-            if project is not None:
-                project.status = ProjectStatus.PROCESSING.value
-                project.progress = max(5, int(project.progress))
-                db.add(project)
-
-            db.add(task)
-            db.commit()
+        if not self._claim_task(task_uuid):
+            return
 
         try:
             result_payload = self._execute_task(task_uuid)
@@ -214,6 +214,39 @@ class TaskOrchestrator:
                 "generated_by": score.score_data.get("generated_by") if isinstance(score.score_data, dict) else None,
                 "midi_path": score.score_data.get("midi_path") if isinstance(score.score_data, dict) else None,
             }
+
+    def _claim_task(self, task_uuid: uuid.UUID) -> bool:
+        with SessionLocal() as db:
+            task = (
+                db.execute(
+                    select(Task)
+                    .where(
+                        Task.id == task_uuid,
+                        Task.status.in_([TaskStatus.QUEUED.value, TaskStatus.RETRYING.value]),
+                    )
+                    .with_for_update(skip_locked=True)
+                )
+                .scalars()
+                .one_or_none()
+            )
+            if task is None:
+                return False
+
+            task.status = TaskStatus.RUNNING.value
+            task.progress = max(5, int(task.progress))
+            task.error_message = None
+            task.started_at = datetime.now(timezone.utc)
+            task.finished_at = None
+
+            project = db.get(Project, task.project_id)
+            if project is not None:
+                project.status = ProjectStatus.PROCESSING.value
+                project.progress = max(5, int(project.progress))
+                db.add(project)
+
+            db.add(task)
+            db.commit()
+            return True
 
     @staticmethod
     def _parse_task_uuid(raw: str) -> uuid.UUID | None:

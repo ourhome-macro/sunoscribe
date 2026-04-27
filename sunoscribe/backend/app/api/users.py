@@ -3,7 +3,7 @@ from sqlalchemy.orm import Session
 
 from app.database import get_db
 from app.schemas.user import UpdateMeRequest, UpdateSettingsRequest
-from app.services.user_service import get_or_create_settings, update_profile, update_settings
+from app.services.user_service import get_or_create_settings, summarize_api_keys, update_profile, update_settings
 from app.utils.dependencies import get_current_user
 from app.utils.responses import success_response
 
@@ -51,7 +51,7 @@ def get_me_settings(db: Session = Depends(get_db), current_user=Depends(get_curr
         {
             "default_score_type": settings.default_score_type,
             "default_key": settings.default_key,
-            "api_keys": settings.api_keys,
+            "api_keys": summarize_api_keys(settings.api_keys),
         }
     )
 
@@ -73,7 +73,7 @@ def update_me_settings(
         {
             "default_score_type": settings.default_score_type,
             "default_key": settings.default_key,
-            "api_keys": settings.api_keys,
+            "api_keys": summarize_api_keys(settings.api_keys),
         },
         "设置更新成功",
     )

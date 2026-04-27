@@ -1,8 +1,11 @@
 import logging
 import secrets
+import smtplib
 import uuid
 from datetime import datetime, timedelta, timezone
+from email.message import EmailMessage
 from typing import Any
+from urllib.parse import urlencode
 
 from sqlalchemy import or_, select
 from sqlalchemy.exc import IntegrityError
@@ -30,7 +33,6 @@ except Exception:  # pragma: no cover - optional dependency/runtime
 
 _redis_client: Any = None
 _redis_init_attempted = False
-_password_reset_tokens: dict[str, tuple[uuid.UUID, datetime]] = {}
 PASSWORD_RESET_TTL_SECONDS = 30 * 60
 
 
@@ -146,6 +148,10 @@ def logout(db: Session, access_token: str, refresh_token: str | None) -> None:
 
 
 def create_password_reset_token(db: Session, *, email: str) -> str | None:
+    _require_redis_client_for_password_reset()
+    if settings.app_env == "production":
+        _validate_password_reset_email_config()
+
     stmt = select(User).where(User.email == email)
     user = db.execute(stmt).scalar_one_or_none()
     if user is None:
@@ -154,6 +160,9 @@ def create_password_reset_token(db: Session, *, email: str) -> str | None:
     token = secrets.token_urlsafe(32)
     expires_at = datetime.now(timezone.utc) + timedelta(seconds=PASSWORD_RESET_TTL_SECONDS)
     _store_password_reset_token(token=token, user_id=user.id, expires_at=expires_at)
+    if settings.app_env == "production":
+        _send_password_reset_email(email=user.email, token=token)
+        return None
     return token
 
 
@@ -299,24 +308,20 @@ def _get_redis_client() -> Any | None:
         client.ping()
         _redis_client = client
     except Exception as exc:  # pragma: no cover - runtime infrastructure error
-        logger.warning("Redis unavailable for token revocation, fallback to DB: %s", exc)
+        logger.warning("Redis unavailable; token revocation will use DB lookup: %s", exc)
         _redis_client = None
 
     return _redis_client
 
 
 def _store_password_reset_token(*, token: str, user_id: uuid.UUID, expires_at: datetime) -> None:
-    client = _get_redis_client()
-    if client is not None:
-        key = _password_reset_key(token)
-        ttl = max(60, int((expires_at - datetime.now(timezone.utc)).total_seconds()))
-        try:
-            client.set(key, str(user_id), ex=ttl)
-            return
-        except Exception as exc:  # pragma: no cover - runtime infrastructure error
-            logger.warning("Failed to set password reset token in redis: %s", exc)
-
-    _password_reset_tokens[token] = (user_id, expires_at)
+    client = _require_redis_client_for_password_reset()
+    key = _password_reset_key(token)
+    ttl = max(60, int((expires_at - datetime.now(timezone.utc)).total_seconds()))
+    try:
+        client.set(key, str(user_id), ex=ttl)
+    except Exception as exc:  # pragma: no cover - runtime infrastructure error
+        raise ValidationAppError("password reset token storage is unavailable") from exc
 
 
 def _consume_password_reset_token(token: str) -> uuid.UUID:
@@ -324,25 +329,59 @@ def _consume_password_reset_token(token: str) -> uuid.UUID:
     if not raw:
         raise ValidationAppError("reset_token 不能为空")
 
+    client = _require_redis_client_for_password_reset()
+    key = _password_reset_key(raw)
+    try:
+        user_id_raw = client.get(key)
+        if user_id_raw:
+            client.delete(key)
+            return uuid.UUID(str(user_id_raw))
+    except Exception as exc:  # pragma: no cover - runtime infrastructure error
+        raise ValidationAppError("password reset token storage is unavailable") from exc
+
+    raise ValidationAppError("重置令牌无效或已过期")
+
+
+def _require_redis_client_for_password_reset() -> Any:
     client = _get_redis_client()
-    if client is not None:
-        key = _password_reset_key(raw)
-        try:
-            user_id_raw = client.get(key)
-            if user_id_raw:
-                client.delete(key)
-                return uuid.UUID(str(user_id_raw))
-        except Exception as exc:  # pragma: no cover - runtime infrastructure error
-            logger.warning("Failed to consume password reset token from redis: %s", exc)
+    if client is None:
+        raise ValidationAppError("password reset requires Redis configuration")
+    return client
 
-    user_entry = _password_reset_tokens.pop(raw, None)
-    if user_entry is None:
-        raise ValidationAppError("重置令牌无效或已过期")
 
-    user_id, expires_at = user_entry
-    if datetime.now(timezone.utc) > expires_at:
-        raise ValidationAppError("重置令牌无效或已过期")
-    return user_id
+def _send_password_reset_email(*, email: str, token: str) -> None:
+    base_url, smtp_host, from_email = _validate_password_reset_email_config()
+
+    separator = "&" if "?" in base_url else "?"
+    reset_link = f"{base_url}{separator}{urlencode({'token': token})}"
+
+    message = EmailMessage()
+    message["Subject"] = "Reset your SunoScribe password"
+    message["From"] = from_email
+    message["To"] = email
+    message.set_content(
+        "Use the following link to reset your SunoScribe password. "
+        f"This link expires in {PASSWORD_RESET_TTL_SECONDS // 60} minutes.\n\n{reset_link}\n"
+    )
+
+    try:
+        with smtplib.SMTP(smtp_host, int(settings.smtp_port), timeout=15) as smtp:
+            if settings.smtp_use_tls:
+                smtp.starttls()
+            if settings.smtp_username:
+                smtp.login(settings.smtp_username, settings.smtp_password or "")
+            smtp.send_message(message)
+    except Exception as exc:  # pragma: no cover - runtime infrastructure error
+        raise ValidationAppError("failed to send password reset email") from exc
+
+
+def _validate_password_reset_email_config() -> tuple[str, str, str]:
+    base_url = str(settings.password_reset_base_url or "").strip()
+    smtp_host = str(settings.smtp_host or "").strip()
+    from_email = str(settings.smtp_from_email or "").strip()
+    if not base_url or not smtp_host or not from_email:
+        raise ValidationAppError("password reset email is not configured")
+    return base_url, smtp_host, from_email
 
 
 def _password_reset_key(token: str) -> str:
