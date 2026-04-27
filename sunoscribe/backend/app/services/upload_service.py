@@ -131,9 +131,13 @@ def build_upload_target_path(
     uploads_root: Path,
     user_id: uuid.UUID,
     project_id: uuid.UUID,
-    stored_filename: str,
+    stored_filename: str | None = None,
+    original_filename: str | None = None,
 ) -> Path:
-    safe_name = Path(stored_filename).name
+    filename = stored_filename if stored_filename is not None else original_filename
+    if not filename:
+        raise ValidationAppError("stored_filename is required")
+    safe_name = Path(filename).name
     return uploads_root / str(user_id) / str(project_id) / safe_name
 
 
@@ -141,10 +145,14 @@ def build_upload_object_key(
     *,
     user_id: uuid.UUID,
     project_id: uuid.UUID,
-    stored_filename: str,
+    stored_filename: str | None = None,
+    original_filename: str | None = None,
     base_path: str,
 ) -> str:
-    safe_name = Path(stored_filename).name
+    filename = stored_filename if stored_filename is not None else original_filename
+    if not filename:
+        raise ValidationAppError("stored_filename is required")
+    safe_name = Path(filename).name
     prefix = str(base_path or "").strip().strip("/")
     leaf = f"{user_id}/{project_id}/{safe_name}"
     return f"{prefix}/{leaf}" if prefix else leaf

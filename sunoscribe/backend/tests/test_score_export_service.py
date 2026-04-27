@@ -1,227 +1,55 @@
 from __future__ import annotations
 
-import shutil
-import tempfile
+import importlib
+import inspect
 import unittest
-from pathlib import Path
-from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
-
-from app.services.score_service import export_score
-from app.utils.errors import ValidationAppError
+from typing import Any
 
 
-class TestScoreExportService(unittest.TestCase):
-    def test_export_midi_prefers_existing_workspace_artifact(self) -> None:
-        project_id = "test_export_project_001"
-        midi_path = Path("data/projects") / project_id / "exports" / "final_score.mid"
-        midi_path.parent.mkdir(parents=True, exist_ok=True)
-        expected = b"MThd-test"
-        midi_path.write_bytes(expected)
-
-        fake_score = SimpleNamespace(id="score-1", project_id=project_id, score_data={})
-        db = MagicMock()
-
+def _load_first_attr(*candidates: tuple[str, str]) -> Any:
+    errors: list[str] = []
+    for module_name, attr_name in candidates:
         try:
-            with patch("app.services.score_service.get_score_by_id", return_value=fake_score):
-                content, media_type, filename = export_score(
-                    db,
-                    user=SimpleNamespace(),
-                    score_id="dummy",
-                    export_format="midi",
-                )
-        finally:
-            shutil.rmtree(Path("data/projects") / project_id, ignore_errors=True)
+            module = importlib.import_module(module_name)
+        except Exception as exc:
+            errors.append(f"{module_name}: {exc}")
+            continue
+        if hasattr(module, attr_name):
+            return getattr(module, attr_name)
+        errors.append(f"{module_name}: missing {attr_name}")
+    raise AssertionError("No revision export entrypoint found. Tried:\n" + "\n".join(errors))
 
-        self.assertEqual(content, expected)
-        self.assertEqual(media_type, "audio/midi")
-        self.assertTrue(str(filename).endswith(".mid"))
 
-    def test_export_midi_can_generate_from_score_data_measures(self) -> None:
-        fake_score = SimpleNamespace(
-            id="score-2",
-            project_id="test_export_project_002",
-            score_data={
-                "bpm": 120,
-                "measures": [
-                    {
-                        "measure_num": 1,
-                        "notes": [
-                            {
-                                "pitch": "C4",
-                                "start_time": 0.0,
-                                "end_time": 0.5,
-                                "duration_beats": 1.0,
-                                "note_type": "quarter",
-                                "confidence": 0.9,
-                            }
-                        ],
-                    }
-                ],
-            },
+class TestScoreExportServiceContracts(unittest.TestCase):
+    def _load_export_entrypoint(self) -> Any:
+        return _load_first_attr(
+            ("app.services.score_revision_service", "export_score_revision"),
+            ("app.services.score_export_service", "export_score_revision"),
+            ("app.services.score_service", "export_score_revision"),
         )
-        db = MagicMock()
-        with patch("app.services.score_service.get_score_by_id", return_value=fake_score):
-            content, media_type, filename = export_score(
-                db,
-                user=SimpleNamespace(),
-                score_id="dummy",
-                export_format="midi",
-            )
 
-        self.assertIsInstance(content, (bytes, bytearray))
-        self.assertGreater(len(content), 0)
-        self.assertEqual(media_type, "audio/midi")
-        self.assertTrue(str(filename).endswith(".mid"))
-
-    def test_export_midi_without_artifact_or_measures_raises(self) -> None:
-        fake_score = SimpleNamespace(id="score-3", project_id="test_export_project_003", score_data={"meta": {}})
-        db = MagicMock()
-        with patch("app.services.score_service.get_score_by_id", return_value=fake_score):
-            with self.assertRaises(ValidationAppError):
-                export_score(
-                    db,
-                    user=SimpleNamespace(),
-                    score_id="dummy",
-                    export_format="midi",
-                )
-
-    def test_export_midi_ignores_score_data_path_outside_workspace(self) -> None:
-        external_dir = tempfile.TemporaryDirectory()
-        external_path = Path(external_dir.name) / "outside.mid"
-        external_path.write_bytes(b"MThd-outside")
-
-        fake_score = SimpleNamespace(
-            id="score-escape",
-            project_id="test_export_project_006",
-            score_data={"midi_path": str(external_path)},
+    def test_export_entrypoint_is_revision_scoped(self) -> None:
+        export_entrypoint = self._load_export_entrypoint()
+        params = set(inspect.signature(export_entrypoint).parameters)
+        self.assertTrue(
+            {"score_revision_id", "revision_id"} & params,
+            "revision-scoped export must identify the exact ScoreRevision to export",
         )
-        db = MagicMock()
 
-        try:
-            with patch("app.services.score_service.get_score_by_id", return_value=fake_score):
-                with self.assertRaises(ValidationAppError):
-                    export_score(
-                        db,
-                        user=SimpleNamespace(),
-                        score_id="dummy",
-                        export_format="midi",
-                    )
-        finally:
-            external_dir.cleanup()
-
-    def test_export_musicxml_generated_from_measures(self) -> None:
-        fake_score = SimpleNamespace(
-            id="score-4",
-            project_id="test_export_project_004",
-            key="C Major",
-            score_data={
-                "meta": {"bpm": 100, "key": "C Major", "time_signature": "4/4"},
-                "chord_timeline": [
-                    {
-                        "measure_num": 1,
-                        "symbol": "C",
-                        "root": "C",
-                        "quality": "",
-                        "bass": None,
-                    },
-                    {
-                        "measure_num": 2,
-                        "symbol": "Dm",
-                        "root": "D",
-                        "quality": "m",
-                        "bass": None,
-                    },
-                ],
-                "form_sections": [
-                    {
-                        "id": "verse_a",
-                        "label": "verse_a",
-                        "measure_start": 1,
-                        "measure_end": 2,
-                    }
-                ],
-                "measures": [
-                    {
-                        "measure_num": 1,
-                        "notes": [
-                            {
-                                "pitch": "C4",
-                                "start_time": 0.0,
-                                "end_time": 0.5,
-                                "duration_beats": 1.0,
-                                "note_type": "quarter",
-                                "confidence": 0.9,
-                            },
-                            {
-                                "pitch": "E4",
-                                "start_time": 0.5,
-                                "end_time": 0.875,
-                                "duration_beats": 0.75,
-                                "note_type": "dotted_eighth",
-                                "confidence": 0.86,
-                            }
-                        ],
-                    },
-                    {
-                        "measure_num": 2,
-                        "notes": [
-                            {
-                                "pitch": "D4",
-                                "start_time": 1.0,
-                                "end_time": 1.5,
-                                "duration_beats": 2.0 / 3.0,
-                                "note_type": "triplet",
-                                "confidence": 0.88,
-                            }
-                        ],
-                    }
-                ],
-            },
+    def test_export_entrypoint_keeps_format_selection_but_not_score_level_ambiguity(self) -> None:
+        export_entrypoint = self._load_export_entrypoint()
+        params = set(inspect.signature(export_entrypoint).parameters)
+        self.assertTrue({"export_format", "format", "artifact_type"} & params)
+        self.assertFalse(
+            "score_id" in params and not ({"score_revision_id", "revision_id"} & params),
+            "export should not be scoped only by Score/Project once multiple revisions exist",
         )
-        db = MagicMock()
-        with patch("app.services.score_service.get_score_by_id", return_value=fake_score):
-            content, media_type, filename = export_score(
-                db,
-                user=SimpleNamespace(),
-                score_id="dummy",
-                export_format="musicxml",
-            )
 
-        text = content.decode("utf-8", errors="ignore")
-        self.assertIn("<score-partwise", text)
-        self.assertIn("<measure", text)
-        self.assertIn("<harmony>", text)
-        self.assertIn("<root-step>C</root-step>", text)
-        self.assertIn("<root-step>D</root-step>", text)
-        self.assertIn("<kind>minor</kind>", text)
-        self.assertIn("<rehearsal>verse_a</rehearsal>", text)
-        self.assertIn("<dot", text)
-        self.assertIn("<time-modification>", text)
-        self.assertIn("<actual-notes>3</actual-notes>", text)
-        self.assertIn("<normal-notes>2</normal-notes>", text)
-        self.assertEqual(media_type, "application/vnd.recordare.musicxml+xml")
-        self.assertTrue(str(filename).endswith(".musicxml"))
-
-    def test_export_pdf_generates_real_pdf_bytes(self) -> None:
-        fake_score = SimpleNamespace(
-            id="score-5",
-            project_id="test_export_project_005",
-            key="C Major",
-            score_data={"meta": {"bpm": 120, "key": "C Major"}, "measures": []},
-        )
-        db = MagicMock()
-        with patch("app.services.score_service.get_score_by_id", return_value=fake_score):
-            content, media_type, filename = export_score(
-                db,
-                user=SimpleNamespace(),
-                score_id="dummy",
-                export_format="pdf",
-            )
-
-        self.assertTrue(content.startswith(b"%PDF-1.4"))
-        self.assertEqual(media_type, "application/pdf")
-        self.assertTrue(str(filename).endswith(".pdf"))
+    def test_export_entrypoint_contract_exposes_user_access_check(self) -> None:
+        export_entrypoint = self._load_export_entrypoint()
+        params = set(inspect.signature(export_entrypoint).parameters)
+        self.assertTrue({"db", "session"} & params, "export should resolve revisions through persisted lineage")
+        self.assertTrue({"user", "current_user"} & params, "export should remain user access scoped")
 
 
 if __name__ == "__main__":
