@@ -1,5 +1,6 @@
 from fastapi import APIRouter
 
+from app.api.agents import router as agents_router
 from app.api.auth import router as auth_router
 from app.api.health import router as health_router
 from app.api.lyrics import router as lyrics_router
@@ -16,5 +17,6 @@ api_router.include_router(users_router)
 api_router.include_router(projects_router)
 api_router.include_router(upload_router)
 api_router.include_router(scores_router)
+api_router.include_router(agents_router)
 api_router.include_router(lyrics_router)
 api_router.include_router(tasks_router)
