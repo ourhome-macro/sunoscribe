@@ -1,0 +1,4 @@
+interface:
+  display_name: "RVC Cover"
+  short_description: "Prepare ScoreIR-guided RVC cover jobs."
+  default_prompt: "Use this skill to design or review SunoScribe RVC cover flows."

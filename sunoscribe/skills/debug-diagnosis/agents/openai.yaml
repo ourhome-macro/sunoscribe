@@ -1,0 +1,4 @@
+interface:
+  display_name: "Debug Diagnosis"
+  short_description: "Diagnose transcription artifacts and failures."
+  default_prompt: "Use this skill to diagnose SunoScribe MIR pipeline failures."

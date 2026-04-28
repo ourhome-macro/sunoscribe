@@ -24,6 +24,8 @@ from app.modules.agents import (
     RvcPrepareAgent,
     RvcSpecValidator,
     ScorePatchAgent,
+    AgentSkillContext,
+    AgentSkillRegistry,
     TranscriptionDiagnosis,
 )
 from app.services.render_export_service import RenderExportService
@@ -42,6 +44,7 @@ class AgentWorkflowService:
         rvc_prepare_agent: RvcPrepareAgent | None = None,
         score_patch_validator: AgentScorePatchValidator | None = None,
         rvc_spec_validator: RvcSpecValidator | None = None,
+        skill_registry: AgentSkillRegistry | None = None,
         export_service: RenderExportService | None = None,
     ) -> None:
         self.diagnosis_agent = diagnosis_agent or DiagnosisAgent()
@@ -49,21 +52,36 @@ class AgentWorkflowService:
         self.rvc_prepare_agent = rvc_prepare_agent or RvcPrepareAgent()
         self.score_patch_validator = score_patch_validator or AgentScorePatchValidator()
         self.rvc_spec_validator = rvc_spec_validator or RvcSpecValidator()
+        self.skill_registry = skill_registry or AgentSkillRegistry()
         self.export_service = export_service or RenderExportService()
 
-    def load_context(self, db: Session, *, user: User, revision_id: str) -> AgentRevisionContext:
+    def load_context(
+        self,
+        db: Session,
+        *,
+        user: User,
+        revision_id: str,
+        skill_profile: str | None = None,
+    ) -> AgentRevisionContext:
         revision = get_score_revision_by_id(db, user=user, revision_id=revision_id)
         artifacts = list(self._list_revision_artifacts(db, revision_id=str(revision.id)))
-        return self.build_context_from_revision(revision=revision, artifacts=artifacts)
+        return self.build_context_from_revision(
+            revision=revision,
+            artifacts=artifacts,
+            skill_profile=skill_profile,
+        )
 
     def build_context_from_revision(
         self,
         *,
         revision: ScoreRevision,
         artifacts: list[Artifact],
+        skill_profile: str | None = None,
     ) -> AgentRevisionContext:
         artifact_refs = [self._artifact_ref(artifact) for artifact in artifacts]
         warnings = self._collect_context_warnings(revision=revision, artifacts=artifacts)
+        skill_context = self._load_skill_context(skill_profile)
+        warnings.extend(skill_context.warnings)
 
         f0_track = self._read_json_artifact_by_type(artifacts, "f0_track", warnings)
         note_candidates = self._read_json_artifact_by_type(artifacts, "note_candidates", warnings)
@@ -88,11 +106,12 @@ class AgentWorkflowService:
             note_candidates=note_candidates,
             rhythm_grid=rhythm_grid,
             vocal_activity=vocal_activity,
+            skill_context=skill_context,
             warnings=self._dedupe_strings(warnings),
         )
 
     def diagnose_transcription(self, db: Session, *, user: User, revision_id: str) -> TranscriptionDiagnosis:
-        context = self.load_context(db, user=user, revision_id=revision_id)
+        context = self.load_context(db, user=user, revision_id=revision_id, skill_profile="diagnosis")
         return self.diagnosis_agent.run(context)
 
     def propose_score_patch(
@@ -103,7 +122,7 @@ class AgentWorkflowService:
         revision_id: str,
         instruction: str | dict[str, Any] | AgentScorePatch,
     ) -> AgentScorePatch:
-        context = self.load_context(db, user=user, revision_id=revision_id)
+        context = self.load_context(db, user=user, revision_id=revision_id, skill_profile="score_patch")
         proposal = self.score_patch_agent.propose(context, instruction)
         validation = self.score_patch_validator.validate(context=context, proposal=proposal)
         if not bool(validation.get("accepted", False)):
@@ -124,6 +143,7 @@ class AgentWorkflowService:
         context = self.build_context_from_revision(
             revision=base_revision,
             artifacts=list(self._list_revision_artifacts(db, revision_id=str(base_revision.id))),
+            skill_profile="score_patch",
         )
         return self.apply_patch_to_revision(
             db,
@@ -202,7 +222,7 @@ class AgentWorkflowService:
         voice_model_id: str,
         transpose_semitones: int = 0,
     ) -> RvcJobSpec:
-        context = self.load_context(db, user=user, revision_id=revision_id)
+        context = self.load_context(db, user=user, revision_id=revision_id, skill_profile="rvc")
         spec = self.rvc_prepare_agent.prepare(
             context,
             voice_model_id=voice_model_id,
@@ -296,6 +316,11 @@ class AgentWorkflowService:
             warnings.append(f"artifact_invalid_json:{artifact.artifact_type}")
             return None
         return payload if isinstance(payload, dict) else {"value": payload}
+
+    def _load_skill_context(self, skill_profile: str | None) -> AgentSkillContext:
+        if not skill_profile:
+            return AgentSkillContext()
+        return self.skill_registry.context_for_profile(skill_profile)
 
     def _extract_vocal_activity(self, *, f0_track: dict[str, Any] | None) -> dict[str, Any] | None:
         if not isinstance(f0_track, dict):

@@ -1,0 +1,4 @@
+interface:
+  display_name: "ScoreIR Editing"
+  short_description: "Create safe ScoreIR patch workflows."
+  default_prompt: "Use this skill to propose validated SunoScribe score edits."

@@ -1,0 +1,4 @@
+interface:
+  display_name: "MIR Transcription"
+  short_description: "Guide lead-vocal MIR transcription decisions."
+  default_prompt: "Use this skill to plan or review SunoScribe lead-vocal transcription work."

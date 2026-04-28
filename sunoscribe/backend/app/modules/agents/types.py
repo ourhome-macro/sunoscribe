@@ -20,6 +20,23 @@ class ArtifactReference(_AgentModel):
     artifact_metadata: dict[str, Any] = Field(default_factory=dict)
 
 
+class AgentSkill(_AgentModel):
+    name: str = Field(min_length=1)
+    description: str | None = None
+    path: str
+    content: str = Field(min_length=1)
+    agent_config_path: str | None = None
+    agent_config_content: str | None = None
+
+
+class AgentSkillContext(_AgentModel):
+    skills: list[AgentSkill] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
+
+    def names(self) -> list[str]:
+        return [skill.name for skill in self.skills]
+
+
 class AgentRevisionContext(_AgentModel):
     project_id: str = Field(min_length=1)
     revision_id: str = Field(min_length=1)
@@ -29,6 +46,7 @@ class AgentRevisionContext(_AgentModel):
     note_candidates: dict[str, Any] | None = None
     rhythm_grid: dict[str, Any] | None = None
     vocal_activity: dict[str, Any] | None = None
+    skill_context: AgentSkillContext = Field(default_factory=AgentSkillContext)
     warnings: list[str] = Field(default_factory=list)
 
     def artifact_ids_by_type(self, artifact_type: str) -> list[str]:
@@ -38,6 +56,9 @@ class AgentRevisionContext(_AgentModel):
             for artifact in self.artifacts
             if str(artifact.artifact_type or "").strip().lower() == target
         ]
+
+    def skill_names(self) -> list[str]:
+        return self.skill_context.names()
 
 
 class DiagnosisSectionFinding(_AgentModel):

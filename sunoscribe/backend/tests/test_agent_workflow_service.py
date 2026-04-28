@@ -5,11 +5,15 @@ import tempfile
 import unittest
 import uuid
 from pathlib import Path
+from unittest.mock import patch
 
 from app.models.artifact import Artifact
 from app.models.score import Score
 from app.models.score_revision import ScoreRevision
 from app.models.user import User
+from app.modules.agents import AgentScorePatch, RvcJobSpec, TranscriptionDiagnosis
+from app.modules.agents.types import AgentSkill, AgentSkillContext
+from app.modules.agents.validators import RvcSpecValidationResult
 from app.services.agent_workflow_service import AgentWorkflowService
 
 
@@ -112,6 +116,36 @@ class TestAgentWorkflowService(unittest.TestCase):
         self.assertIsNotNone(context.vocal_activity)
         self.assertEqual(context.vocal_activity["segments"][0]["state"], "vocal")
 
+    def test_agent_methods_attach_profile_skill_context_from_registry(self) -> None:
+        _, revision = _build_revision()
+        diagnosis_agent = _SpyDiagnosisAgent()
+        patch_agent = _SpyScorePatchAgent()
+        rvc_agent = _SpyRvcPrepareAgent()
+        service = AgentWorkflowService(
+            diagnosis_agent=diagnosis_agent,
+            score_patch_agent=patch_agent,
+            rvc_prepare_agent=rvc_agent,
+            score_patch_validator=_AcceptingPatchValidator(),
+            rvc_spec_validator=_AcceptingRvcValidator(),
+        )
+        service.skill_registry = _StaticSkillRegistry()
+        service._list_revision_artifacts = lambda *args, **kwargs: []
+        user = User(id=uuid.uuid4(), username="agent", email="agent@example.com", password_hash="x")
+
+        with patch("app.services.agent_workflow_service.get_score_revision_by_id", return_value=revision):
+            service.diagnose_transcription(None, user=user, revision_id=str(revision.id))
+            service.propose_score_patch(None, user=user, revision_id=str(revision.id), instruction="patch n1")
+            service.prepare_rvc_job(
+                None,
+                user=user,
+                revision_id=str(revision.id),
+                voice_model_id="voice-model-1",
+            )
+
+        self.assertEqual(diagnosis_agent.context.skill_context.names(), ["mir-transcription", "debug-diagnosis"])
+        self.assertEqual(patch_agent.context.skill_context.names(), ["score-ir-editing"])
+        self.assertEqual(rvc_agent.context.skill_context.names(), ["rvc-cover"])
+
     def test_apply_patch_to_revision_creates_new_revision(self) -> None:
         score, revision = _build_revision()
         user = User(id=uuid.uuid4(), username="agent", email="agent@example.com", password_hash="x")
@@ -136,6 +170,125 @@ class TestAgentWorkflowService(unittest.TestCase):
         self.assertEqual(new_revision.parent_revision_id, revision.id)
         self.assertEqual(new_revision.score_ir["notes"][0]["pitch_midi"], 72)
         self.assertEqual(score.current_revision, new_revision)
+
+
+class _StaticSkillRegistry:
+    payload_by_profile = {
+        "diagnosis": AgentSkillContext(
+            skills=[
+                AgentSkill(
+                    name="mir-transcription",
+                    path="skills/mir-transcription/SKILL.md",
+                    content="mir transcription rules",
+                ),
+                AgentSkill(
+                    name="debug-diagnosis",
+                    path="skills/debug-diagnosis/SKILL.md",
+                    content="debug diagnosis rules",
+                ),
+            ]
+        ),
+        "score_patch": AgentSkillContext(
+            skills=[
+                AgentSkill(
+                    name="score-ir-editing",
+                    path="skills/score-ir-editing/SKILL.md",
+                    content="score patch rules",
+                ),
+            ]
+        ),
+        "rvc": AgentSkillContext(
+            skills=[
+                AgentSkill(
+                    name="rvc-cover",
+                    path="skills/rvc-cover/SKILL.md",
+                    content="rvc cover rules",
+                ),
+            ]
+        ),
+    }
+    all_skills = AgentSkillContext(
+        skills=[
+            AgentSkill(
+                name="mir-transcription",
+                path="skills/mir-transcription/SKILL.md",
+                content="mir transcription rules",
+            ),
+            AgentSkill(
+                name="score-ir-editing",
+                path="skills/score-ir-editing/SKILL.md",
+                content="score patch rules",
+            ),
+            AgentSkill(
+                name="debug-diagnosis",
+                path="skills/debug-diagnosis/SKILL.md",
+                content="debug diagnosis rules",
+            ),
+            AgentSkill(
+                name="rvc-cover",
+                path="skills/rvc-cover/SKILL.md",
+                content="rvc cover rules",
+            ),
+        ]
+    )
+
+    def build_context(self, *_args, **_kwargs) -> AgentSkillContext:
+        return self.all_skills
+
+    def read_skill_context(self, *_args, **_kwargs) -> AgentSkillContext:
+        return self.all_skills
+
+    def context_for_profile(self, profile: str) -> AgentSkillContext:
+        return self.payload_by_profile[str(profile)]
+
+
+class _SpyDiagnosisAgent:
+    def __init__(self) -> None:
+        self.context = None
+
+    def run(self, context):
+        self.context = context
+        return TranscriptionDiagnosis(summary="ok")
+
+
+class _SpyScorePatchAgent:
+    def __init__(self) -> None:
+        self.context = None
+
+    def propose(self, context, _instruction):
+        self.context = context
+        return AgentScorePatch(
+            base_revision_id=context.revision_id,
+            operations=[{"op": "mark_uncertain", "note_id": "n1"}],
+            rationale="test",
+            confidence=0.9,
+        )
+
+
+class _SpyRvcPrepareAgent:
+    def __init__(self) -> None:
+        self.context = None
+
+    def prepare(self, context, *, voice_model_id: str, transpose_semitones: int = 0):
+        self.context = context
+        return RvcJobSpec(
+            project_id=context.project_id,
+            revision_id=context.revision_id,
+            voice_model_id=voice_model_id,
+            transpose_semitones=transpose_semitones,
+        )
+
+
+class _AcceptingPatchValidator:
+    def validate(self, *, context, proposal):
+        self.context = context
+        return {"accepted": True, "errors": []}
+
+
+class _AcceptingRvcValidator:
+    def validate(self, *, context, spec):
+        self.context = context
+        return RvcSpecValidationResult(accepted=True, errors=[])
 
 
 if __name__ == "__main__":

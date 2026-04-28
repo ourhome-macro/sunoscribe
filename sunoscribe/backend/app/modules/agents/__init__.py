@@ -1,9 +1,12 @@
 from .diagnosis_agent import DiagnosisAgent
 from .rvc_prepare_agent import RvcPrepareAgent
 from .score_patch_agent import ScorePatchAgent
+from .skill_registry import AgentSkillRegistry, SkillRegistry
 from .types import (
     AgentRevisionContext,
     AgentScorePatch,
+    AgentSkill,
+    AgentSkillContext,
     ArtifactReference,
     DiagnosisAction,
     DiagnosisIssue,
@@ -25,6 +28,9 @@ __all__ = [
     "AgentRevisionContext",
     "AgentScorePatch",
     "AgentScorePatchValidator",
+    "AgentSkill",
+    "AgentSkillContext",
+    "AgentSkillRegistry",
     "ArtifactReference",
     "DiagnosisAction",
     "DiagnosisAgent",
@@ -35,6 +41,7 @@ __all__ = [
     "RvcSpecValidationResult",
     "RvcSpecValidator",
     "ScorePatchAgent",
+    "SkillRegistry",
     "TranscriptionDiagnosis",
     "validate_rvc_spec",
     "validate_score_patch",
