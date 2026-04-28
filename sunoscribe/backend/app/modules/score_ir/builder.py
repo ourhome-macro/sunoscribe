@@ -142,6 +142,9 @@ class ScoreIRBuilder:
         fallback_source = "lead_note"
         is_raw_note = False
         if not lead_like_notes:
+            analysis_info = dict(getattr(pitch_result, "analysis_info", {}) or {})
+            if bool(analysis_info.get("lead_selection_authoritative")):
+                return []
             lead_like_notes = list(pitch_result.raw_notes or [])
             fallback_source = "raw_note"
             is_raw_note = True

@@ -66,6 +66,17 @@ class NoteCandidateSet:
 
 
 @dataclass
+class MelodySourceCandidate:
+    source_id: str
+    backend: str
+    source_stem: Optional[str] = None
+    input_audio_path: Optional[str] = None
+    notes: List[Note] = field(default_factory=list)
+    f0_track: Optional["F0Track"] = None
+    analysis_info: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
 class F0Frame:
     time_sec: float
     frequency_hz: float
@@ -109,6 +120,42 @@ class RhythmGrid:
     rhythm_type: str = "stable"
     stability_score: float = 0.0
     analysis_info: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class ArrangementSegmentDecision:
+    start_time: float
+    end_time: float
+    state: str
+    lead_source_id: Optional[str] = None
+    support_source_id: Optional[str] = None
+    selected_lead_count: int = 0
+    selected_support_count: int = 0
+    suppressed_count: int = 0
+    max_polyphony: int = 1
+    transition_window_sec: float = 0.0
+    analysis_info: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class ArrangementDecision:
+    selected_lead_notes: List[Note] = field(default_factory=list)
+    selected_support_notes: List[Note] = field(default_factory=list)
+    segment_decisions: List[ArrangementSegmentDecision] = field(default_factory=list)
+    suppressed_candidates: List[Dict[str, Any]] = field(default_factory=list)
+    lead_source_id: Optional[str] = None
+    support_source_id: Optional[str] = None
+    confidence: float = 0.0
+    warnings: List[str] = field(default_factory=list)
+    analysis_info: Dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def lead_notes(self) -> List[Note]:
+        return self.selected_lead_notes
+
+    @property
+    def support_notes(self) -> List[Note]:
+        return self.selected_support_notes
 
 
 @dataclass

@@ -71,6 +71,20 @@ class PitchDetectionConfig:
     melody_isolated_note_max_duration_sec: float = 0.25
     melody_isolated_note_min_confidence: float = 0.62
 
+    # Source arbitration settings
+    melody_arbitrator_enabled: bool = True
+    basic_pitch_support_enabled: bool = True
+    arrangement_transition_window_bars: float = 1.0
+    arrangement_min_transition_window_sec: float = 0.5
+    arrangement_max_transition_window_sec: float = 4.0
+    arrangement_lead_conflict_window_sec: float = 0.12
+    arrangement_support_conflict_window_sec: float = 0.08
+    arrangement_lead_max_polyphony: int = 1
+    arrangement_vocal_support_max_polyphony: int = 1
+    arrangement_climax_support_max_polyphony: int = 2
+    arrangement_instrumental_max_polyphony: int = 3
+    arrangement_climax_support_density_per_sec: float = 1.2
+
     # Analysis settings
     bpm_start_bpm: float = 120.0
     bpm_refine_enabled: bool = True

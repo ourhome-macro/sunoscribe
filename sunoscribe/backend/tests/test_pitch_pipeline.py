@@ -292,6 +292,55 @@ class TestPitchPipeline(unittest.TestCase):
         self.assertEqual(len(result.semantic_audio.bass_root_candidates.notes), 1)
         self.assertEqual(result.semantic_audio.rhythm_grid.source_stem, "drums")
 
+    def test_analysis_info_exposes_arrangement_decision(self):
+        pipeline = PitchPipeline()
+
+        mock_notes = [
+            Note(pitch="C4", start_time=0.1, end_time=0.6, confidence=0.91),
+        ]
+
+        class _BeatResult:
+            bpm = 120.0
+            beat_times = [0.0, 0.5, 1.0]
+            confidence = 0.93
+
+        class _KeyResult:
+            key = "C Major"
+            confidence = 0.89
+            method = "librosa"
+
+        class _DownbeatResult:
+            downbeat_times = [0.0]
+            method = "librosa"
+            confidence = 0.8
+            beats_per_bar = 4
+
+        request = PitchPipelineRequest(
+            lead_audio_path="vocals.wav",
+            source_audio_path="mix.wav",
+            rhythm_audio_path="mix.wav",
+            key_audio_path="mix.wav",
+            source_stems={"vocals": "vocals.wav", "accompaniment": "accompaniment.wav"},
+        )
+
+        with patch.object(pipeline.detector, "detect", return_value=mock_notes), patch.object(
+            pipeline.beat_tracker, "track", return_value=_BeatResult()
+        ), patch.object(pipeline.key_analyzer, "analyze", return_value=_KeyResult()), patch.object(
+            pipeline.downbeat_tracker, "track", return_value=_DownbeatResult()
+        ), patch(
+            "app.modules.pitch.pipeline.get_audio_duration", return_value=2.0
+        ):
+            result = pipeline.run(request)
+
+        decision = result.analysis_info.get("arrangement_decision")
+        self.assertIsInstance(decision, dict)
+        self.assertEqual(decision["policy"], "deterministic_melody_source_arbitration")
+        self.assertEqual(decision["lead_source"], "rmvpe")
+        self.assertEqual(decision["lead_source_stem"], "vocals")
+        self.assertEqual(decision["lead_note_count"], 1)
+        self.assertIn("support_note_count", decision)
+        self.assertIn("max_polyphony", decision)
+
 
 if __name__ == "__main__":
     unittest.main()

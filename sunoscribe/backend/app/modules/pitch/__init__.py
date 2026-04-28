@@ -1,6 +1,7 @@
 from .config import PitchDetectionConfig
 from .downbeat_tracker import DownbeatTracker, DownbeatTrackingResult
 from .melody_selector import MelodySelector, MelodySelectionResult
+from .melody_source_arbitrator import MelodySourceArbitrator
 from .midi_exporter import MidiExporter
 from .pipeline import PitchPipeline
 from .rhythm_analyzer import RhythmAnalyzer
@@ -8,6 +9,9 @@ from .serializer import PitchResultSerializer
 from .types import (
     F0Frame,
     F0Track,
+    ArrangementDecision,
+    ArrangementSegmentDecision,
+    MelodySourceCandidate,
     MetaInfo,
     Note,
     NoteCandidateSet,
@@ -26,12 +30,16 @@ __all__ = [
     "DownbeatTrackingResult",
     "MelodySelector",
     "MelodySelectionResult",
+    "MelodySourceArbitrator",
     "MidiExporter",
     "PitchPipeline",
     "RhythmAnalyzer",
     "PitchResultSerializer",
     "F0Frame",
     "F0Track",
+    "ArrangementDecision",
+    "ArrangementSegmentDecision",
+    "MelodySourceCandidate",
     "MetaInfo",
     "Note",
     "NoteCandidateSet",

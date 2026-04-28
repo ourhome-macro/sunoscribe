@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from dataclasses import replace
+
 import librosa
 import numpy as np
 
@@ -11,12 +13,15 @@ from .downbeat_tracker import DownbeatTracker
 from .exceptions import DownbeatTrackingError
 from .key_analyzer import KeyAnalysisResult, KeyAnalyzer
 from .melody_selector import MelodySelector
+from .melody_source_arbitrator import MelodySourceArbitrator
 from .midi_exporter import MidiExporter
 from .quantizer import NoteQuantizer
 from .rhythm_analyzer import RhythmAnalyzer
 from .types import (
+    ArrangementDecision,
     F0Frame,
     F0Track,
+    MelodySourceCandidate,
     MetaInfo,
     Note,
     NoteCandidateSet,
@@ -41,6 +46,7 @@ class PitchPipeline:
         self.downbeat_tracker = DownbeatTracker(self.config)
         self.key_analyzer = KeyAnalyzer(self.config)
         self.melody_selector = MelodySelector(self.config)
+        self.melody_arbitrator = MelodySourceArbitrator(self.config)
         self.quantizer = NoteQuantizer(self.config)
         self.rhythm_analyzer = RhythmAnalyzer()
         self.midi_exporter = MidiExporter()
@@ -207,13 +213,17 @@ class PitchPipeline:
         artifact_cache: dict[str, dict[str, object] | None],
         warnings: list[str],
         role: str,
+        backend: str | None = None,
+        optional: bool = False,
     ) -> list[Note]:
         normalized_path = str(audio_path or "").strip()
         if not normalized_path:
             return []
-        if normalized_path in cache:
-            if normalized_path not in artifact_cache:
-                artifact_cache[normalized_path] = None
+        backend_key = str(backend or self.detector.backend_name)
+        cache_key = f"{backend_key}:{normalized_path}"
+        if cache_key in cache:
+            if cache_key not in artifact_cache:
+                artifact_cache[cache_key] = None
             return [
                 Note(
                     pitch=str(note.pitch),
@@ -221,15 +231,16 @@ class PitchPipeline:
                     end_time=float(note.end_time),
                     confidence=float(note.confidence),
                 )
-                for note in cache[normalized_path]
+                for note in cache[cache_key]
             ]
 
         try:
-            detected = self.detector.detect(normalized_path)
+            detected = self._detect_with_backend(normalized_path, backend=backend)
         except Exception as exc:
-            warnings.append(f"{role}_detection_failed:{str(exc)[:200]}")
-            cache[normalized_path] = []
-            artifact_cache[normalized_path] = None
+            prefix = f"{role}_optional_detection_failed" if optional else f"{role}_detection_failed"
+            warnings.append(f"{prefix}:{str(exc)[:200]}")
+            cache[cache_key] = []
+            artifact_cache[cache_key] = None
             return []
 
         for backend_warning in getattr(self.detector, "backend_warnings", []) or []:
@@ -237,8 +248,8 @@ class PitchPipeline:
             if warning_text not in warnings:
                 warnings.append(warning_text)
 
-        cache[normalized_path] = list(detected)
-        artifact_cache[normalized_path] = self._clone_detection_artifacts(
+        cache[cache_key] = list(detected)
+        artifact_cache[cache_key] = self._clone_detection_artifacts(
             getattr(self.detector, "last_detection_artifacts", None)
         )
         return [
@@ -250,6 +261,25 @@ class PitchPipeline:
             )
             for note in detected
         ]
+
+    def _detect_with_backend(self, audio_path: str, *, backend: str | None = None) -> list[Note]:
+        if not backend:
+            return self.detector.detect(audio_path)
+
+        original_config = self.detector.config
+        original_backend_name = self.detector.backend_name
+        normalized_backend = PitchDetector._normalize_backend(str(backend))
+        try:
+            self.detector.config = replace(
+                self.config,
+                pitch_backend=normalized_backend,
+                pitch_backend_fallbacks=(),
+            )
+            self.detector.backend_name = normalized_backend
+            return self.detector.detect(audio_path)
+        finally:
+            self.detector.config = original_config
+            self.detector.backend_name = original_backend_name
 
     def _build_candidate_set(
         self,
@@ -327,6 +357,59 @@ class PitchPipeline:
             analysis_info=dict(raw_track.get("analysis_info") or {}),
         )
 
+    def _source_id(self, *, backend: str, source_stem: str | None) -> str:
+        source = str(source_stem or "unknown").strip() or "unknown"
+        return f"{backend}:{source}"
+
+    def _support_audio_path(self, request: PitchPipelineRequest, lead_audio_path: str) -> str | None:
+        if request.harmony_audio_path:
+            return str(request.harmony_audio_path)
+        source_path = str(request.source_audio_path or "").strip()
+        if source_path and source_path != str(lead_audio_path):
+            return source_path
+        accompaniment_path = str(request.source_stems.get("accompaniment", "")).strip()
+        if accompaniment_path:
+            return accompaniment_path
+        return None
+
+    def _build_arrangement_summary(
+        self,
+        *,
+        decision: ArrangementDecision,
+        lead_source_stem: str | None,
+        support_source_stem: str | None,
+    ) -> dict[str, object]:
+        info = dict(decision.analysis_info or {})
+        return {
+            "policy": "deterministic_melody_source_arbitration",
+            "enabled": bool(info.get("enabled", True)),
+            "lead_source": self._backend_from_source_id(decision.lead_source_id),
+            "lead_source_id": decision.lead_source_id,
+            "lead_source_stem": lead_source_stem,
+            "support_source": self._backend_from_source_id(decision.support_source_id),
+            "support_source_id": decision.support_source_id,
+            "support_source_stem": support_source_stem,
+            "lead_note_count": len(decision.selected_lead_notes),
+            "support_note_count": len(decision.selected_support_notes),
+            "suppressed_count": len(decision.suppressed_candidates),
+            "confidence": float(decision.confidence),
+            "transition_window_sec": info.get("transition_window_sec", 0.0),
+            "max_polyphony": {
+                "lead": info.get("lead_max_polyphony", 1),
+                "vocal_support": info.get("vocal_support_max_polyphony", 0),
+                "climax_support": info.get("climax_support_max_polyphony", 0),
+                "instrumental": info.get("instrumental_max_polyphony", 0),
+            },
+            "segment_state_counts": dict(info.get("segment_state_counts") or {}),
+            "segment_decisions": list(info.get("segment_decisions") or []),
+        }
+
+    @staticmethod
+    def _backend_from_source_id(source_id: str | None) -> str | None:
+        if not source_id:
+            return None
+        return str(source_id).split(":", 1)[0]
+
     def _clone_detection_artifacts(self, raw_artifacts: object) -> dict[str, object] | None:
         if not isinstance(raw_artifacts, dict):
             return None
@@ -367,28 +450,42 @@ class PitchPipeline:
             warnings.append("No melody candidates detected from lead audio.")
         melody_detector_backend = str(getattr(self.detector, "active_backend_name", self.detector.backend_name))
 
-        melody_selection = self.melody_selector.select(detected_notes)
-        lead_notes = melody_selection.notes
-        if melody_selection.detected_count > 0 and melody_selection.kept_count == 0:
-            warnings.append("Melody selector removed all detected notes.")
-        elif melody_selection.detected_count > 0 and melody_selection.kept_count <= max(
-            2, int(round(melody_selection.detected_count * 0.25))
-        ):
-            warnings.append("Melody selector removed most detected notes; melody may be unstable.")
+        support_audio_path = self._support_audio_path(request, lead_audio_path)
+        basic_pitch_support_candidates: list[Note] = []
+        if bool(self.config.basic_pitch_support_enabled):
+            basic_pitch_support_candidates = self._safe_detect_candidates(
+                audio_path=support_audio_path,
+                cache=detector_cache,
+                artifact_cache=detector_artifact_cache,
+                warnings=warnings,
+                role="basic_pitch_support",
+                backend="basic-pitch",
+                optional=True,
+            )
 
-        harmony_candidates = self._safe_detect_candidates(
-            audio_path=harmony_audio_path,
-            cache=detector_cache,
-            artifact_cache=detector_artifact_cache,
-            warnings=warnings,
-            role="harmony",
-        )
+        if harmony_audio_path and str(harmony_audio_path) == str(support_audio_path):
+            harmony_candidates = list(basic_pitch_support_candidates)
+        else:
+            harmony_candidates = self._safe_detect_candidates(
+                audio_path=harmony_audio_path,
+                cache=detector_cache,
+                artifact_cache=detector_artifact_cache,
+                warnings=warnings,
+                role="harmony",
+                backend="basic-pitch",
+                optional=True,
+            )
+        if not harmony_candidates:
+            harmony_candidates = list(basic_pitch_support_candidates)
+
         bass_candidates = self._safe_detect_candidates(
             audio_path=bass_audio_path,
             cache=detector_cache,
             artifact_cache=detector_artifact_cache,
             warnings=warnings,
             role="bass_root",
+            backend="basic-pitch",
+            optional=True,
         )
 
         beat_result = self.beat_tracker.track(rhythm_audio_path)
@@ -404,8 +501,6 @@ class PitchPipeline:
         key_method = str(getattr(key_result, "method", "librosa"))
         if "fallback" in key_method:
             warnings.append(f"Key backend downgraded to {key_method}.")
-
-        quantized_notes = self.quantizer.quantize(lead_notes, beat_result.bpm, beat_result.beat_times)
         rhythm_result = self.rhythm_analyzer.analyze(beat_result.beat_times)
         beat_duration_sec = 60.0 / max(1e-6, beat_result.bpm)
         duration_sec = float(get_audio_duration(duration_audio_path))
@@ -428,30 +523,6 @@ class PitchPipeline:
 
         effective_beats_per_bar = max(2, int(downbeat_result.beats_per_bar or self.config.beats_per_bar))
         boundaries = self._build_measure_boundaries(downbeat_result.downbeat_times, duration_sec)
-        self._recompute_quantized_positions(quantized_notes, boundaries, effective_beats_per_bar)
-        measures = self._build_measures(
-            quantized_notes,
-            boundaries,
-            effective_beats_per_bar,
-            beat_duration_sec,
-        )
-
-        meta = MetaInfo(
-            bpm=beat_result.bpm,
-            bpm_confidence=beat_result.confidence,
-            time_signature=f"{effective_beats_per_bar}/{max(1, int(self.config.beat_unit))}",
-            key=key_result.key,
-            key_confidence=key_result.confidence,
-            rhythm_type=rhythm_result.rhythm_type,
-            duration_sec=duration_sec,
-            total_measures=len(measures) if measures else None,
-        )
-
-        note_density = len(lead_notes) / max(duration_sec, 1.0)
-        has_separated_accompaniment = any(
-            name in request.source_stems for name in ("accompaniment", "bass", "drums", "other")
-        )
-        has_accompaniment = bool(has_separated_accompaniment or (note_density >= 1.8 and len(measures) >= 4))
 
         rhythm_grid = RhythmGrid(
             source_stem=self._infer_source_stem(rhythm_audio_path, path_stem_index, fallback="mix"),
@@ -472,25 +543,91 @@ class PitchPipeline:
                 "beat_backend": "librosa",
             },
         )
+
         lead_f0_track = self._build_f0_track(
-            raw_artifacts=detector_artifact_cache.get(str(lead_audio_path)),
+            raw_artifacts=detector_artifact_cache.get(f"{self.detector.backend_name}:{str(lead_audio_path)}"),
             source_stem=self._infer_source_stem(lead_audio_path, path_stem_index, fallback="lead"),
         )
+        lead_source_stem = self._infer_source_stem(lead_audio_path, path_stem_index, fallback="lead")
+        support_source_stem = self._infer_source_stem(support_audio_path, path_stem_index, fallback="mix")
+        arrangement_decision = self.melody_arbitrator.decide(
+            rmvpe_candidate=MelodySourceCandidate(
+                source_id=self._source_id(backend=melody_detector_backend, source_stem=lead_source_stem),
+                backend=melody_detector_backend,
+                source_stem=lead_source_stem,
+                input_audio_path=str(lead_audio_path),
+                notes=detected_notes,
+                f0_track=lead_f0_track,
+                analysis_info={"role": "lead_vocal"},
+            ),
+            basic_pitch_candidate=MelodySourceCandidate(
+                source_id=self._source_id(backend="basic-pitch", source_stem=support_source_stem),
+                backend="basic-pitch",
+                source_stem=support_source_stem,
+                input_audio_path=str(support_audio_path) if support_audio_path else None,
+                notes=basic_pitch_support_candidates,
+                analysis_info={"role": "support_candidates"},
+            ),
+            rhythm_grid=rhythm_grid,
+        )
+        for warning in arrangement_decision.warnings:
+            if warning not in warnings:
+                warnings.append(warning)
+
+        melody_selection = self.melody_selector.select(arrangement_decision.selected_lead_notes)
+        lead_notes = melody_selection.notes
+        if melody_selection.detected_count > 0 and melody_selection.kept_count == 0:
+            warnings.append("Melody selector removed all detected notes.")
+        elif melody_selection.detected_count > 0 and melody_selection.kept_count <= max(
+            2, int(round(melody_selection.detected_count * 0.25))
+        ):
+            warnings.append("Melody selector removed most detected notes; melody may be unstable.")
+
+        quantized_notes = self.quantizer.quantize(lead_notes, beat_result.bpm, beat_result.beat_times)
+        self._recompute_quantized_positions(quantized_notes, boundaries, effective_beats_per_bar)
+        measures = self._build_measures(
+            quantized_notes,
+            boundaries,
+            effective_beats_per_bar,
+            beat_duration_sec,
+        )
+        arrangement_summary = self._build_arrangement_summary(
+            decision=arrangement_decision,
+            lead_source_stem=lead_source_stem,
+            support_source_stem=support_source_stem,
+        )
+        meta = MetaInfo(
+            bpm=beat_result.bpm,
+            bpm_confidence=beat_result.confidence,
+            time_signature=f"{effective_beats_per_bar}/{max(1, int(self.config.beat_unit))}",
+            key=key_result.key,
+            key_confidence=key_result.confidence,
+            rhythm_type=rhythm_result.rhythm_type,
+            duration_sec=duration_sec,
+            total_measures=len(measures) if measures else None,
+        )
+        note_density = len(lead_notes) / max(duration_sec, 1.0)
+        has_separated_accompaniment = any(
+            name in request.source_stems for name in ("accompaniment", "bass", "drums", "other")
+        )
+        has_accompaniment = bool(has_separated_accompaniment or (note_density >= 1.8 and len(measures) >= 4))
+
         semantic_audio = SemanticAudioResult(
             source_stems=dict(request.source_stems),
             f0_track=lead_f0_track,
             melody_candidates=self._build_candidate_set(
                 role="melody_candidates",
                 audio_path=lead_audio_path,
-                source_stem=self._infer_source_stem(lead_audio_path, path_stem_index, fallback="lead"),
+                source_stem=lead_source_stem,
                 notes=detected_notes,
                 selected_notes=lead_notes,
             ),
             harmony_candidates=self._build_candidate_set(
                 role="harmony_candidates",
-                audio_path=harmony_audio_path,
-                source_stem=self._infer_source_stem(harmony_audio_path, path_stem_index),
+                audio_path=support_audio_path or harmony_audio_path,
+                source_stem=support_source_stem,
                 notes=harmony_candidates,
+                selected_notes=arrangement_decision.selected_support_notes,
             ),
             bass_root_candidates=self._build_candidate_set(
                 role="bass_root_candidates",
@@ -499,6 +636,11 @@ class PitchPipeline:
                 notes=bass_candidates,
             ),
             rhythm_grid=rhythm_grid,
+        )
+        semantic_audio.melody_candidates.analysis_info["arrangement_decision"] = arrangement_summary
+        semantic_audio.harmony_candidates.analysis_info["arrangement_decision"] = arrangement_summary
+        semantic_audio.harmony_candidates.analysis_info["selected_support_count"] = len(
+            arrangement_decision.selected_support_notes
         )
 
         return PitchAnalysisResult(
@@ -518,7 +660,9 @@ class PitchPipeline:
                 "melody_selector_merged": melody_selection.merged_count,
                 "raw_notes_semantics": "detected_candidates",
                 "lead_notes_semantics": "selected_lead_melody",
+                "lead_selection_authoritative": True,
                 "semantic_representation": "semantic_audio_v1",
+                "arrangement_decision": arrangement_summary,
                 "f0_track_available": lead_f0_track is not None,
                 "vocal_activity_segment_count": len(lead_f0_track.vocal_activity) if lead_f0_track is not None else 0,
                 "lead_audio_source": semantic_audio.melody_candidates.source_stem,
@@ -557,6 +701,8 @@ class PitchPipeline:
                 "rhythm_stability": round(rhythm_result.stability_score, 4),
                 "detector": melody_detector_backend,
                 "configured_detector": self.detector.backend_name,
+                "pitch_backend_fallback_used": melody_detector_backend != self.detector.backend_name,
+                "fallback": melody_detector_backend != self.detector.backend_name,
                 "beat_backend": "librosa",
                 "key_backend": key_method,
             },

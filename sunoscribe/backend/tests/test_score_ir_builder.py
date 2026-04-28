@@ -6,6 +6,42 @@ from app.modules.score_ir import ScoreIRBuilder, ScoreIRSerializer
 
 
 class TestScoreIRBuilder(unittest.TestCase):
+    def test_build_respects_authoritative_empty_lead_selection(self):
+        builder = ScoreIRBuilder()
+        pitch_result = PitchAnalysisResult(
+            version="1.4",
+            meta=MetaInfo(
+                bpm=120.0,
+                bpm_confidence=0.9,
+                key="C Major",
+                key_confidence=0.81,
+                duration_sec=4.0,
+                time_signature="4/4",
+                rhythm_type="stable",
+                total_measures=2,
+            ),
+            analysis_info={
+                "lead_selection_authoritative": True,
+                "arrangement_decision": {
+                    "policy": "deterministic_melody_source_arbitration",
+                    "lead_note_count": 0,
+                },
+            },
+            measures=[
+                {"measure_num": 1, "start_time": 0.0, "end_time": 2.0, "is_anacrusis": False, "notes": []},
+                {"measure_num": 2, "start_time": 2.0, "end_time": 4.0, "is_anacrusis": False, "notes": []},
+            ],
+            lead_notes=[],
+            raw_notes=[
+                Note(pitch="G5", start_time=0.2, end_time=0.8, confidence=0.95),
+            ],
+        )
+
+        score_ir = builder.build(pitch_result)
+
+        self.assertEqual(score_ir.notes, [])
+        self.assertEqual(score_ir.measures[0].note_ids, [])
+
     def test_build_uses_analysis_ir_for_lead_chords_bass_and_sections(self):
         builder = ScoreIRBuilder()
         pitch_result = PitchAnalysisResult(
