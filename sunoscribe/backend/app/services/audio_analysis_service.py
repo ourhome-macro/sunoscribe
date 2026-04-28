@@ -62,6 +62,10 @@ class AudioAnalysisResult:
     refine_debug: dict | None
     midi_path: str | None
     stem_paths: dict[str, str] = field(default_factory=dict)
+    f0_track: dict | None = None
+    note_candidates: dict | None = None
+    rhythm_grid: dict | None = None
+    vocal_activity: dict | None = None
     semantic_audio: dict | None = None
     warnings: list[str] = field(default_factory=list)
 
@@ -86,6 +90,10 @@ class _PerceptionStageResult:
     score_ir_dict: dict
     raw_pitch_midi_path: Path | None
     stem_paths: dict[str, Path] = field(default_factory=dict)
+    f0_track_dict: dict | None = None
+    note_candidates_dict: dict | None = None
+    rhythm_grid_dict: dict | None = None
+    vocal_activity_dict: dict | None = None
     semantic_audio_dict: dict | None = None
     warnings: list[str] = field(default_factory=list)
 
@@ -198,6 +206,10 @@ class AudioAnalysisService:
             refine_debug=alignment.refine_debug,
             midi_path=str(final_midi_path) if final_midi_path else None,
             stem_paths={name: str(path) for name, path in perception.stem_paths.items()},
+            f0_track=perception.f0_track_dict,
+            note_candidates=perception.note_candidates_dict,
+            rhythm_grid=perception.rhythm_grid_dict,
+            vocal_activity=perception.vocal_activity_dict,
             warnings=all_warnings,
         )
         return result
@@ -214,6 +226,10 @@ class AudioAnalysisService:
         accompaniment_path: Path | None = None
         raw_pitch_midi_path: Path | None = None
         stem_paths: dict[str, Path] = {}
+        f0_track_dict: dict | None = None
+        note_candidates_dict: dict | None = None
+        rhythm_grid_dict: dict | None = None
+        vocal_activity_dict: dict | None = None
         semantic_audio_dict: dict | None = None
 
         fallback_audio_path = source_audio_path
@@ -304,6 +320,21 @@ class AudioAnalysisService:
                         if isinstance(semantic_audio_serialized, dict)
                         else {"value": semantic_audio_serialized}
                     )
+                f0_track_serialized = self._serialize(perception_obj=getattr(pitch_result_obj, "f0_track", None))
+                if f0_track_serialized is not None:
+                    f0_track_dict = (
+                        f0_track_serialized if isinstance(f0_track_serialized, dict) else {"value": f0_track_serialized}
+                    )
+                    raw_vocal_activity = f0_track_dict.get("vocal_activity")
+                    if raw_vocal_activity is not None:
+                        if isinstance(raw_vocal_activity, list):
+                            vocal_activity_dict = {"segments": raw_vocal_activity}
+                        elif isinstance(raw_vocal_activity, dict):
+                            vocal_activity_dict = dict(raw_vocal_activity)
+                        else:
+                            vocal_activity_dict = {"value": raw_vocal_activity}
+                note_candidates_dict = self._build_note_candidates_payload(semantic_audio_dict)
+                rhythm_grid_dict = self._build_rhythm_grid_payload(semantic_audio_dict)
 
                 if hasattr(self.pitch_pipeline, "export_midi"):
                     try:
@@ -379,6 +410,10 @@ class AudioAnalysisService:
             score_ir_dict=score_ir_dict,
             raw_pitch_midi_path=raw_pitch_midi_path,
             stem_paths=stem_paths,
+            f0_track_dict=f0_track_dict,
+            note_candidates_dict=note_candidates_dict,
+            rhythm_grid_dict=rhythm_grid_dict,
+            vocal_activity_dict=vocal_activity_dict,
             warnings=warnings,
         )
 
@@ -595,6 +630,14 @@ class AudioAnalysisService:
                 self._write_json(workspace.whisper_raw_path, perception.whisper_raw)
 
             self._write_json(workspace.pitch_result_path, perception.pitch_result_dict)
+            if perception.f0_track_dict is not None:
+                self._write_json(workspace.f0_track_path, perception.f0_track_dict)
+            if perception.note_candidates_dict is not None:
+                self._write_json(workspace.note_candidates_path, perception.note_candidates_dict)
+            if perception.rhythm_grid_dict is not None:
+                self._write_json(workspace.rhythm_grid_path, perception.rhythm_grid_dict)
+            if perception.vocal_activity_dict is not None:
+                self._write_json(workspace.vocal_activity_path, perception.vocal_activity_dict)
             if perception.analysis_ir_dict is not None:
                 self._write_json(workspace.analysis_ir_path, perception.analysis_ir_dict)
             if perception.score_data_dict is not None:
@@ -733,6 +776,25 @@ class AudioAnalysisService:
                 if text and text not in merged:
                     merged.append(text)
         return merged
+
+    def _build_note_candidates_payload(self, semantic_audio_dict: dict | None) -> dict | None:
+        if not isinstance(semantic_audio_dict, dict):
+            return None
+        payload = {
+            "melody_candidates": semantic_audio_dict.get("melody_candidates"),
+            "harmony_candidates": semantic_audio_dict.get("harmony_candidates"),
+            "bass_root_candidates": semantic_audio_dict.get("bass_root_candidates"),
+        }
+        if not any(isinstance(value, dict) for value in payload.values()):
+            return None
+        payload["source_stems"] = semantic_audio_dict.get("source_stems", {})
+        return payload
+
+    def _build_rhythm_grid_payload(self, semantic_audio_dict: dict | None) -> dict | None:
+        if not isinstance(semantic_audio_dict, dict):
+            return None
+        rhythm_grid = semantic_audio_dict.get("rhythm_grid")
+        return dict(rhythm_grid) if isinstance(rhythm_grid, dict) else None
 
     def _short_exception(self, exc: Exception) -> str:
         msg = str(exc).strip()

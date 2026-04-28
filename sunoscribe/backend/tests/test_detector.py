@@ -55,6 +55,9 @@ class TestPitchDetector(unittest.TestCase):
         self.assertEqual(len(notes), 2)
         self.assertEqual([n.pitch for n in notes], ["C4", "E4"])
         self.assertLessEqual(notes[0].start_time, notes[1].start_time)
+        self.assertIsNotNone(detector.last_detection_artifacts)
+        self.assertEqual(detector.last_detection_artifacts["backend"], "basic-pitch")
+        self.assertIsNone(detector.last_detection_artifacts["f0_track"])
 
     def test_validate_audio_length_raises(self):
         cfg = PitchDetectionConfig(max_audio_length_sec=1.0, pitch_backend="basic-pitch")
@@ -123,6 +126,11 @@ class TestPitchDetector(unittest.TestCase):
         self.assertEqual(len(notes), 2)
         self.assertEqual([n.pitch for n in notes], ["M60", "M64"])
         self.assertTrue(all(n.confidence >= 0.5 for n in notes))
+        self.assertIsNotNone(detector.last_detection_artifacts)
+        self.assertEqual(detector.last_detection_artifacts["backend"], "rmvpe")
+        self.assertEqual(detector.last_detection_artifacts["frame_count"], 8)
+        self.assertEqual(len(detector.last_detection_artifacts["f0_track"]["frames"]), 8)
+        self.assertGreaterEqual(len(detector.last_detection_artifacts["f0_track"]["vocal_activity"]), 1)
 
     def test_detect_raises_when_rmvpe_missing(self):
         cfg = PitchDetectionConfig(pitch_backend="rmvpe")

@@ -6,6 +6,8 @@ from .pipeline import PitchPipeline
 from .rhythm_analyzer import RhythmAnalyzer
 from .serializer import PitchResultSerializer
 from .types import (
+    F0Frame,
+    F0Track,
     MetaInfo,
     Note,
     NoteCandidateSet,
@@ -15,6 +17,7 @@ from .types import (
     QuantizedNote,
     RhythmGrid,
     SemanticAudioResult,
+    VocalActivitySegment,
 )
 
 __all__ = [
@@ -27,6 +30,8 @@ __all__ = [
     "PitchPipeline",
     "RhythmAnalyzer",
     "PitchResultSerializer",
+    "F0Frame",
+    "F0Track",
     "MetaInfo",
     "Note",
     "NoteCandidateSet",
@@ -36,4 +41,5 @@ __all__ = [
     "RhythmGrid",
     "SemanticAudioResult",
     "PitchAnalysisResult",
+    "VocalActivitySegment",
 ]

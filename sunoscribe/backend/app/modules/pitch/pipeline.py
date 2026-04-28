@@ -15,6 +15,8 @@ from .midi_exporter import MidiExporter
 from .quantizer import NoteQuantizer
 from .rhythm_analyzer import RhythmAnalyzer
 from .types import (
+    F0Frame,
+    F0Track,
     MetaInfo,
     Note,
     NoteCandidateSet,
@@ -23,6 +25,7 @@ from .types import (
     QuantizedNote,
     RhythmGrid,
     SemanticAudioResult,
+    VocalActivitySegment,
 )
 
 
@@ -201,6 +204,7 @@ class PitchPipeline:
         *,
         audio_path: str | None,
         cache: dict[str, list[Note]],
+        artifact_cache: dict[str, dict[str, object] | None],
         warnings: list[str],
         role: str,
     ) -> list[Note]:
@@ -208,6 +212,8 @@ class PitchPipeline:
         if not normalized_path:
             return []
         if normalized_path in cache:
+            if normalized_path not in artifact_cache:
+                artifact_cache[normalized_path] = None
             return [
                 Note(
                     pitch=str(note.pitch),
@@ -223,6 +229,7 @@ class PitchPipeline:
         except Exception as exc:
             warnings.append(f"{role}_detection_failed:{str(exc)[:200]}")
             cache[normalized_path] = []
+            artifact_cache[normalized_path] = None
             return []
 
         for backend_warning in getattr(self.detector, "backend_warnings", []) or []:
@@ -231,6 +238,9 @@ class PitchPipeline:
                 warnings.append(warning_text)
 
         cache[normalized_path] = list(detected)
+        artifact_cache[normalized_path] = self._clone_detection_artifacts(
+            getattr(self.detector, "last_detection_artifacts", None)
+        )
         return [
             Note(
                 pitch=str(note.pitch),
@@ -262,12 +272,82 @@ class PitchPipeline:
             },
         )
 
+    def _build_f0_track(
+        self,
+        *,
+        raw_artifacts: dict[str, object] | None,
+        source_stem: str | None,
+    ) -> F0Track | None:
+        if not isinstance(raw_artifacts, dict):
+            return None
+        raw_track = raw_artifacts.get("f0_track")
+        if not isinstance(raw_track, dict):
+            return None
+
+        frames: list[F0Frame] = []
+        for raw_frame in raw_track.get("frames") or []:
+            if not isinstance(raw_frame, dict):
+                continue
+            frames.append(
+                F0Frame(
+                    time_sec=float(raw_frame.get("time_sec", 0.0)),
+                    frequency_hz=float(raw_frame.get("frequency_hz", 0.0)),
+                    confidence=float(raw_frame.get("confidence", 0.0)),
+                    voiced=bool(raw_frame.get("voiced", False)),
+                    pitch_midi=(
+                        float(raw_frame["pitch_midi"])
+                        if raw_frame.get("pitch_midi") is not None
+                        else None
+                    ),
+                )
+            )
+
+        vocal_activity: list[VocalActivitySegment] = []
+        for raw_segment in raw_track.get("vocal_activity") or []:
+            if not isinstance(raw_segment, dict):
+                continue
+            vocal_activity.append(
+                VocalActivitySegment(
+                    start_time=float(raw_segment.get("start_time", 0.0)),
+                    end_time=float(raw_segment.get("end_time", 0.0)),
+                    state=str(raw_segment.get("state", "inactive")),
+                    voiced_ratio=float(raw_segment.get("voiced_ratio", 0.0)),
+                    mean_confidence=float(raw_segment.get("mean_confidence", 0.0)),
+                    source_stem=source_stem,
+                    analysis_info=dict(raw_segment.get("analysis_info") or {}),
+                )
+            )
+
+        return F0Track(
+            source_stem=source_stem,
+            input_audio_path=str(raw_track.get("input_audio_path") or ""),
+            backend=str(raw_track.get("backend") or raw_artifacts.get("backend") or ""),
+            frames=frames,
+            vocal_activity=vocal_activity,
+            analysis_info=dict(raw_track.get("analysis_info") or {}),
+        )
+
+    def _clone_detection_artifacts(self, raw_artifacts: object) -> dict[str, object] | None:
+        if not isinstance(raw_artifacts, dict):
+            return None
+
+        cloned: dict[str, object] = {}
+        for key, value in raw_artifacts.items():
+            if isinstance(value, dict):
+                cloned[str(key)] = json_safe_clone_dict(value)
+            elif isinstance(value, list):
+                cloned[str(key)] = [json_safe_clone_dict(item) if isinstance(item, dict) else item for item in value]
+            else:
+                cloned[str(key)] = value
+        return cloned
+
     def run(self, audio_input: str | PitchPipelineRequest) -> PitchAnalysisResult:
         warnings: list[str] = []
 
         request = self._normalize_request(audio_input)
         path_stem_index = self._build_path_stem_index(request.source_stems)
         detector_cache: dict[str, list[Note]] = {}
+        detector_artifact_cache: dict[str, dict[str, object] | None] = {}
 
         lead_audio_path = request.lead_audio_path
         rhythm_audio_path = request.rhythm_audio_path or request.source_audio_path or lead_audio_path
@@ -279,6 +359,7 @@ class PitchPipeline:
         detected_notes = self._safe_detect_candidates(
             audio_path=lead_audio_path,
             cache=detector_cache,
+            artifact_cache=detector_artifact_cache,
             warnings=warnings,
             role="melody",
         )
@@ -298,12 +379,14 @@ class PitchPipeline:
         harmony_candidates = self._safe_detect_candidates(
             audio_path=harmony_audio_path,
             cache=detector_cache,
+            artifact_cache=detector_artifact_cache,
             warnings=warnings,
             role="harmony",
         )
         bass_candidates = self._safe_detect_candidates(
             audio_path=bass_audio_path,
             cache=detector_cache,
+            artifact_cache=detector_artifact_cache,
             warnings=warnings,
             role="bass_root",
         )
@@ -389,8 +472,13 @@ class PitchPipeline:
                 "beat_backend": "librosa",
             },
         )
+        lead_f0_track = self._build_f0_track(
+            raw_artifacts=detector_artifact_cache.get(str(lead_audio_path)),
+            source_stem=self._infer_source_stem(lead_audio_path, path_stem_index, fallback="lead"),
+        )
         semantic_audio = SemanticAudioResult(
             source_stems=dict(request.source_stems),
+            f0_track=lead_f0_track,
             melody_candidates=self._build_candidate_set(
                 role="melody_candidates",
                 audio_path=lead_audio_path,
@@ -431,6 +519,8 @@ class PitchPipeline:
                 "raw_notes_semantics": "detected_candidates",
                 "lead_notes_semantics": "selected_lead_melody",
                 "semantic_representation": "semantic_audio_v1",
+                "f0_track_available": lead_f0_track is not None,
+                "vocal_activity_segment_count": len(lead_f0_track.vocal_activity) if lead_f0_track is not None else 0,
                 "lead_audio_source": semantic_audio.melody_candidates.source_stem,
                 "rhythm_audio_source": rhythm_grid.source_stem,
                 "key_audio_source": self._infer_source_stem(key_audio_path, path_stem_index, fallback="mix"),
@@ -473,6 +563,7 @@ class PitchPipeline:
             measures=measures,
             lead_notes=lead_notes,
             raw_notes=detected_notes,
+            f0_track=lead_f0_track,
             semantic_audio=semantic_audio,
             warnings=warnings,
         )
@@ -487,3 +578,18 @@ class PitchPipeline:
             bpm=result.meta.bpm,
             output_path=output_path,
         )
+
+
+def json_safe_clone_dict(raw: dict[str, object]) -> dict[str, object]:
+    cloned: dict[str, object] = {}
+    for key, value in raw.items():
+        if isinstance(value, dict):
+            cloned[str(key)] = json_safe_clone_dict(value)
+        elif isinstance(value, list):
+            cloned[str(key)] = [
+                json_safe_clone_dict(item) if isinstance(item, dict) else item
+                for item in value
+            ]
+        else:
+            cloned[str(key)] = value
+    return cloned

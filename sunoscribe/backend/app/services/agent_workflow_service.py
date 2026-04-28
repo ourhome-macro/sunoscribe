@@ -301,7 +301,11 @@ class AgentWorkflowService:
         if not isinstance(f0_track, dict):
             return None
         raw = f0_track.get("vocal_activity")
-        return dict(raw) if isinstance(raw, dict) else None
+        if isinstance(raw, dict):
+            return dict(raw)
+        if isinstance(raw, list):
+            return {"segments": list(raw)}
+        return None
 
     def _next_revision_number(self, db: Session | None, score: Score) -> int:
         revisions = list(getattr(score, "revisions", None) or [])

@@ -70,7 +70,10 @@ class TestAgentWorkflowService(unittest.TestCase):
             f0_path = root / "f0_track.json"
             note_candidates_path = root / "note_candidates.json"
             rhythm_grid_path = root / "rhythm_grid.json"
-            f0_path.write_text(json.dumps({"vocal_activity": {"segments": [{"state": "vocal"}]}}), encoding="utf-8")
+            f0_path.write_text(
+                json.dumps({"frames": [], "vocal_activity": [{"state": "vocal", "start_time": 0.0, "end_time": 1.0}]}),
+                encoding="utf-8",
+            )
             note_candidates_path.write_text(json.dumps({"role": "melody_candidates"}), encoding="utf-8")
             rhythm_grid_path.write_text(json.dumps({"beats_per_bar": 4}), encoding="utf-8")
 
@@ -107,6 +110,7 @@ class TestAgentWorkflowService(unittest.TestCase):
         self.assertIsNotNone(context.note_candidates)
         self.assertIsNotNone(context.rhythm_grid)
         self.assertIsNotNone(context.vocal_activity)
+        self.assertEqual(context.vocal_activity["segments"][0]["state"], "vocal")
 
     def test_apply_patch_to_revision_creates_new_revision(self) -> None:
         score, revision = _build_revision()

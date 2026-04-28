@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from app.modules.pitch.types import MetaInfo, PitchAnalysisResult, PitchPipelineRequest, SemanticAudioResult
+from app.modules.pitch.types import F0Frame, F0Track, MetaInfo, PitchAnalysisResult, PitchPipelineRequest, RhythmGrid, SemanticAudioResult, VocalActivitySegment
 from app.modules.score_ir import ScoreIR, ScoreMeta
 from app.services.audio_analysis_service import AudioAnalysisOptions, AudioAnalysisService
 from app.services.workspace import ProjectWorkspace
@@ -62,7 +62,26 @@ class _CapturePitchPipeline:
             measures=[],
             lead_notes=[],
             raw_notes=[],
-            semantic_audio=SemanticAudioResult(source_stems=dict(request.source_stems)),
+            f0_track=F0Track(
+                source_stem="vocals",
+                input_audio_path=str(request.lead_audio_path),
+                backend="rmvpe",
+                frames=[F0Frame(time_sec=0.1, frequency_hz=220.0, confidence=0.9, voiced=True, pitch_midi=57.0)],
+                vocal_activity=[
+                    VocalActivitySegment(
+                        start_time=0.0,
+                        end_time=0.5,
+                        state="vocal",
+                        voiced_ratio=1.0,
+                        mean_confidence=0.9,
+                        source_stem="vocals",
+                    )
+                ],
+            ),
+            semantic_audio=SemanticAudioResult(
+                source_stems=dict(request.source_stems),
+                rhythm_grid=RhythmGrid(source_stem="drums", input_audio_path="drums.wav"),
+            ),
         )
 
 
@@ -149,6 +168,20 @@ class TestAudioAnalysisService(unittest.TestCase):
             self.assertIn("analysis_ir", score_ir_builder.last_kwargs)
             self.assertIsNotNone(score_ir_builder.last_kwargs["analysis_ir"])
             self.assertEqual(perception.semantic_audio_dict["source_stems"]["bass"], str(workspace.stem_path("bass")))
+            self.assertIsNotNone(perception.f0_track_dict)
+            self.assertEqual(perception.f0_track_dict["backend"], "rmvpe")
+            self.assertIsNotNone(perception.note_candidates_dict)
+            self.assertIn("melody_candidates", perception.note_candidates_dict)
+            self.assertIsNotNone(perception.rhythm_grid_dict)
+            self.assertEqual(perception.vocal_activity_dict["segments"][0]["state"], "vocal")
+
+            alignment = asyncio.run(service._run_alignment_stage(perception.score_ir_obj, options))
+            persist_warnings = service._persist_artifacts(workspace, perception, alignment)
+            self.assertEqual(persist_warnings, [])
+            self.assertTrue(workspace.f0_track_path.exists())
+            self.assertTrue(workspace.note_candidates_path.exists())
+            self.assertTrue(workspace.rhythm_grid_path.exists())
+            self.assertTrue(workspace.vocal_activity_path.exists())
 
     def test_perception_stage_uses_normalized_audio_only_as_fallback(self) -> None:
         with TemporaryDirectory() as temp_dir:

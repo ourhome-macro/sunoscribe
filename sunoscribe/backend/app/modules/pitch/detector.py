@@ -27,6 +27,7 @@ class PitchDetector:
         self.backend_name = self._normalize_backend(self.config.pitch_backend)
         self.active_backend_name = self.backend_name
         self.backend_warnings: list[str] = []
+        self.last_detection_artifacts: dict[str, object] | None = None
 
     @staticmethod
     def _normalize_backend(raw: str) -> str:
@@ -55,6 +56,7 @@ class PitchDetector:
         """Return non-quantized notes from detector backend."""
         self.active_backend_name = self.backend_name
         self.backend_warnings = []
+        self.last_detection_artifacts = None
 
         audio_file = Path(audio_path)
         if not audio_file.exists():
@@ -155,6 +157,13 @@ class PitchDetector:
             )
 
         notes.sort(key=lambda n: (n.start_time, n.end_time))
+        self.last_detection_artifacts = {
+            "backend": "basic-pitch",
+            "input_audio_path": str(audio_file),
+            "frame_count": 0,
+            "f0_track": None,
+            "warnings": ["frame_level_f0_unavailable_for_basic_pitch"],
+        }
         return notes
 
     def _detect_with_rmvpe(self, audio_file: Path, *, duration_sec: float) -> List[Note]:
@@ -199,8 +208,22 @@ class PitchDetector:
         conf_arr = np.asarray(confidences, dtype=float).reshape(-1)
         frame_count = int(min(time_arr.size, freq_arr.size, conf_arr.size))
         if frame_count <= 0:
+            self.last_detection_artifacts = {
+                "backend": "rmvpe",
+                "input_audio_path": str(audio_file),
+                "frame_count": 0,
+                "f0_track": None,
+                "warnings": ["rmvpe_returned_no_frames"],
+            }
             return []
 
+        self._store_frame_artifacts(
+            audio_path=str(audio_file),
+            backend="rmvpe",
+            times=time_arr[:frame_count],
+            frequencies=freq_arr[:frame_count],
+            confidences=conf_arr[:frame_count],
+        )
         return self._frames_to_notes(
             times=time_arr[:frame_count],
             frequencies=freq_arr[:frame_count],
@@ -598,18 +621,100 @@ class PitchDetector:
 
         frame_count = int(min(time_arr.size, freq_arr.size, conf_arr.size))
         if frame_count <= 0:
+            self.last_detection_artifacts = {
+                "backend": backend,
+                "input_audio_path": str(audio_file),
+                "frame_count": 0,
+                "f0_track": None,
+                "warnings": [f"{backend}_returned_no_frames"],
+            }
             return []
 
         time_arr = time_arr[:frame_count]
         freq_arr = freq_arr[:frame_count]
         conf_arr = conf_arr[:frame_count]
 
+        self._store_frame_artifacts(
+            audio_path=str(audio_file),
+            backend=backend,
+            times=time_arr,
+            frequencies=freq_arr,
+            confidences=conf_arr,
+        )
         return self._frames_to_notes(
             times=time_arr,
             frequencies=freq_arr,
             confidences=conf_arr,
             duration_sec=float(duration_sec),
         )
+
+    def _store_frame_artifacts(
+        self,
+        *,
+        audio_path: str,
+        backend: str,
+        times: np.ndarray,
+        frequencies: np.ndarray,
+        confidences: np.ndarray,
+    ) -> None:
+        time_arr = np.asarray(times, dtype=float).reshape(-1)
+        freq_arr = np.asarray(frequencies, dtype=float).reshape(-1)
+        conf_arr = np.asarray(confidences, dtype=float).reshape(-1)
+        frame_count = int(min(time_arr.size, freq_arr.size, conf_arr.size))
+        if frame_count <= 0:
+            self.last_detection_artifacts = {
+                "backend": backend,
+                "input_audio_path": str(audio_path),
+                "frame_count": 0,
+                "f0_track": None,
+                "warnings": [f"{backend}_returned_no_frames"],
+            }
+            return
+
+        time_arr = time_arr[:frame_count]
+        freq_arr = freq_arr[:frame_count]
+        conf_arr = np.clip(np.nan_to_num(conf_arr[:frame_count], nan=0.0, posinf=0.0, neginf=0.0), 0.0, 1.0)
+        voiced = self._voiced_mask_from_frames(freq_arr, conf_arr)
+        frame_hop_sec = self._estimate_frame_hop_sec(time_arr)
+        vocal_activity = self._build_vocal_activity_segments(
+            times=time_arr,
+            confidences=conf_arr,
+            voiced=voiced,
+            frame_hop_sec=frame_hop_sec,
+        )
+
+        pitch_midi = np.full(freq_arr.shape, np.nan, dtype=float)
+        hz_valid = np.isfinite(freq_arr) & (freq_arr > 0.0)
+        if np.any(hz_valid):
+            pitch_midi[hz_valid] = hz_to_midi(freq_arr[hz_valid])
+
+        self.last_detection_artifacts = {
+            "backend": backend,
+            "input_audio_path": str(audio_path),
+            "frame_count": int(frame_count),
+            "f0_track": {
+                "input_audio_path": str(audio_path),
+                "backend": backend,
+                "frames": [
+                    {
+                        "time_sec": round(float(time_arr[idx]), 6),
+                        "frequency_hz": round(float(freq_arr[idx]), 6),
+                        "confidence": round(float(conf_arr[idx]), 6),
+                        "voiced": bool(voiced[idx]),
+                        "pitch_midi": round(float(pitch_midi[idx]), 6) if np.isfinite(pitch_midi[idx]) else None,
+                    }
+                    for idx in range(frame_count)
+                ],
+                "vocal_activity": vocal_activity,
+                "analysis_info": {
+                    "frame_hop_sec": round(float(frame_hop_sec), 6),
+                    "voiced_frame_count": int(np.sum(voiced)),
+                    "unvoiced_frame_count": int(frame_count - np.sum(voiced)),
+                    "voiced_confidence_threshold": float(self.config.crepe_vuv_confidence_threshold),
+                },
+            },
+            "warnings": [],
+        }
 
     def _predict_crepe_frames(
         self,
@@ -791,6 +896,86 @@ class PitchDetector:
             if diffs.size > 0:
                 return float(np.median(diffs))
         return max(0.001, float(self.config.crepe_step_size_ms) / 1000.0)
+
+    def _voiced_mask_from_frames(self, frequencies: np.ndarray, confidences: np.ndarray) -> np.ndarray:
+        voiced_threshold = max(0.0, min(1.0, float(self.config.crepe_vuv_confidence_threshold)))
+        voiced = (confidences >= voiced_threshold) & np.isfinite(frequencies) & (frequencies > 0.0)
+        frame_hop_sec = max(0.001, float(self.config.crepe_step_size_ms) / 1000.0)
+        max_unvoiced_gap_frames = max(
+            0,
+            int(round(max(0.0, float(self.config.crepe_max_unvoiced_gap_sec)) / max(frame_hop_sec, 1e-4))),
+        )
+        return self._bridge_short_unvoiced(voiced, max_gap_frames=max_unvoiced_gap_frames)
+
+    def _build_vocal_activity_segments(
+        self,
+        *,
+        times: np.ndarray,
+        confidences: np.ndarray,
+        voiced: np.ndarray,
+        frame_hop_sec: float,
+    ) -> list[dict[str, object]]:
+        if times.size == 0:
+            return []
+
+        segments: list[dict[str, object]] = []
+        start_idx = 0
+        current_state = bool(voiced[0])
+
+        for idx in range(1, times.size):
+            state = bool(voiced[idx])
+            if state == current_state:
+                continue
+            segments.append(
+                self._build_vocal_activity_segment(
+                    times=times,
+                    confidences=confidences,
+                    voiced=voiced,
+                    start_idx=start_idx,
+                    end_idx=idx - 1,
+                    frame_hop_sec=frame_hop_sec,
+                )
+            )
+            start_idx = idx
+            current_state = state
+
+        segments.append(
+            self._build_vocal_activity_segment(
+                times=times,
+                confidences=confidences,
+                voiced=voiced,
+                start_idx=start_idx,
+                end_idx=times.size - 1,
+                frame_hop_sec=frame_hop_sec,
+            )
+        )
+        return segments
+
+    def _build_vocal_activity_segment(
+        self,
+        *,
+        times: np.ndarray,
+        confidences: np.ndarray,
+        voiced: np.ndarray,
+        start_idx: int,
+        end_idx: int,
+        frame_hop_sec: float,
+    ) -> dict[str, object]:
+        patch_voiced = voiced[start_idx : end_idx + 1]
+        patch_conf = confidences[start_idx : end_idx + 1]
+        state = "vocal" if bool(np.any(patch_voiced)) else "inactive"
+        start_time = max(0.0, float(times[start_idx]) - (frame_hop_sec * 0.5))
+        end_time = max(start_time, float(times[end_idx]) + (frame_hop_sec * 0.5))
+        return {
+            "start_time": round(start_time, 6),
+            "end_time": round(end_time, 6),
+            "state": state,
+            "voiced_ratio": round(float(np.mean(patch_voiced.astype(float))), 6),
+            "mean_confidence": round(float(np.mean(patch_conf)) if patch_conf.size > 0 else 0.0, 6),
+            "analysis_info": {
+                "frame_count": int(end_idx - start_idx + 1),
+            },
+        }
 
     @staticmethod
     def _median_absolute_deviation(values: np.ndarray, center: float) -> float:

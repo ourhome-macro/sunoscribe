@@ -66,6 +66,36 @@ class NoteCandidateSet:
 
 
 @dataclass
+class F0Frame:
+    time_sec: float
+    frequency_hz: float
+    confidence: float
+    voiced: bool
+    pitch_midi: Optional[float] = None
+
+
+@dataclass
+class VocalActivitySegment:
+    start_time: float
+    end_time: float
+    state: str
+    voiced_ratio: float
+    mean_confidence: float
+    source_stem: Optional[str] = None
+    analysis_info: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class F0Track:
+    source_stem: Optional[str] = None
+    input_audio_path: Optional[str] = None
+    backend: Optional[str] = None
+    frames: List[F0Frame] = field(default_factory=list)
+    vocal_activity: List[VocalActivitySegment] = field(default_factory=list)
+    analysis_info: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
 class RhythmGrid:
     source_stem: Optional[str]
     input_audio_path: Optional[str]
@@ -84,6 +114,7 @@ class RhythmGrid:
 @dataclass
 class SemanticAudioResult:
     source_stems: Dict[str, str] = field(default_factory=dict)
+    f0_track: Optional[F0Track] = None
     melody_candidates: NoteCandidateSet = field(
         default_factory=lambda: NoteCandidateSet(role="melody_candidates")
     )
@@ -104,6 +135,7 @@ class PitchAnalysisResult:
     measures: List[Dict[str, Any]] = field(default_factory=list)
     lead_notes: List[Note] = field(default_factory=list)
     raw_notes: List[Note] = field(default_factory=list)
+    f0_track: Optional[F0Track] = None
     semantic_audio: Optional[SemanticAudioResult] = None
     warnings: List[str] = field(default_factory=list)
 

@@ -31,7 +31,28 @@ class TestPitchPipeline(unittest.TestCase):
             confidence = 0.8
             beats_per_bar = 4
 
-        with patch.object(pipeline.detector, "detect", return_value=mock_notes), patch.object(
+        def _detect(_path):
+            pipeline.detector.last_detection_artifacts = {
+                "backend": "rmvpe",
+                "input_audio_path": "dummy.wav",
+                "frame_count": 2,
+                "f0_track": {
+                    "input_audio_path": "dummy.wav",
+                    "backend": "rmvpe",
+                    "frames": [
+                        {"time_sec": 0.1, "frequency_hz": 261.63, "confidence": 0.9, "voiced": True, "pitch_midi": 60.0},
+                        {"time_sec": 0.7, "frequency_hz": 329.63, "confidence": 0.88, "voiced": True, "pitch_midi": 64.0},
+                    ],
+                    "vocal_activity": [
+                        {"start_time": 0.0, "end_time": 1.2, "state": "vocal", "voiced_ratio": 1.0, "mean_confidence": 0.89}
+                    ],
+                    "analysis_info": {"frame_hop_sec": 0.1},
+                },
+                "warnings": [],
+            }
+            return mock_notes
+
+        with patch.object(pipeline.detector, "detect", side_effect=_detect), patch.object(
             pipeline.beat_tracker, "track", return_value=_BeatResult()
         ), patch.object(pipeline.key_analyzer, "analyze", return_value=_KeyResult()), patch.object(
             pipeline.downbeat_tracker, "track", return_value=_DownbeatResult()
@@ -60,6 +81,10 @@ class TestPitchPipeline(unittest.TestCase):
         self.assertEqual(result.analysis_info["measure_boundary_source"], "downbeat_sequence")
         self.assertIn("rhythm_stability", result.analysis_info)
         self.assertEqual(result.analysis_info["key_backend"], "librosa")
+        self.assertIsNotNone(result.f0_track)
+        self.assertEqual(result.f0_track.backend, "rmvpe")
+        self.assertEqual(len(result.f0_track.frames), 2)
+        self.assertEqual(len(result.semantic_audio.f0_track.vocal_activity), 1)
 
     def test_time_signature_and_anacrusis_with_downbeats(self):
         cfg = PitchDetectionConfig(beats_per_bar=3, beat_unit=8)

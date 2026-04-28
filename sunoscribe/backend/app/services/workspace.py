@@ -103,6 +103,22 @@ class ProjectWorkspace:
         return self.pitch_dir / "pitch_result.json"
 
     @property
+    def f0_track_path(self) -> Path:
+        return self.pitch_dir / "f0_track.json"
+
+    @property
+    def note_candidates_path(self) -> Path:
+        return self.pitch_dir / "note_candidates.json"
+
+    @property
+    def rhythm_grid_path(self) -> Path:
+        return self.pitch_dir / "rhythm_grid.json"
+
+    @property
+    def vocal_activity_path(self) -> Path:
+        return self.pitch_dir / "vocal_activity.json"
+
+    @property
     def raw_pitch_midi_path(self) -> Path:
         return self.pitch_dir / "raw_pitch.mid"
 
