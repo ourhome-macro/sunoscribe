@@ -19,6 +19,7 @@ numpy>=1.24,<3.0
 pretty_midi>=0.2.10,<1.0
 openai-whisper>=20240930
 # optional (default pitch backend): RMVPE runtime + local RMVPE model file
+rmvpe-onnx>=0.2.3,<0.3
 # optional (fallback pitch backend): crepe>=0.0.16
 # optional (fallback pitch backend): basic-pitch>=0.4,<1.0
 # note: keep the runtime on Python 3.10 for TensorFlow/basic-pitch compatibility.

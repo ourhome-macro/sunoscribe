@@ -248,6 +248,7 @@ class PitchDetector:
             ("rmvpe", "RMVPE"),
             ("rmvpe.inference", "RMVPE"),
             ("rmvpe.model", "RMVPE"),
+            ("rmvpe_onnx", "RMVPE"),
             ("infer.lib.rmvpe", "RMVPE"),
             ("rvc.lib.rmvpe", "RMVPE"),
             ("rvc.lib.predictors.RMVPE", "RMVPE"),
