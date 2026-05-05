@@ -80,3 +80,4 @@ node_modules/
 # Keep backend SQLAlchemy models tracked (parent .gitignore has broad `models/` ignore).
 !backend/app/models/
 !backend/app/models/*.py
+*.mp4
