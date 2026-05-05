@@ -744,3 +744,50 @@ LangSmith
 - 输出可追踪；
 - 质量退化可被及时阻断；
 - 后续 agent 能建立在稳定、可信的 MIR 基座之上。
+
+---
+
+## 16. v1 实际落地入口
+
+当前仓库已经提供第一版本地 deterministic benchmark 基础设施：
+
+- Manifest: `samples/manifest.v1.json`
+- CLI: `backend/app/scripts/mp4_midi_benchmark.py`
+- Dataset utilities: `backend/app/modules/benchmark/dataset.py`
+- MIDI metrics: `backend/app/modules/benchmark/midi_metrics.py`
+- Output root: `samples/benchmark_runs/<run_id>/`
+
+### 16.1 只做数据体检
+
+```bash
+cd backend
+python -m app.scripts.mp4_midi_benchmark validate --manifest ../samples/manifest.v1.json
+```
+
+输出：
+
+- `dataset_report.json`
+- `summary.json`
+- `summary.md`
+
+### 16.2 跑完整 MP4->MIDI benchmark
+
+```bash
+cd backend
+python -m app.scripts.mp4_midi_benchmark run --manifest ../samples/manifest.v1.json
+```
+
+每首歌输出：
+
+- `produced.mid`
+- `stage_status.json`
+- `metrics.json`
+- `artifacts.json`
+- `error.json`（仅失败时）
+
+### 16.3 v1 口径
+
+- v1 启用当前可配对的 19 首样本。
+- `expected_melody_track` 在 manifest 中手工标注。
+- production profile 是默认门禁，不允许 RMVPE 或 required separation 静默 fallback。
+- 第一次落地只记录质量指标，不设置硬性 `note_f1` 阈值。
