@@ -39,9 +39,18 @@ def parse_pitch_backend_fallbacks(raw: str | tuple[str, ...] | list[str] | None)
 
 
 def build_pitch_detection_config_from_settings() -> PitchDetectionConfig:
+    profile = str(getattr(settings, "pitch_profile", "production") or "production").strip().lower()
+    allow_fallbacks = bool(getattr(settings, "pitch_allow_backend_fallbacks", False)) or profile in {
+        "diagnostic",
+        "benchmark",
+    }
     return PitchDetectionConfig(
         pitch_backend=settings.pitch_backend,
-        pitch_backend_fallbacks=parse_pitch_backend_fallbacks(settings.pitch_backend_fallbacks),
+        pitch_backend_fallbacks=(
+            parse_pitch_backend_fallbacks(settings.pitch_backend_fallbacks) if allow_fallbacks else ()
+        ),
+        pitch_profile=profile,
+        allow_backend_fallbacks=allow_fallbacks,
         cache_dir=settings.pitch_cache_dir,
         rmvpe_model_path=settings.rmvpe_model_path,
     )
@@ -57,17 +66,20 @@ def build_pitch_runtime_health(
     cache = _build_cache_health(cfg.resolved_cache_dir())
     rmvpe = _build_rmvpe_health(cfg, deep=deep)
     fallback_backends = parse_pitch_backend_fallbacks(cfg.pitch_backend_fallbacks)
+    fallback_allowed = bool(getattr(cfg, "allow_backend_fallbacks", False))
 
     overall = "ok"
     if cache["status"] != "ok":
         overall = "degraded"
     if detector.backend_name == "rmvpe" and rmvpe["status"] != "ok":
-        overall = "degraded" if fallback_backends else "fail"
+        overall = "degraded" if (fallback_allowed and fallback_backends) else "fail"
 
     return {
         "status": overall,
         "pitch_backend": detector.backend_name,
         "pitch_backend_fallbacks": list(fallback_backends),
+        "pitch_profile": str(getattr(cfg, "pitch_profile", "production")),
+        "allow_backend_fallbacks": bool(getattr(cfg, "allow_backend_fallbacks", False)),
         "cache": cache,
         "rmvpe": rmvpe,
         "deep": bool(deep),

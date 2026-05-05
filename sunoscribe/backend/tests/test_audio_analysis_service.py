@@ -8,6 +8,7 @@ from tempfile import TemporaryDirectory
 from app.modules.pitch.types import F0Frame, F0Track, MetaInfo, PitchAnalysisResult, PitchPipelineRequest, RhythmGrid, SemanticAudioResult, VocalActivitySegment
 from app.modules.score_ir import ScoreIR, ScoreMeta
 from app.services.audio_analysis_service import AudioAnalysisOptions, AudioAnalysisService
+from app.services.media_ingest_service import MediaIngestService
 from app.services.workspace import ProjectWorkspace
 
 
@@ -110,6 +111,48 @@ class _FakeScoreIRBuilder:
 
 
 class TestAudioAnalysisService(unittest.TestCase):
+    def test_media_ingest_converts_video_to_canonical_audio(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source_video = root / "source.mp4"
+            source_video.write_bytes(b"video")
+            canonical_audio = root / "projects" / "case" / "preprocess" / "source.wav"
+            audio_processor = _FakeNormalizingAudioProcessor()
+
+            result = MediaIngestService(audio_processor).ingest(source_video, canonical_audio)
+
+            self.assertEqual(audio_processor.calls, [(str(source_video), str(canonical_audio))])
+            self.assertEqual(result.canonical_audio_path, canonical_audio)
+            self.assertTrue(canonical_audio.exists())
+            self.assertEqual(result.metadata["stage"], "media_ingest")
+
+    def test_process_audio_canonicalizes_mp4_before_separation(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source_video = root / "input.mp4"
+            source_video.write_bytes(b"video")
+
+            audio_processor = _FakeNormalizingAudioProcessor()
+            separator = _FakeSeparator({})
+            pitch_pipeline = _CapturePitchPipeline()
+            service = AudioAnalysisService(
+                audio_processor=audio_processor,
+                vocal_separator=separator,
+                lyrics_recognizer=lambda _path: [],
+                pitch_pipeline=pitch_pipeline,
+                score_ir_builder=_FakeScoreIRBuilder(),
+                midi_exporter=None,
+                projects_root=root / "projects",
+            )
+
+            asyncio.run(service.process_audio(source_video, AudioAnalysisOptions(project_id="mp4_ingest_001")))
+            workspace = ProjectWorkspace(project_id="mp4_ingest_001", projects_root=root / "projects")
+
+            self.assertEqual(audio_processor.calls[0][0], str(workspace.input_dir / "source.mp4"))
+            self.assertEqual(audio_processor.calls[0][1], str(workspace.canonical_audio_path))
+            self.assertEqual(separator.calls[0][0][0], str(workspace.canonical_audio_path))
+            self.assertTrue(workspace.canonical_audio_path.exists())
+
     def test_perception_stage_routes_stems_to_pitch_request(self) -> None:
         with TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -146,11 +189,12 @@ class TestAudioAnalysisService(unittest.TestCase):
             workspace.ensure_structure()
             options = AudioAnalysisOptions(project_id="analysis_routing_001")
 
-            perception = asyncio.run(service._run_perception_stage(source_audio, workspace, options))
+            canonical_audio = workspace.normalized_audio_path
+            audio_processor.convert(str(source_audio), str(canonical_audio))
+            perception = asyncio.run(service._run_perception_stage(source_audio, canonical_audio, workspace, options))
 
             self.assertIsNotNone(pitch_pipeline.last_request)
-            self.assertEqual(separator.calls[0][0][0], str(source_audio))
-            self.assertEqual(audio_processor.calls, [])
+            self.assertEqual(separator.calls[0][0][0], str(canonical_audio))
             self.assertEqual(pitch_pipeline.last_request.lead_audio_path, str(workspace.vocals_path))
             self.assertEqual(pitch_pipeline.last_request.rhythm_audio_path, str(workspace.stem_path("drums")))
             self.assertEqual(pitch_pipeline.last_request.key_audio_path, str(workspace.stem_path("other")))
@@ -183,7 +227,7 @@ class TestAudioAnalysisService(unittest.TestCase):
             self.assertTrue(workspace.rhythm_grid_path.exists())
             self.assertTrue(workspace.vocal_activity_path.exists())
 
-    def test_perception_stage_uses_normalized_audio_only_as_fallback(self) -> None:
+    def test_perception_stage_uses_canonical_audio_for_required_stages(self) -> None:
         with TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             source_audio = root / "source.wav"
@@ -206,9 +250,11 @@ class TestAudioAnalysisService(unittest.TestCase):
             workspace.ensure_structure()
             options = AudioAnalysisOptions(project_id="analysis_fallback_001")
 
-            perception = asyncio.run(service._run_perception_stage(source_audio, workspace, options))
+            canonical_audio = workspace.normalized_audio_path
+            audio_processor.convert(str(source_audio), str(canonical_audio))
+            perception = asyncio.run(service._run_perception_stage(source_audio, canonical_audio, workspace, options))
 
-            self.assertEqual(separator.calls[0][0][0], str(source_audio))
+            self.assertEqual(separator.calls[0][0][0], str(canonical_audio))
             self.assertEqual(audio_processor.calls, [(str(source_audio), str(workspace.normalized_audio_path))])
             self.assertEqual(perception.normalized_audio_path, workspace.normalized_audio_path)
             self.assertEqual(pitch_pipeline.last_request.source_audio_path, str(source_audio))

@@ -68,6 +68,11 @@ class PitchDetector:
             try:
                 return self._detect_with_rmvpe(audio_file, duration_sec=duration)
             except PitchModelUnavailableError as exc:
+                if not bool(getattr(self.config, "allow_backend_fallbacks", False)):
+                    self.backend_warnings = ["pitch_backend_fallback_disabled:rmvpe"]
+                    raise PitchModelUnavailableError(
+                        "RMVPE backend is required for this profile and no fallback is allowed."
+                    ) from exc
                 return self._detect_with_backend_fallbacks(audio_file, duration_sec=duration, original_error=exc)
         if self.backend_name == "basic-pitch":
             return self._detect_with_basic_pitch(audio_file)
@@ -110,6 +115,7 @@ class PitchDetector:
             self.backend_warnings = [
                 f"pitch_backend_fallback:{self.backend_name}->{self.active_backend_name}",
             ]
+            self.last_detection_artifacts = fallback_detector.last_detection_artifacts
             return notes
 
         detail = "; ".join(errors[-3:])

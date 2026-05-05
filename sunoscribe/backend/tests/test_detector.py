@@ -158,7 +158,12 @@ class TestPitchDetector(unittest.TestCase):
                 detector.detect(str(audio_path))
 
     def test_rmvpe_falls_back_to_crepe_when_model_unavailable(self):
-        cfg = PitchDetectionConfig(pitch_backend="rmvpe", pitch_backend_fallbacks=("crepe",))
+        cfg = PitchDetectionConfig(
+            pitch_backend="rmvpe",
+            pitch_backend_fallbacks=("crepe",),
+            allow_backend_fallbacks=True,
+            pitch_profile="diagnostic",
+        )
         detector = PitchDetector(cfg)
         audio_path = Path(__file__)
         fallback_notes = [Note(pitch="C4", start_time=0.1, end_time=0.5, confidence=0.9)]
@@ -177,6 +182,22 @@ class TestPitchDetector(unittest.TestCase):
         self.assertEqual(notes, fallback_notes)
         self.assertEqual(detector.active_backend_name, "crepe")
         self.assertEqual(detector.backend_warnings, ["pitch_backend_fallback:rmvpe->crepe"])
+
+    def test_rmvpe_does_not_fallback_in_production_profile(self):
+        cfg = PitchDetectionConfig(pitch_backend="rmvpe", pitch_backend_fallbacks=("crepe",))
+        detector = PitchDetector(cfg)
+        audio_path = Path(__file__)
+
+        with patch("app.modules.pitch.detector.get_audio_duration", return_value=0.8), patch.object(
+            PitchDetector,
+            "_detect_with_rmvpe",
+            side_effect=PitchModelUnavailableError("rmvpe missing"),
+        ), patch.object(PitchDetector, "_detect_with_crepe") as mocked_crepe:
+            with self.assertRaises(PitchModelUnavailableError):
+                detector.detect(str(audio_path))
+
+        mocked_crepe.assert_not_called()
+        self.assertEqual(detector.backend_warnings, ["pitch_backend_fallback_disabled:rmvpe"])
 
     def test_detect_with_crepe_segments_notes_and_bridges_short_unvoiced_gap(self):
         cfg = PitchDetectionConfig(

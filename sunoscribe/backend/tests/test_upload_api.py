@@ -37,7 +37,13 @@ class TestUploadApi(unittest.IsolatedAsyncioTestCase):
         with patch("app.api.upload.get_project_by_id", return_value=project), patch(
             "app.api.upload.save_upload_file",
             new=AsyncMock(return_value=("data/uploads/project/source.wav", 123)),
-        ) as mocked_save:
+        ) as mocked_save, patch(
+            "app.api.upload._safe_probe_uploaded_media",
+            return_value={"duration_sec": 1.0},
+        ), patch(
+            "app.api.upload.register_source_media_artifact",
+            return_value=SimpleNamespace(id=uuid.uuid4()),
+        ):
             response = await upload_audio_api(
                 project_id=str(project.id),
                 file=SimpleNamespace(filename="song.wav"),
@@ -48,9 +54,10 @@ class TestUploadApi(unittest.IsolatedAsyncioTestCase):
         mocked_save.assert_awaited_once()
         self.assertEqual(project.audio_path, "data/uploads/project/source.wav")
         db.add.assert_called_with(project)
-        db.commit.assert_called_once()
+        self.assertGreaterEqual(db.commit.call_count, 1)
         db.refresh.assert_called_once_with(project)
         self.assertEqual(response["data"]["file_path"], "data/uploads/project/source.wav")
+        self.assertIsNotNone(response["data"]["artifact_id"])
 
 
 if __name__ == "__main__":

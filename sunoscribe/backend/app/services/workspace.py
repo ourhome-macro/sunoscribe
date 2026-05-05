@@ -75,8 +75,12 @@ class ProjectWorkspace:
         return self.project_dir / "logs"
 
     @property
+    def canonical_audio_path(self) -> Path:
+        return self.preprocess_dir / "source.wav"
+
+    @property
     def normalized_audio_path(self) -> Path:
-        return self.preprocess_dir / "normalized.wav"
+        return self.canonical_audio_path
 
     @property
     def vocals_path(self) -> Path:

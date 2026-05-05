@@ -10,7 +10,9 @@ class PitchDetectionConfig:
     sample_rate: int = 22050
     confidence_threshold: float = 0.5
     pitch_backend: str = "rmvpe"  # "rmvpe" / "crepe" / "basic-pitch"
-    pitch_backend_fallbacks: tuple[str, ...] = ("crepe", "basic-pitch")
+    pitch_backend_fallbacks: tuple[str, ...] = ()
+    pitch_profile: str = "production"
+    allow_backend_fallbacks: bool = False
 
     # Runtime limits
     max_audio_length_sec: float = 600.0

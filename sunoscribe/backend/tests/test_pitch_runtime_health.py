@@ -24,7 +24,29 @@ class TestPitchRuntimeHealth(unittest.TestCase):
         config = build_pitch_detection_config_from_settings()
 
         self.assertEqual(config.pitch_backend, "rmvpe")
-        self.assertIn("crepe", config.pitch_backend_fallbacks)
+        self.assertEqual(config.pitch_backend_fallbacks, ())
+        self.assertEqual(config.pitch_profile, "production")
+        self.assertFalse(config.allow_backend_fallbacks)
+
+    def test_build_pitch_detection_config_allows_diagnostic_fallback_profile(self) -> None:
+        from app.services import pitch_runtime
+
+        original_profile = pitch_runtime.settings.pitch_profile
+        original_allow = pitch_runtime.settings.pitch_allow_backend_fallbacks
+        original_fallbacks = pitch_runtime.settings.pitch_backend_fallbacks
+        try:
+            pitch_runtime.settings.pitch_profile = "diagnostic"
+            pitch_runtime.settings.pitch_allow_backend_fallbacks = False
+            pitch_runtime.settings.pitch_backend_fallbacks = "crepe,basic-pitch"
+            config = build_pitch_detection_config_from_settings()
+        finally:
+            pitch_runtime.settings.pitch_profile = original_profile
+            pitch_runtime.settings.pitch_allow_backend_fallbacks = original_allow
+            pitch_runtime.settings.pitch_backend_fallbacks = original_fallbacks
+
+        self.assertEqual(config.pitch_backend_fallbacks, ("crepe", "basic-pitch"))
+        self.assertEqual(config.pitch_profile, "diagnostic")
+        self.assertTrue(config.allow_backend_fallbacks)
 
     def test_health_reports_missing_cache_and_rmvpe_model_without_crashing(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -39,7 +61,7 @@ class TestPitchRuntimeHealth(unittest.TestCase):
 
             health = build_pitch_runtime_health(config=config)
 
-        self.assertEqual(health["status"], "degraded")
+        self.assertEqual(health["status"], "fail")
         self.assertEqual(health["pitch_backend"], "rmvpe")
         self.assertEqual(health["cache"]["status"], "missing")
         self.assertEqual(health["rmvpe"]["status"], "missing_model")

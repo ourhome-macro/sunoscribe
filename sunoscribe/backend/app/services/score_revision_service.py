@@ -356,8 +356,9 @@ def _register_analysis_artifacts(
         return
 
     workspace = ProjectWorkspace(project_id=str(project.id))
+    source_media_mime = _guess_source_media_mime(getattr(analysis_result, "source_audio_path", None))
     candidates = [
-        (ArtifactType.SOURCE_MEDIA.value, getattr(analysis_result, "source_audio_path", None), "audio/wav"),
+        (ArtifactType.SOURCE_MEDIA.value, getattr(analysis_result, "source_audio_path", None), source_media_mime),
         (ArtifactType.CANONICAL_AUDIO.value, getattr(analysis_result, "normalized_audio_path", None), "audio/wav"),
         (ArtifactType.VOCALS_STEM.value, getattr(analysis_result, "vocals_path", None), "audio/wav"),
         (
@@ -423,6 +424,13 @@ def _record_file_artifact(
         artifact_metadata={},
     )
     db.add(artifact)
+
+
+def _guess_source_media_mime(raw_path: Any) -> str:
+    import mimetypes
+
+    guessed, _ = mimetypes.guess_type(str(raw_path or ""))
+    return guessed or "application/octet-stream"
 
 
 def _sync_score_from_revision(score: Score, revision: ScoreRevision) -> None:

@@ -1,12 +1,18 @@
 import asyncio
+import hashlib
 import json
+import mimetypes
 import subprocess
 import uuid
 from pathlib import Path
 from typing import Any
 
 from fastapi import UploadFile
+from sqlalchemy.orm import Session
 
+from app.models.artifact import Artifact
+from app.models.enums import ArtifactStatus, ArtifactStorageBackend, ArtifactType
+from app.models.project import Project
 from app.utils.errors import FileTooLargeError, UnsupportedFormatError, ValidationAppError
 
 ALLOWED_AUDIO_EXTENSIONS = {"mp3", "wav", "flac", "aac", "ogg", "m4a"}
@@ -67,6 +73,47 @@ def probe_media_file(path: str | Path, media_kind: str, max_duration_sec: float)
         raise FileTooLargeError(f"媒体时长超过 {int(max_duration_sec)} 秒限制")
 
     return {"duration_sec": duration, "has_audio": has_audio, "has_video": has_video}
+
+
+def register_source_media_artifact(
+    db: Session,
+    *,
+    project: Project,
+    file_path: str,
+    media_kind: str,
+    original_filename: str | None,
+    content_type: str | None,
+    size: int | None = None,
+    probe_metadata: dict[str, Any] | None = None,
+) -> Artifact:
+    path_obj = Path(str(file_path))
+    payload = path_obj.read_bytes() if path_obj.exists() and path_obj.is_file() else b""
+    mime_type = content_type or mimetypes.guess_type(str(original_filename or path_obj.name))[0]
+    if not mime_type:
+        mime_type = "video/mp4" if media_kind == "video" else "audio/mpeg"
+
+    artifact = Artifact(
+        project_id=project.id,
+        artifact_type=ArtifactType.SOURCE_MEDIA.value,
+        status=ArtifactStatus.AVAILABLE.value,
+        storage_backend=(
+            ArtifactStorageBackend.MINIO.value if str(file_path).lower().startswith("s3://") else ArtifactStorageBackend.WORKSPACE.value
+        ),
+        storage_path=str(file_path),
+        filename=Path(original_filename or path_obj.name).name,
+        mime_type=mime_type,
+        file_size_bytes=int(size if size is not None else len(payload)) if (size is not None or payload) else None,
+        checksum=hashlib.sha256(payload).hexdigest() if payload else None,
+        artifact_metadata={
+            "stage": "upload",
+            "media_kind": str(media_kind),
+            "original_filename": original_filename or path_obj.name,
+            "content_type": content_type,
+            "probe": dict(probe_metadata or {}),
+        },
+    )
+    db.add(artifact)
+    return artifact
 
 
 def _extract_probe_duration(payload: dict[str, Any]) -> float | None:

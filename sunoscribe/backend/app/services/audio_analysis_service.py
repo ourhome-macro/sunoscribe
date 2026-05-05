@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import asyncio
 from dataclasses import asdict, dataclass, field, is_dataclass
@@ -25,6 +25,11 @@ from app.modules.alignment import (
 from app.modules.analysis_ir import AnalysisIR, BaselineAnalysisInferencer
 from app.modules.score_ir import AnalysisHints, ScoreIR, ScoreIRBuilder, ScoreIRSerializer, ScoreMeta
 
+from app.services.media_ingest_service import MediaIngestService
+from app.services.melody_transcription_service import MelodyTranscriptionService
+from app.services.rhythm_quantization_service import RhythmQuantizationService
+from app.services.score_build_service import ScoreBuildService
+from app.services.stem_service import StemService
 from app.services.workspace import ProjectWorkspace
 
 logger = logging.getLogger(__name__)
@@ -148,6 +153,19 @@ class AudioAnalysisService:
         )
         self.score_ir_builder = score_ir_builder or ScoreIRBuilder()
         self.midi_exporter = midi_exporter if midi_exporter is not None else self._try_make_midi_exporter()
+        self.media_ingest_service = MediaIngestService(self.audio_processor) if self.audio_processor is not None else None
+        self.stem_service = StemService(self.vocal_separator)
+        self.melody_transcription_service = MelodyTranscriptionService(
+            pitch_pipeline=self.pitch_pipeline,
+            serializer=self._serialize,
+            pitch_request_builder=self._build_pitch_pipeline_request,
+            short_exception=self._short_exception,
+        )
+        self.rhythm_quantization_service = RhythmQuantizationService()
+        self.score_build_service = ScoreBuildService(
+            score_ir_builder=self.score_ir_builder,
+            invoke_builder=self._invoke_score_ir_builder,
+        )
 
         self.initial_aligner = initial_aligner or InitialLyricsAligner()
         self.alignment_validator = alignment_validator or AlignmentValidator()
@@ -166,8 +184,9 @@ class AudioAnalysisService:
         workspace.ensure_structure()
 
         source_copy_path = workspace.save_input_copy(input_audio_path)
+        canonical_audio_path = await self._run_media_ingest_stage(source_copy_path, workspace)
 
-        perception = await self._run_perception_stage(source_copy_path, workspace, options)
+        perception = await self._run_perception_stage(source_copy_path, canonical_audio_path, workspace, options)
         alignment = await self._run_alignment_stage(perception.score_ir_obj, options)
         final_midi_path, export_warnings = await self._run_export_stage(perception, alignment, workspace)
 
@@ -214,14 +233,25 @@ class AudioAnalysisService:
         )
         return result
 
+    async def _run_media_ingest_stage(self, source_media_path: Path, workspace: ProjectWorkspace) -> Path:
+        if self.media_ingest_service is None:
+            raise RuntimeError("required media ingest stage is unavailable")
+        ingest_result = await asyncio.to_thread(
+            self.media_ingest_service.ingest,
+            source_media_path,
+            workspace.canonical_audio_path,
+        )
+        return ingest_result.canonical_audio_path
+
     async def _run_perception_stage(
         self,
         source_audio_path: Path,
+        canonical_audio_path: Path | None,
         workspace: ProjectWorkspace,
         options: AudioAnalysisOptions,
     ) -> _PerceptionStageResult:
         warnings: list[str] = []
-        normalized_audio_path: Path | None = None
+        normalized_audio_path: Path | None = canonical_audio_path
         vocals_path: Path | None = None
         accompaniment_path: Path | None = None
         raw_pitch_midi_path: Path | None = None
@@ -232,41 +262,17 @@ class AudioAnalysisService:
         vocal_activity_dict: dict | None = None
         semantic_audio_dict: dict | None = None
 
-        fallback_audio_path = source_audio_path
+        fallback_audio_path = canonical_audio_path or source_audio_path
 
         if options.enable_vocal_separation:
-            if self.vocal_separator is None:
-                warnings.append("vocal_separator_missing: skip separation")
-            else:
-                try:
-                    # TODO: 按真实接口调整
-                    sep = await asyncio.to_thread(
-                        self.vocal_separator.separate,
-                        str(source_audio_path),
-                        str(workspace.separation_dir),
-                        "separated",
-                    )
-                    stem_paths = self._collect_and_persist_stems(sep, workspace)
-                    vocals_path = stem_paths.get("vocals")
-                    accompaniment_path = stem_paths.get("accompaniment")
-                except Exception as exc:
-                    warnings.append(f"vocal_separation_failed:{self._short_exception(exc)}")
-
-        needs_normalized_fallback = vocals_path is None or not stem_paths
-        if needs_normalized_fallback:
-            if self.audio_processor is None:
-                warnings.append("audio_processor_missing: skip normalize")
-            else:
-                try:
-                    normalized_str = await asyncio.to_thread(
-                        self.audio_processor.convert,
-                        str(source_audio_path),
-                        str(workspace.normalized_audio_path),
-                    )
-                    normalized_audio_path = Path(normalized_str)
-                    fallback_audio_path = normalized_audio_path
-                except Exception as exc:
-                    warnings.append(f"audio_normalize_failed:{self._short_exception(exc)}")
+            try:
+                stem_result = await asyncio.to_thread(self.stem_service.separate, fallback_audio_path, workspace)
+                stem_paths = stem_result.stem_paths
+                vocals_path = stem_result.vocals_path
+                accompaniment_path = stem_result.accompaniment_path
+                warnings.extend(stem_result.warnings)
+            except Exception as exc:
+                warnings.append(f"vocal_separation_failed:{self._short_exception(exc)}")
 
         lyrics_audio_path = vocals_path or fallback_audio_path
         lyrics_segments: list[dict] = []
@@ -277,7 +283,7 @@ class AudioAnalysisService:
         else:
             try:
                 lyrics_output = await self._invoke_lyrics_recognizer(str(lyrics_audio_path))
-                # TODO: 按真实接口调整
+                # TODO: 鎸夌湡瀹炴帴鍙ｈ皟鏁?
                 if isinstance(lyrics_output, dict):
                     whisper_raw = lyrics_output
                     maybe_segments = lyrics_output.get("segments")
@@ -296,58 +302,27 @@ class AudioAnalysisService:
         analysis_ir_dict: dict | None = None
         score_data_dict: dict | None = None
 
-        if self.pitch_pipeline is None:
-            warnings.append("pitch_pipeline_missing: skip pitch")
-        else:
-            try:
-                # TODO: 按真实接口调整
-                pitch_request = self._build_pitch_pipeline_request(
-                    source_audio_path=source_audio_path,
-                    fallback_audio_path=fallback_audio_path,
-                    vocals_path=vocals_path,
-                    accompaniment_path=accompaniment_path,
-                    stem_paths=stem_paths,
-                )
-                pitch_result_obj = await asyncio.to_thread(self.pitch_pipeline.run, pitch_request)
-                serialized = self._serialize(perception_obj=pitch_result_obj)
-                pitch_result_dict = serialized if isinstance(serialized, dict) else {"value": serialized}
-                semantic_audio_serialized = self._serialize(
-                    perception_obj=getattr(pitch_result_obj, "semantic_audio", None)
-                )
-                if semantic_audio_serialized is not None:
-                    semantic_audio_dict = (
-                        semantic_audio_serialized
-                        if isinstance(semantic_audio_serialized, dict)
-                        else {"value": semantic_audio_serialized}
-                    )
-                f0_track_serialized = self._serialize(perception_obj=getattr(pitch_result_obj, "f0_track", None))
-                if f0_track_serialized is not None:
-                    f0_track_dict = (
-                        f0_track_serialized if isinstance(f0_track_serialized, dict) else {"value": f0_track_serialized}
-                    )
-                    raw_vocal_activity = f0_track_dict.get("vocal_activity")
-                    if raw_vocal_activity is not None:
-                        if isinstance(raw_vocal_activity, list):
-                            vocal_activity_dict = {"segments": raw_vocal_activity}
-                        elif isinstance(raw_vocal_activity, dict):
-                            vocal_activity_dict = dict(raw_vocal_activity)
-                        else:
-                            vocal_activity_dict = {"value": raw_vocal_activity}
-                note_candidates_dict = self._build_note_candidates_payload(semantic_audio_dict)
-                rhythm_grid_dict = self._build_rhythm_grid_payload(semantic_audio_dict)
-
-                if hasattr(self.pitch_pipeline, "export_midi"):
-                    try:
-                        await asyncio.to_thread(
-                            self.pitch_pipeline.export_midi,
-                            pitch_result_obj,
-                            str(workspace.raw_pitch_midi_path),
-                        )
-                        raw_pitch_midi_path = workspace.raw_pitch_midi_path
-                    except Exception as exc:
-                        warnings.append(f"raw_midi_export_failed:{self._short_exception(exc)}")
-            except Exception as exc:
-                warnings.append(f"pitch_pipeline_failed:{self._short_exception(exc)}")
+        try:
+            transcription = await asyncio.to_thread(
+                self.melody_transcription_service.transcribe,
+                source_audio_path=source_audio_path,
+                canonical_audio_path=fallback_audio_path,
+                vocals_path=vocals_path,
+                accompaniment_path=accompaniment_path,
+                stem_paths=stem_paths,
+                workspace=workspace,
+            )
+            pitch_result_obj = transcription.pitch_result_obj
+            pitch_result_dict = transcription.pitch_result_dict
+            semantic_audio_dict = transcription.semantic_audio_dict
+            f0_track_dict = transcription.f0_track_dict
+            vocal_activity_dict = transcription.vocal_activity_dict
+            note_candidates_dict = transcription.note_candidates_dict
+            raw_pitch_midi_path = transcription.raw_pitch_midi_path
+            warnings.extend(transcription.warnings)
+            rhythm_grid_dict = self.rhythm_quantization_service.build_rhythm_grid_payload(semantic_audio_dict)
+        except Exception as exc:
+            warnings.append(f"pitch_pipeline_failed:{self._short_exception(exc)}")
 
         if self.analysis_inferencer is None:
             warnings.append("analysis_inferencer_missing: skip analysis_ir")
@@ -366,18 +341,17 @@ class AudioAnalysisService:
                 warnings.append(f"analysis_ir_failed:{self._short_exception(exc)}")
 
         score_ir_obj: ScoreIR | None = None
-        if self.score_ir_builder is None:
+        if self.score_build_service.score_ir_builder is None:
             warnings.append("score_ir_builder_missing: use empty score_ir")
         elif pitch_result_obj is None:
             warnings.append("score_ir_skipped_no_pitch_result")
         else:
             try:
-                # TODO: 按真实接口调整
-                score_ir_obj = await asyncio.to_thread(
-                    self._invoke_score_ir_builder,
-                    pitch_result_obj,
-                    lyrics_segments,
-                    analysis_ir_obj,
+                score_ir_obj, score_data_dict = await asyncio.to_thread(
+                    self.score_build_service.build,
+                    pitch_result_obj=pitch_result_obj,
+                    lyrics_segments=lyrics_segments,
+                    analysis_ir_obj=analysis_ir_obj,
                 )
             except Exception as exc:
                 warnings.append(f"score_ir_build_failed:{self._short_exception(exc)}")
@@ -385,10 +359,11 @@ class AudioAnalysisService:
         if score_ir_obj is None:
             score_ir_obj = self._build_empty_score_ir(warnings)
 
-        try:
-            score_data_dict = ScoreIRSerializer.to_score_data(score_ir_obj)
-        except Exception as exc:
-            warnings.append(f"score_data_build_failed:{self._short_exception(exc)}")
+        if score_data_dict is None:
+            try:
+                score_data_dict = ScoreIRSerializer.to_score_data(score_ir_obj)
+            except Exception as exc:
+                warnings.append(f"score_data_build_failed:{self._short_exception(exc)}")
 
         score_ir_serialized = self._serialize(perception_obj=score_ir_obj)
         score_ir_dict = score_ir_serialized if isinstance(score_ir_serialized, dict) else {"value": score_ir_serialized}
@@ -416,47 +391,6 @@ class AudioAnalysisService:
             vocal_activity_dict=vocal_activity_dict,
             warnings=warnings,
         )
-
-    def _normalize_stem_name(self, raw_name: str) -> str:
-        return ProjectWorkspace.normalize_stem_name(raw_name)
-
-    def _collect_and_persist_stems(self, separation_result: Any, workspace: ProjectWorkspace) -> dict[str, Path]:
-        collected: dict[str, Path] = {}
-
-        raw_stem_paths = getattr(separation_result, "stem_paths", None)
-        if isinstance(raw_stem_paths, dict):
-            for stem_name, stem_path in raw_stem_paths.items():
-                normalized_name = self._normalize_stem_name(str(stem_name))
-                candidate = Path(str(stem_path))
-                if candidate.exists() and candidate.is_file():
-                    collected[normalized_name] = candidate
-
-        vocals_raw = getattr(separation_result, "vocal_path", None) or getattr(separation_result, "vocals_path", None)
-        accompaniment_raw = getattr(separation_result, "accompaniment_path", None)
-
-        if vocals_raw:
-            candidate = Path(str(vocals_raw))
-            if candidate.exists() and candidate.is_file():
-                collected.setdefault("vocals", candidate)
-
-        if accompaniment_raw:
-            candidate = Path(str(accompaniment_raw))
-            if candidate.exists() and candidate.is_file():
-                collected.setdefault("accompaniment", candidate)
-
-        persisted: dict[str, Path] = {}
-        for stem_name, source_path in collected.items():
-            destination_path = workspace.stem_path(stem_name)
-            if source_path.resolve(strict=False) != destination_path.resolve(strict=False):
-                shutil.copyfile(source_path, destination_path)
-            persisted[stem_name] = destination_path
-
-        if "vocals" in persisted:
-            persisted["vocals"] = workspace.vocals_path
-        if "accompaniment" in persisted:
-            persisted["accompaniment"] = workspace.accompaniment_path
-
-        return persisted
 
     def _build_pitch_pipeline_request(
         self,
@@ -588,7 +522,7 @@ class AudioAnalysisService:
 
         if self.midi_exporter is not None and perception.pitch_result_obj is not None:
             try:
-                # TODO: 按真实接口调整（目前用 pitch 结果导出，后续可纳入 alignment）
+                # TODO: 鎸夌湡瀹炴帴鍙ｈ皟鏁达紙鐩墠鐢?pitch 缁撴灉瀵煎嚭锛屽悗缁彲绾冲叆 alignment锛?
                 measures = getattr(perception.pitch_result_obj, "measures", None)
                 bpm = getattr(getattr(perception.pitch_result_obj, "meta", None), "bpm", None)
                 if measures is not None and bpm is not None:
@@ -854,3 +788,7 @@ class AudioAnalysisService:
         except Exception as exc:
             self.logger.warning("MidiExporter unavailable: %s", self._short_exception(exc))
             return None
+
+
+
+

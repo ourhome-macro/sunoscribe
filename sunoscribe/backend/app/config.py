@@ -36,7 +36,9 @@ class Settings(BaseSettings):
     task_worker_count: int = 1
     task_stale_after_minutes: int = 120
     pitch_backend: str = "rmvpe"
-    pitch_backend_fallbacks: str = "crepe,basic-pitch"
+    pitch_profile: str = "production"
+    pitch_allow_backend_fallbacks: bool = False
+    pitch_backend_fallbacks: str = ""
     pitch_cache_dir: str = "~/.cache/sunoscribe/pitch"
     rmvpe_model_path: str | None = None
 
@@ -76,6 +78,14 @@ class Settings(BaseSettings):
         normalized = aliases.get(normalized, normalized)
         if normalized not in {"rmvpe", "crepe", "basic-pitch"}:
             raise ValueError("pitch_backend must be one of: rmvpe, crepe, basic-pitch")
+        return normalized
+
+    @field_validator("pitch_profile")
+    @classmethod
+    def _validate_pitch_profile(cls, value: str) -> str:
+        normalized = (value or "production").strip().lower()
+        if normalized not in {"production", "diagnostic", "benchmark"}:
+            raise ValueError("pitch_profile must be one of: production, diagnostic, benchmark")
         return normalized
 
     @field_validator("max_media_duration_sec")

@@ -8,3 +8,4 @@ class UploadResponse(BaseModel):
     project_id: uuid.UUID
     filename: str
     size: int = Field(ge=0)
+    artifact_id: uuid.UUID | None = None
