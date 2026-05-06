@@ -111,6 +111,23 @@ class _FakeScoreIRBuilder:
 
 
 class TestAudioAnalysisService(unittest.TestCase):
+    def test_default_audio_processor_uses_mvp_canonical_format(self) -> None:
+        service = AudioAnalysisService(
+            audio_processor=_FakeNormalizingAudioProcessor(),
+            vocal_separator=None,
+            lyrics_recognizer=None,
+            pitch_pipeline=None,
+            analysis_inferencer=None,
+            midi_exporter=None,
+        )
+
+        processor = service._try_make_audio_processor()
+
+        self.assertIsNotNone(processor)
+        self.assertEqual(processor.default_config.sample_rate, 44100)
+        self.assertEqual(processor.default_config.channels, 2)
+        self.assertEqual(processor.default_config.output_format, "wav")
+
     def test_media_ingest_converts_video_to_canonical_audio(self) -> None:
         with TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)

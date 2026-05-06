@@ -1,4 +1,4 @@
-import secrets
+﻿import secrets
 
 from pydantic import field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -35,14 +35,20 @@ class Settings(BaseSettings):
     minio_base_path: str = "uploads"
     task_worker_count: int = 1
     task_stale_after_minutes: int = 120
+    canonical_audio_sample_rate: int = 44100
+    canonical_audio_channels: int = 2
     pitch_backend: str = "rmvpe"
     pitch_profile: str = "production"
     pitch_allow_backend_fallbacks: bool = False
     pitch_backend_fallbacks: str = ""
     pitch_cache_dir: str = "~/.cache/sunoscribe/pitch"
     rmvpe_model_path: str | None = None
+    openai_api_key: str | None = None
+    agent_llm_enabled: bool = False
+    agent_llm_provider: str = "openai"
+    agent_llm_model: str = "gpt-5.4-mini"
 
-    # PRD 要求 PostgreSQL；默认值可通过 .env 覆盖。
+    # PRD 瑕佹眰 PostgreSQL锛涢粯璁ゅ€煎彲閫氳繃 .env 瑕嗙洊銆?
     # Avoid committing hard-coded credentials in code.
     database_url: str = "postgresql+psycopg://localhost:5432/sunoscribe"
 
@@ -104,6 +110,30 @@ class Settings(BaseSettings):
             raise ValueError("task_worker_count must be at least 1")
         return normalized
 
+    @field_validator("canonical_audio_sample_rate", "canonical_audio_channels")
+    @classmethod
+    def _validate_positive_int(cls, value: int) -> int:
+        normalized = int(value)
+        if normalized < 1:
+            raise ValueError("audio configuration values must be positive integers")
+        return normalized
+
+    @field_validator("agent_llm_provider")
+    @classmethod
+    def _validate_agent_llm_provider(cls, value: str) -> str:
+        normalized = str(value or "openai").strip().lower()
+        if normalized not in {"openai"}:
+            raise ValueError("agent_llm_provider must be openai")
+        return normalized
+
+    @field_validator("agent_llm_model")
+    @classmethod
+    def _validate_agent_llm_model(cls, value: str) -> str:
+        normalized = str(value or "").strip()
+        if not normalized:
+            raise ValueError("agent_llm_model must not be empty")
+        return normalized
+
     @field_validator("task_stale_after_minutes")
     @classmethod
     def _validate_task_stale_after_minutes(cls, value: int) -> int:
@@ -149,3 +179,4 @@ class Settings(BaseSettings):
 
 
 settings = Settings()
+

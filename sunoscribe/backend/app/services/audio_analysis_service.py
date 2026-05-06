@@ -738,9 +738,17 @@ class AudioAnalysisService:
 
     def _try_make_audio_processor(self) -> Any | None:
         try:
+            from app.config import settings
+            from app.modules.audio.config import AudioConfig
             from app.modules.audio.processor import AudioProcessor
 
-            return AudioProcessor()
+            return AudioProcessor(
+                AudioConfig(
+                    sample_rate=settings.canonical_audio_sample_rate,
+                    channels=settings.canonical_audio_channels,
+                    output_format="wav",
+                )
+            )
         except Exception as exc:
             self.logger.warning("AudioProcessor unavailable: %s", self._short_exception(exc))
             return None

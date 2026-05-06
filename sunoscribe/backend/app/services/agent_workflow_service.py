@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import json
 import uuid
@@ -9,6 +9,7 @@ from typing import Any
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+from app.config import settings
 from app.models.artifact import Artifact
 from app.models.enums import ScoreRevisionType
 from app.models.score import Score
@@ -28,6 +29,7 @@ from app.modules.agents import (
     AgentSkillRegistry,
     TranscriptionDiagnosis,
 )
+from app.modules.agents.llm_client import ScorePatchLLMClient, make_openai_score_patch_llm_client
 from app.services.render_export_service import RenderExportService
 from app.services.score_revision_service import get_score_revision_by_id
 from app.utils.errors import ValidationAppError
@@ -46,6 +48,8 @@ class AgentWorkflowService:
         rvc_spec_validator: RvcSpecValidator | None = None,
         skill_registry: AgentSkillRegistry | None = None,
         export_service: RenderExportService | None = None,
+        score_patch_llm_client: ScorePatchLLMClient | None = None,
+        auto_configure_llm_client: bool = True,
     ) -> None:
         self.diagnosis_agent = diagnosis_agent or DiagnosisAgent()
         self.score_patch_agent = score_patch_agent or ScorePatchAgent()
@@ -54,6 +58,9 @@ class AgentWorkflowService:
         self.rvc_spec_validator = rvc_spec_validator or RvcSpecValidator()
         self.skill_registry = skill_registry or AgentSkillRegistry()
         self.export_service = export_service or RenderExportService()
+        self.score_patch_llm_client = score_patch_llm_client or (
+            self._try_make_score_patch_llm_client() if auto_configure_llm_client else None
+        )
 
     def load_context(
         self,
@@ -123,11 +130,23 @@ class AgentWorkflowService:
         instruction: str | dict[str, Any] | AgentScorePatch,
     ) -> AgentScorePatch:
         context = self.load_context(db, user=user, revision_id=revision_id, skill_profile="score_patch")
-        proposal = self.score_patch_agent.propose(context, instruction)
+        proposal = self._propose_score_patch(context=context, instruction=instruction)
         validation = self.score_patch_validator.validate(context=context, proposal=proposal)
         if not bool(validation.get("accepted", False)):
             raise ValidationAppError("agent-generated score patch proposal is invalid", details=validation)
         return proposal
+
+    def _propose_score_patch(
+        self,
+        *,
+        context: AgentRevisionContext,
+        instruction: str | dict[str, Any] | AgentScorePatch,
+    ) -> AgentScorePatch:
+        if isinstance(instruction, AgentScorePatch) or isinstance(instruction, dict):
+            return self.score_patch_agent.propose(context, instruction)
+        if self.score_patch_llm_client is not None:
+            return self.score_patch_llm_client.propose_score_patch(context=context, instruction=str(instruction or ""))
+        return self.score_patch_agent.propose(context, instruction)
 
     def apply_score_patch(
         self,
@@ -351,5 +370,17 @@ class AgentWorkflowService:
                 deduped.append(text)
         return deduped
 
+    @staticmethod
+    def _try_make_score_patch_llm_client() -> ScorePatchLLMClient | None:
+        if not bool(getattr(settings, "agent_llm_enabled", False)):
+            return None
+        if str(getattr(settings, "agent_llm_provider", "openai") or "openai").strip().lower() != "openai":
+            return None
+        return make_openai_score_patch_llm_client(
+            api_key=getattr(settings, "openai_api_key", None),
+            model=getattr(settings, "agent_llm_model", "gpt-5.4-mini"),
+        )
+
 
 agent_workflow_service = AgentWorkflowService()
+

@@ -68,6 +68,7 @@ Upload File
 `MediaIngestService` 负责把上传文件转换为统一的 canonical 音频格式，目前目标产物是：
 
 - `data/projects/<project_id>/preprocess/source.wav`
+- 格式：WAV，44.1 kHz，stereo（由 `CANONICAL_AUDIO_SAMPLE_RATE=44100` 与 `CANONICAL_AUDIO_CHANNELS=2` 控制）
 
 该产物代表 `CanonicalAudio`，是后续分离、转写、节奏分析的统一输入基线。
 
@@ -82,6 +83,7 @@ Upload File
 - 上传是“来源记录”；
 - `source.wav` 才是后端音频处理的 canonical artifact；
 - 任何需要音频内容的下游服务，应优先消费 `CanonicalAudio` 或其派生物，而不是回头读取上传文件。
+- canonical WAV 不应为了 RMVPE 提前降到 16 kHz；RMVPE 阶段会在 pitch backend 内部按模型要求重采样。
 
 ### 3. CanonicalAudio -> StemSet
 

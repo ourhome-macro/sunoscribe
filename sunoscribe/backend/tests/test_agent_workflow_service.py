@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import json
 import tempfile
@@ -108,7 +108,7 @@ class TestAgentWorkflowService(unittest.TestCase):
                 ),
             ]
 
-            context = AgentWorkflowService().build_context_from_revision(revision=revision, artifacts=artifacts)
+            context = AgentWorkflowService(auto_configure_llm_client=False).build_context_from_revision(revision=revision, artifacts=artifacts)
 
         self.assertIsNotNone(context.f0_track)
         self.assertIsNotNone(context.note_candidates)
@@ -127,6 +127,7 @@ class TestAgentWorkflowService(unittest.TestCase):
             rvc_prepare_agent=rvc_agent,
             score_patch_validator=_AcceptingPatchValidator(),
             rvc_spec_validator=_AcceptingRvcValidator(),
+            auto_configure_llm_client=False,
         )
         service.skill_registry = _StaticSkillRegistry()
         service._list_revision_artifacts = lambda *args, **kwargs: []
@@ -149,7 +150,7 @@ class TestAgentWorkflowService(unittest.TestCase):
     def test_apply_patch_to_revision_creates_new_revision(self) -> None:
         score, revision = _build_revision()
         user = User(id=uuid.uuid4(), username="agent", email="agent@example.com", password_hash="x")
-        service = AgentWorkflowService()
+        service = AgentWorkflowService(auto_configure_llm_client=False)
         context = service.build_context_from_revision(revision=revision, artifacts=[])
 
         new_revision = service.apply_patch_to_revision(
@@ -170,6 +171,55 @@ class TestAgentWorkflowService(unittest.TestCase):
         self.assertEqual(new_revision.parent_revision_id, revision.id)
         self.assertEqual(new_revision.score_ir["notes"][0]["pitch_midi"], 72)
         self.assertEqual(score.current_revision, new_revision)
+
+    def test_score_patch_text_instruction_uses_llm_client_when_configured(self) -> None:
+        _, revision = _build_revision()
+        llm_client = _SpyScorePatchLLMClient()
+        service = AgentWorkflowService(
+            score_patch_llm_client=llm_client,
+            score_patch_validator=_AcceptingPatchValidator(),
+            skill_registry=_StaticSkillRegistry(),
+        )
+        service._list_revision_artifacts = lambda *args, **kwargs: []
+        user = User(id=uuid.uuid4(), username="agent", email="agent@example.com", password_hash="x")
+
+        with patch("app.services.agent_workflow_service.get_score_revision_by_id", return_value=revision):
+            proposal = service.propose_score_patch(
+                None,
+                user=user,
+                revision_id=str(revision.id),
+                instruction="raise n1 one octave",
+            )
+
+        self.assertEqual(llm_client.instruction, "raise n1 one octave")
+        self.assertEqual(llm_client.context.skill_context.names(), ["score-ir-editing"])
+        self.assertEqual(proposal.operations[0].op, "mark_uncertain")
+
+    def test_structured_score_patch_bypasses_llm_client(self) -> None:
+        _, revision = _build_revision()
+        llm_client = _SpyScorePatchLLMClient()
+        service = AgentWorkflowService(
+            score_patch_llm_client=llm_client,
+            score_patch_validator=_AcceptingPatchValidator(),
+            skill_registry=_StaticSkillRegistry(),
+        )
+        service._list_revision_artifacts = lambda *args, **kwargs: []
+        user = User(id=uuid.uuid4(), username="agent", email="agent@example.com", password_hash="x")
+
+        with patch("app.services.agent_workflow_service.get_score_revision_by_id", return_value=revision):
+            proposal = service.propose_score_patch(
+                None,
+                user=user,
+                revision_id=str(revision.id),
+                instruction={
+                    "base_revision_id": str(revision.id),
+                    "operations": [{"op": "shift_octave", "note_id": "n1", "octaves": 1}],
+                    "confidence": 0.8,
+                },
+            )
+
+        self.assertIsNone(llm_client.instruction)
+        self.assertEqual(proposal.operations[0].op, "shift_octave")
 
 
 class _StaticSkillRegistry:
@@ -279,6 +329,22 @@ class _SpyRvcPrepareAgent:
         )
 
 
+class _SpyScorePatchLLMClient:
+    def __init__(self) -> None:
+        self.context = None
+        self.instruction = None
+
+    def propose_score_patch(self, *, context, instruction):
+        self.context = context
+        self.instruction = instruction
+        return AgentScorePatch(
+            base_revision_id=context.revision_id,
+            operations=[{"op": "mark_uncertain", "note_id": "n1"}],
+            rationale="llm proposal",
+            confidence=0.75,
+        )
+
+
 class _AcceptingPatchValidator:
     def validate(self, *, context, proposal):
         self.context = context
@@ -293,3 +359,4 @@ class _AcceptingRvcValidator:
 
 if __name__ == "__main__":
     unittest.main()
+

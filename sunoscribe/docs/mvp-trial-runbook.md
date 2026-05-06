@@ -1,10 +1,10 @@
-# MVP Trial Runbook
+﻿# MVP Trial Runbook
 
 This runbook defines the first safe MVP trial path for SunoScribe's backend/audio scope. The goal is to prove `MP4 -> lead-vocal MIDI` with explicit required-stage failures and local deterministic benchmark reports.
 
 ## What Can Be Tried Now
 
-- Input MP4/audio is canonicalized through `MediaIngestService` into `preprocess/source.wav`.
+- Input MP4/audio is canonicalized through `MediaIngestService` into 44.1 kHz stereo `preprocess/source.wav`.
 - `StemService` consumes canonical WAV and is expected to produce `vocals.wav` plus `accompaniment.wav`.
 - Production pitch uses RMVPE with fallback disabled.
 - The benchmark manifest contains 19 enabled paired samples under `samples/source_mp4` and `samples/source_mid`.
@@ -31,6 +31,15 @@ The doctor checks:
 - MIDI/analysis libraries: `pretty_midi`, `mido`, `librosa`, `soundfile`.
 - RMVPE production readiness with fallback disabled.
 - Vocal separator package and cached MDX-Net model readiness.
+
+Canonical audio settings for the MVP are:
+
+- `CANONICAL_AUDIO_SAMPLE_RATE=44100`
+- `CANONICAL_AUDIO_CHANNELS=2`
+
+RMVPE still resamples internally to its configured 16 kHz model input; do not lower canonical audio to 16 kHz before vocal separation.
+
+Agent/LLM workflow is not part of the core MP4 -> MIDI metric path. If enabled for post-revision ScorePatch assistance, use `AGENT_LLM_MODEL=gpt-5.4-mini` with `OPENAI_API_KEY` kept only in local environment files.
 
 If doctor fails, fix dependencies instead of enabling fallback output.
 
@@ -87,3 +96,4 @@ Use the first successful full run as an observation baseline. Do not set hard `n
 - The generated MIDI is playable and audibly resembles the lead vocal melody for at least part of the song.
 - The 19-song run produces stable reports where each failed song has a clear stage/failure category.
 - No production run uses CREPE/basic-pitch fallback to hide missing RMVPE or separator dependencies.
+
