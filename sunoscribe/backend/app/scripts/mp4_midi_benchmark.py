@@ -24,6 +24,7 @@ from app.modules.benchmark import (
     load_manifest,
     read_midi_notes,
     read_midi_track_info,
+    build_mvp_readiness_report,
 )
 from app.services.audio_analysis_service import AudioAnalysisOptions, AudioAnalysisService
 
@@ -72,6 +73,19 @@ def main(argv: list[str] | None = None) -> int:
     )
     _write_json(run_root / "dataset_report.json", dataset_report.to_dict())
 
+    if args.command == "doctor":
+        readiness = build_mvp_readiness_report(deep_pitch=args.deep_pitch_check)
+        _write_json(run_root / "readiness_report.json", readiness.to_dict())
+        _write_summary_files(
+            run_root=run_root,
+            manifest=manifest,
+            results=[],
+            dataset_report=dataset_report.to_dict(),
+            readiness_report=readiness.to_dict(),
+        )
+        print(f"readiness report written to {run_root / 'readiness_report.json'}")
+        return 0 if readiness.status == "ok" and not dataset_report.errors else 2
+
     if args.command == "validate":
         _write_summary_files(run_root=run_root, manifest=manifest, results=[], dataset_report=dataset_report.to_dict())
         print(f"dataset report written to {run_root / 'dataset_report.json'}")
@@ -83,6 +97,18 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     projects_root = Path(args.projects_root) if args.projects_root else run_root / "projects"
+    readiness = build_mvp_readiness_report(deep_pitch=args.deep_pitch_check)
+    _write_json(run_root / "readiness_report.json", readiness.to_dict())
+    if readiness.status != "ok" and not args.ignore_readiness:
+        _write_summary_files(
+            run_root=run_root,
+            manifest=manifest,
+            results=[],
+            dataset_report=dataset_report.to_dict(),
+            readiness_report=readiness.to_dict(),
+        )
+        print(f"readiness failed; report written to {run_root / 'readiness_report.json'}", file=sys.stderr)
+        return 2
     config_snapshot = _build_config_snapshot(args=args, run_id=run_id, manifest=manifest)
     _write_json(run_root / "config.json", config_snapshot)
 
@@ -101,7 +127,13 @@ def main(argv: list[str] | None = None) -> int:
         results.append(result)
         print(f"{sample.id}: {result.status}")
 
-    _write_summary_files(run_root=run_root, manifest=manifest, results=results, dataset_report=dataset_report.to_dict())
+    _write_summary_files(
+        run_root=run_root,
+        manifest=manifest,
+        results=results,
+        dataset_report=dataset_report.to_dict(),
+        readiness_report=readiness.to_dict(),
+    )
     failed = [result for result in results if result.status != "success"]
     return 1 if failed else 0
 
@@ -286,6 +318,7 @@ def _write_summary_files(
     manifest: BenchmarkManifest,
     results: list[SampleRunResult],
     dataset_report: dict[str, Any],
+    readiness_report: dict[str, Any] | None = None,
 ) -> None:
     metrics_values = [result.metrics["metrics"] for result in results if result.metrics and result.metrics.get("metrics")]
     summary = {
@@ -293,6 +326,7 @@ def _write_summary_files(
         "created_at": _utc_now(),
         "manifest": manifest.to_dict(),
         "dataset": dataset_report,
+        "readiness": readiness_report,
         "results": [
             {
                 "sample_id": result.sample_id,
@@ -314,6 +348,7 @@ def _write_summary_files(
 def _summary_markdown(summary: dict[str, Any]) -> str:
     results = summary.get("results") or []
     aggregate = summary.get("aggregate_metrics") or {}
+    readiness = summary.get("readiness") or {}
     lines = [
         "# MP4->MIDI Benchmark Summary",
         "",
@@ -323,6 +358,7 @@ def _summary_markdown(summary: dict[str, Any]) -> str:
         f"- Failed: `{sum(1 for result in results if result.get('status') != 'success')}`",
         f"- Mean note F1: `{aggregate.get('note_f1_mean')}`",
         f"- Mean pitch accuracy: `{aggregate.get('pitch_accuracy_mean')}`",
+        f"- Readiness: `{readiness.get('status', 'not_checked')}`",
         "",
         "| Sample | Status | Note F1 | Pitch Acc | Onset MAE ms | Error |",
         "| --- | --- | ---: | ---: | ---: | --- |",
@@ -354,6 +390,16 @@ def _summary_markdown(summary: dict[str, Any]) -> str:
             f"- MIDI only: `{len(dataset.get('midi_only') or [])}`",
         ]
     )
+    if readiness:
+        lines.extend(["", "## MVP Readiness", ""])
+        for check in readiness.get("checks") or []:
+            lines.append(
+                "- `{name}`: `{status}` — {message}".format(
+                    name=check.get("name"),
+                    status=check.get("status"),
+                    message=check.get("message"),
+                )
+            )
     return "\n".join(lines) + "\n"
 
 
@@ -403,7 +449,11 @@ def _required_pipeline_errors(result_dict: dict[str, Any], produced_midi_path: P
 
 def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run deterministic MP4->lead-vocal MIDI benchmark.")
-    parser.add_argument("command", choices=["validate", "run"], help="Validate the dataset or run the full benchmark.")
+    parser.add_argument(
+        "command",
+        choices=["doctor", "validate", "run"],
+        help="Check MVP readiness, validate the dataset, or run the full benchmark.",
+    )
     parser.add_argument("--manifest", default="../samples/manifest.v1.json", help="Path to manifest JSON.")
     parser.add_argument("--output-root", default=None, help="Benchmark runs output directory.")
     parser.add_argument("--projects-root", default=None, help="Temporary ProjectWorkspace root for pipeline artifacts.")
@@ -413,6 +463,12 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser.add_argument("--onset-tolerance-ms", type=float, default=120.0, help="Onset tolerance for MIDI matching.")
     parser.add_argument("--skip-checksum", action="store_true", help="Do not validate manifest checksums.")
     parser.add_argument("--keep-project-workspaces", action="store_true", help="Keep per-sample pipeline workspaces.")
+    parser.add_argument("--deep-pitch-check", action="store_true", help="Try loading the RMVPE model during readiness checks.")
+    parser.add_argument(
+        "--ignore-readiness",
+        action="store_true",
+        help="Run even if MVP readiness checks fail; intended only for failure diagnosis.",
+    )
     return parser.parse_args(argv)
 
 
@@ -434,6 +490,8 @@ def _build_config_snapshot(*, args: argparse.Namespace, run_id: str, manifest: B
         "pitch_allow_backend_fallbacks": os.environ.get("PITCH_ALLOW_BACKEND_FALLBACKS", "false"),
         "pitch_backend_fallbacks": os.environ.get("PITCH_BACKEND_FALLBACKS", ""),
         "onset_tolerance_ms": args.onset_tolerance_ms,
+        "ignore_readiness": bool(args.ignore_readiness),
+        "deep_pitch_check": bool(args.deep_pitch_check),
         "command": args.command,
     }
 
