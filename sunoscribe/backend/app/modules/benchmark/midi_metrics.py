@@ -68,15 +68,61 @@ class MidiMetrics:
         return asdict(self)
 
 
+@dataclass(frozen=True, slots=True)
+class MidiAudibilityMetrics:
+    expected_first_note_time_sec: float | None
+    predicted_first_note_time_sec: float | None
+    first_note_delay_sec: float | None
+    expected_duration_sec: float
+    predicted_duration_sec: float
+    duration_ratio: float | None
+    midi_coverage_ratio: float
+    longest_silence_sec: float
+    produced_note_seconds: float
+    velocity_min: int | None
+    velocity_mean: float | None
+    velocity_max: int | None
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(frozen=True, slots=True)
+class MidiAlignmentDiagnostics:
+    best_octave_shift_semitones: int
+    best_octave_shift_note_recall: float
+    best_octave_shift_note_f1: float
+    best_octave_shift_matched_notes: int
+    best_time_shift_sec: float
+    best_time_shift_note_recall: float
+    best_time_shift_note_f1: float
+    best_time_shift_matched_notes: int
+    expected_median_pitch: float | None
+    predicted_median_pitch: float | None
+    median_pitch_delta: float | None
+    expected_pitch_range: list[int | None]
+    predicted_pitch_range: list[int | None]
+    reference_track_suspect_reasons: list[str]
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
 def read_midi_track_info(path: str | Path) -> list[MidiTrackInfo]:
     midi = _load_midi(path)
     track_infos: list[MidiTrackInfo] = []
     ticks_per_beat = max(1, int(midi.ticks_per_beat))
+    tempo_map = _build_tempo_map(midi)
     for index, track in enumerate(midi.tracks):
         track_name = ""
         program: int | None = None
         is_drum = False
-        notes = _extract_track_notes(track, ticks_per_beat=ticks_per_beat, track_index=index)
+        notes = _extract_track_notes(
+            track,
+            ticks_per_beat=ticks_per_beat,
+            track_index=index,
+            tempo_map=tempo_map,
+        )
         for msg in track:
             if msg.type == "track_name" and not track_name:
                 track_name = str(getattr(msg, "name", ""))
@@ -105,14 +151,29 @@ def read_midi_track_info(path: str | Path) -> list[MidiTrackInfo]:
 def read_midi_notes(path: str | Path, *, track_index: int | None = None) -> list[NoteEvent]:
     midi = _load_midi(path)
     ticks_per_beat = max(1, int(midi.ticks_per_beat))
+    tempo_map = _build_tempo_map(midi)
     notes: list[NoteEvent] = []
     if track_index is not None:
         if track_index < 0 or track_index >= len(midi.tracks):
             raise MidiReadError(f"MIDI track index out of range: {track_index}")
-        notes.extend(_extract_track_notes(midi.tracks[track_index], ticks_per_beat=ticks_per_beat, track_index=track_index))
+        notes.extend(
+            _extract_track_notes(
+                midi.tracks[track_index],
+                ticks_per_beat=ticks_per_beat,
+                track_index=track_index,
+                tempo_map=tempo_map,
+            )
+        )
     else:
         for index, track in enumerate(midi.tracks):
-            notes.extend(_extract_track_notes(track, ticks_per_beat=ticks_per_beat, track_index=index))
+            notes.extend(
+                _extract_track_notes(
+                    track,
+                    ticks_per_beat=ticks_per_beat,
+                    track_index=index,
+                    tempo_map=tempo_map,
+                )
+            )
     return sorted(notes, key=lambda note: (note.start, note.pitch, note.end, note.track_index or -1))
 
 
@@ -161,6 +222,170 @@ def compute_midi_metrics(
     )
 
 
+def compute_midi_audibility_metrics(
+    expected_notes: list[NoteEvent],
+    predicted_notes: list[NoteEvent],
+) -> MidiAudibilityMetrics:
+    expected_first = min((note.start for note in expected_notes), default=None)
+    predicted_first = min((note.start for note in predicted_notes), default=None)
+    expected_duration = max((note.end for note in expected_notes), default=0.0)
+    predicted_duration = max((note.end for note in predicted_notes), default=0.0)
+    duration_basis = max(expected_duration, predicted_duration)
+    first_note_delay = None
+    if expected_first is not None and predicted_first is not None:
+        first_note_delay = predicted_first - expected_first
+
+    coverage_seconds, longest_silence = _coverage_and_longest_silence(predicted_notes, duration_basis=duration_basis)
+    velocities = [note.velocity for note in predicted_notes]
+    return MidiAudibilityMetrics(
+        expected_first_note_time_sec=expected_first,
+        predicted_first_note_time_sec=predicted_first,
+        first_note_delay_sec=first_note_delay,
+        expected_duration_sec=expected_duration,
+        predicted_duration_sec=predicted_duration,
+        duration_ratio=_safe_div(predicted_duration, expected_duration) if expected_duration > 0 else None,
+        midi_coverage_ratio=_safe_div(coverage_seconds, duration_basis),
+        longest_silence_sec=longest_silence,
+        produced_note_seconds=sum(note.duration for note in predicted_notes),
+        velocity_min=min(velocities) if velocities else None,
+        velocity_mean=(sum(velocities) / len(velocities)) if velocities else None,
+        velocity_max=max(velocities) if velocities else None,
+    )
+
+
+def compute_midi_alignment_diagnostics(
+    expected_notes: list[NoteEvent],
+    predicted_notes: list[NoteEvent],
+    config: MidiMetricConfig | None = None,
+) -> MidiAlignmentDiagnostics:
+    config = config or MidiMetricConfig()
+    base_metrics = compute_midi_metrics(expected_notes, predicted_notes, config=config)
+    strict_pitch_config = MidiMetricConfig(
+        onset_tolerance_sec=config.onset_tolerance_sec,
+        pitch_tolerance_semitones=config.pitch_tolerance_semitones,
+        octave_tolerance_semitones=-1,
+    )
+    expected_median_pitch = _median_pitch(expected_notes)
+    predicted_median_pitch = _median_pitch(predicted_notes)
+    median_pitch_delta = None
+    if expected_median_pitch is not None and predicted_median_pitch is not None:
+        median_pitch_delta = predicted_median_pitch - expected_median_pitch
+
+    octave_candidates: list[tuple[float, float, int, int]] = []
+    for semitone_shift in (-24, -12, 0, 12, 24):
+        shifted_notes = _shift_notes(predicted_notes, pitch_shift=semitone_shift)
+        shifted_metrics = compute_midi_metrics(expected_notes, shifted_notes, config=strict_pitch_config)
+        octave_candidates.append(
+            (
+                shifted_metrics.note_recall,
+                shifted_metrics.note_f1,
+                shifted_metrics.matched_note_count,
+                semitone_shift,
+            )
+        )
+    best_octave = max(octave_candidates, key=lambda item: (item[0], item[1], item[2], -abs(item[3])))
+
+    time_shifts = _candidate_time_shifts(expected_notes, predicted_notes)
+    time_candidates: list[tuple[float, float, int, float]] = []
+    for time_shift in time_shifts:
+        shifted_notes = _shift_notes(predicted_notes, time_shift=time_shift)
+        shifted_metrics = compute_midi_metrics(expected_notes, shifted_notes, config=config)
+        time_candidates.append(
+            (
+                shifted_metrics.note_recall,
+                shifted_metrics.note_f1,
+                shifted_metrics.matched_note_count,
+                time_shift,
+            )
+        )
+    best_time = max(time_candidates, key=lambda item: (item[0], item[1], item[2], -abs(item[3])))
+
+    suspect_reasons = _infer_reference_track_suspect_reasons(
+        base_metrics=base_metrics,
+        best_octave=best_octave,
+        best_time=best_time,
+        expected_notes=expected_notes,
+        predicted_notes=predicted_notes,
+        median_pitch_delta=median_pitch_delta,
+    )
+
+    return MidiAlignmentDiagnostics(
+        best_octave_shift_semitones=best_octave[3],
+        best_octave_shift_note_recall=best_octave[0],
+        best_octave_shift_note_f1=best_octave[1],
+        best_octave_shift_matched_notes=best_octave[2],
+        best_time_shift_sec=best_time[3],
+        best_time_shift_note_recall=best_time[0],
+        best_time_shift_note_f1=best_time[1],
+        best_time_shift_matched_notes=best_time[2],
+        expected_median_pitch=expected_median_pitch,
+        predicted_median_pitch=predicted_median_pitch,
+        median_pitch_delta=median_pitch_delta,
+        expected_pitch_range=_pitch_range(expected_notes),
+        predicted_pitch_range=_pitch_range(predicted_notes),
+        reference_track_suspect_reasons=suspect_reasons,
+    )
+
+
+def build_midi_diagnostics(
+    metrics: MidiMetrics,
+    audibility: MidiAudibilityMetrics,
+    alignment: MidiAlignmentDiagnostics | None = None,
+) -> dict[str, Any]:
+    expected_count = metrics.expected_note_count
+    predicted_count = metrics.predicted_note_count
+    diagnostics = {
+        "predicted_to_expected_note_ratio": _safe_div(predicted_count, expected_count),
+        "matched_to_expected_note_ratio": _safe_div(metrics.matched_note_count, expected_count),
+        "matched_to_predicted_note_ratio": _safe_div(metrics.matched_note_count, predicted_count),
+        "note_f1": metrics.note_f1,
+        "note_precision": metrics.note_precision,
+        "note_recall": metrics.note_recall,
+        "pitch_accuracy": metrics.pitch_accuracy,
+        "octave_error_rate": metrics.octave_error_rate,
+        "onset_mae_ms": metrics.onset_mae_ms,
+        "audibility": audibility.to_dict(),
+    }
+    if alignment is not None:
+        diagnostics["alignment"] = alignment.to_dict()
+    return diagnostics
+
+
+def infer_midi_failure_modes(
+    metrics: MidiMetrics,
+    audibility: MidiAudibilityMetrics,
+    alignment: MidiAlignmentDiagnostics | None = None,
+) -> list[str]:
+    modes: list[str] = []
+    expected_count = metrics.expected_note_count
+    predicted_count = metrics.predicted_note_count
+    predicted_expected_ratio = _safe_div(predicted_count, expected_count)
+    if predicted_count == 0:
+        modes.append("no_predicted_notes")
+    if predicted_expected_ratio < 0.2:
+        modes.append("too_few_predicted_notes")
+    if audibility.first_note_delay_sec is None:
+        if predicted_count == 0:
+            modes.append("missing_predicted_first_note")
+        elif expected_count == 0:
+            modes.append("missing_expected_first_note")
+    elif audibility.first_note_delay_sec > 15.0:
+        modes.append("leading_silence_too_long")
+    if audibility.midi_coverage_ratio < 0.45:
+        modes.append("midi_coverage_too_low")
+    if metrics.octave_error_rate > 0.3:
+        modes.append("possible_octave_error")
+    if metrics.pitch_accuracy < 0.2:
+        modes.append("pitch_detection_or_reference_mismatch")
+    if metrics.pitch_accuracy >= 0.2 and metrics.note_f1 < 0.03:
+        modes.append("timing_or_quantization_failure")
+    if alignment is not None:
+        for reason in alignment.reference_track_suspect_reasons:
+            if reason not in modes:
+                modes.append(reason)
+    return modes
+
+
 def _load_midi(path: str | Path):
     try:
         import mido
@@ -170,17 +395,44 @@ def _load_midi(path: str | Path):
         raise MidiReadError(f"failed to read MIDI file {path}: {exc}") from exc
 
 
-def _extract_track_notes(track: Any, *, ticks_per_beat: int, track_index: int) -> list[NoteEvent]:
-    tempo = 500000
+TempoMap = tuple[tuple[int, int], ...]
+
+
+def _build_tempo_map(midi: Any) -> TempoMap:
+    tempo_events: list[tuple[int, int]] = []
+    for track in midi.tracks:
+        current_ticks = 0
+        for msg in track:
+            current_ticks += int(getattr(msg, "time", 0) or 0)
+            if msg.type == "set_tempo":
+                tempo_events.append((current_ticks, int(getattr(msg, "tempo", 500000) or 500000)))
+
+    tempo_events.sort(key=lambda item: item[0])
+    if not tempo_events or tempo_events[0][0] != 0:
+        tempo_events.insert(0, (0, 500000))
+
+    normalized: list[tuple[int, int]] = []
+    for tick, tempo in tempo_events:
+        if normalized and normalized[-1][0] == tick:
+            normalized[-1] = (tick, tempo)
+        else:
+            normalized.append((tick, tempo))
+    return tuple(normalized)
+
+
+def _extract_track_notes(
+    track: Any,
+    *,
+    ticks_per_beat: int,
+    track_index: int,
+    tempo_map: TempoMap,
+) -> list[NoteEvent]:
     current_ticks = 0
     active: dict[tuple[int | None, int], list[tuple[int, int, int]]] = {}
     notes: list[NoteEvent] = []
     order = 0
     for msg in track:
         current_ticks += int(getattr(msg, "time", 0) or 0)
-        if msg.type == "set_tempo":
-            tempo = int(getattr(msg, "tempo", tempo) or tempo)
-            continue
         if msg.type not in {"note_on", "note_off"}:
             continue
         note_number = getattr(msg, "note", None)
@@ -199,14 +451,33 @@ def _extract_track_notes(track: Any, *, ticks_per_beat: int, track_index: int) -
         start_ticks, start_velocity, _ = starts.pop(0)
         if current_ticks <= start_ticks:
             continue
-        start_sec = _ticks_to_seconds(start_ticks, ticks_per_beat=ticks_per_beat, tempo=tempo)
-        end_sec = _ticks_to_seconds(current_ticks, ticks_per_beat=ticks_per_beat, tempo=tempo)
+        start_sec = _ticks_to_seconds(start_ticks, ticks_per_beat=ticks_per_beat, tempo_map=tempo_map)
+        end_sec = _ticks_to_seconds(current_ticks, ticks_per_beat=ticks_per_beat, tempo_map=tempo_map)
         notes.append(NoteEvent(start=start_sec, end=end_sec, pitch=int(note_number), velocity=start_velocity, track_index=track_index))
     return sorted(notes, key=lambda note: (note.start, note.pitch, note.end))
 
 
-def _ticks_to_seconds(ticks: int, *, ticks_per_beat: int, tempo: int) -> float:
-    return float(ticks) * float(tempo) / 1_000_000.0 / float(ticks_per_beat)
+def _ticks_to_seconds(ticks: int, *, ticks_per_beat: int, tempo_map: TempoMap) -> float:
+    target_ticks = max(0, int(ticks))
+    ticks_per_beat = max(1, int(ticks_per_beat))
+    if not tempo_map:
+        return float(target_ticks) * 500000.0 / 1_000_000.0 / float(ticks_per_beat)
+
+    elapsed_sec = 0.0
+    last_tick, active_tempo = tempo_map[0]
+    if target_ticks <= last_tick:
+        return float(target_ticks) * float(active_tempo) / 1_000_000.0 / float(ticks_per_beat)
+
+    for next_tick, next_tempo in tempo_map[1:]:
+        if target_ticks <= next_tick:
+            elapsed_sec += (target_ticks - last_tick) * float(active_tempo) / 1_000_000.0 / float(ticks_per_beat)
+            return elapsed_sec
+        elapsed_sec += (next_tick - last_tick) * float(active_tempo) / 1_000_000.0 / float(ticks_per_beat)
+        last_tick = next_tick
+        active_tempo = next_tempo
+
+    elapsed_sec += (target_ticks - last_tick) * float(active_tempo) / 1_000_000.0 / float(ticks_per_beat)
+    return elapsed_sec
 
 
 def _match_notes(
@@ -252,6 +523,122 @@ def _duration_iou(expected: NoteEvent, predicted: NoteEvent) -> float:
     if union <= 0 or math.isclose(union, 0.0):
         return 0.0
     return intersection / union
+
+
+def _shift_notes(
+    notes: list[NoteEvent],
+    *,
+    pitch_shift: int = 0,
+    time_shift: float = 0.0,
+) -> list[NoteEvent]:
+    return [
+        NoteEvent(
+            start=float(note.start) + float(time_shift),
+            end=float(note.end) + float(time_shift),
+            pitch=int(note.pitch) + int(pitch_shift),
+            velocity=int(note.velocity),
+            track_index=note.track_index,
+        )
+        for note in notes
+    ]
+
+
+def _candidate_time_shifts(expected_notes: list[NoteEvent], predicted_notes: list[NoteEvent]) -> list[float]:
+    candidates = {0.0}
+    expected_first = min((note.start for note in expected_notes), default=None)
+    predicted_first = min((note.start for note in predicted_notes), default=None)
+    if expected_first is not None and predicted_first is not None:
+        candidates.add(round(expected_first - predicted_first, 3))
+
+    expected_median_start = _median([note.start for note in expected_notes])
+    predicted_median_start = _median([note.start for note in predicted_notes])
+    if expected_median_start is not None and predicted_median_start is not None:
+        candidates.add(round(expected_median_start - predicted_median_start, 3))
+
+    for shift in (-90.0, -60.0, -45.0, -32.0, -24.0, -16.0, -12.0, -8.0, -4.0, 4.0, 8.0, 12.0, 16.0, 24.0, 32.0, 45.0, 60.0, 90.0):
+        candidates.add(shift)
+    return sorted(candidates)
+
+
+def _infer_reference_track_suspect_reasons(
+    *,
+    base_metrics: MidiMetrics,
+    best_octave: tuple[float, float, int, int],
+    best_time: tuple[float, float, int, float],
+    expected_notes: list[NoteEvent],
+    predicted_notes: list[NoteEvent],
+    median_pitch_delta: float | None,
+) -> list[str]:
+    reasons: list[str] = []
+    if not expected_notes or not predicted_notes:
+        return reasons
+
+    base_recall = float(base_metrics.note_recall)
+    octave_recall, _, octave_matched, octave_shift = best_octave
+    time_recall, _, time_matched, time_shift = best_time
+    expected_first = min(note.start for note in expected_notes)
+    predicted_first = min(note.start for note in predicted_notes)
+
+    octave_shift_plausible = (
+        abs(octave_shift) in {12, 24}
+        and octave_matched >= max(3, int(base_metrics.expected_note_count * 0.05))
+        and (octave_matched >= base_metrics.matched_note_count + 3 or base_metrics.octave_error_rate > 0.3)
+    )
+    if octave_shift_plausible:
+        reasons.append("octave_shift_improves_alignment")
+    if octave_shift_plausible and octave_recall >= max(0.05, base_recall * 0.8):
+        reasons.append("possible_reference_octave_mismatch")
+    if abs(time_shift) >= 15.0 and time_matched >= max(3, base_metrics.matched_note_count + 3):
+        reasons.append("time_shift_improves_alignment")
+    if time_recall >= max(0.05, base_recall * 2.0) and time_matched >= max(5, base_metrics.matched_note_count + 5):
+        reasons.append("possible_reference_time_offset")
+    if expected_first + 15.0 < predicted_first and base_metrics.matched_note_count < 10:
+        reasons.append("expected_track_starts_before_vocal")
+    if median_pitch_delta is not None and abs(median_pitch_delta) >= 10.0 and base_metrics.pitch_accuracy < 0.2:
+        reasons.append("median_pitch_range_mismatch")
+    return reasons
+
+
+def _median_pitch(notes: list[NoteEvent]) -> float | None:
+    return _median([note.pitch for note in notes])
+
+
+def _median(values: list[float | int]) -> float | None:
+    if not values:
+        return None
+    sorted_values = sorted(float(value) for value in values)
+    midpoint = len(sorted_values) // 2
+    if len(sorted_values) % 2 == 1:
+        return sorted_values[midpoint]
+    return (sorted_values[midpoint - 1] + sorted_values[midpoint]) / 2.0
+
+
+def _pitch_range(notes: list[NoteEvent]) -> list[int | None]:
+    if not notes:
+        return [None, None]
+    pitches = [int(note.pitch) for note in notes]
+    return [min(pitches), max(pitches)]
+
+
+def _coverage_and_longest_silence(notes: list[NoteEvent], *, duration_basis: float) -> tuple[float, float]:
+    if duration_basis <= 0:
+        return 0.0, 0.0
+    intervals = sorted((max(0.0, note.start), min(duration_basis, note.end)) for note in notes if note.end > note.start)
+    coverage = 0.0
+    longest_silence = 0.0
+    current_end = 0.0
+    for start, end in intervals:
+        if end <= start:
+            continue
+        if start > current_end:
+            longest_silence = max(longest_silence, start - current_end)
+            coverage += end - start
+            current_end = end
+        elif end > current_end:
+            coverage += end - current_end
+            current_end = end
+    longest_silence = max(longest_silence, duration_basis - current_end)
+    return coverage, longest_silence
 
 
 def _safe_div(numerator: float, denominator: float) -> float:

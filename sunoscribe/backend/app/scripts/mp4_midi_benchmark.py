@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 import json
+import logging
 import os
 from pathlib import Path
 import shutil
@@ -19,9 +21,13 @@ from app.modules.benchmark import (
     BenchmarkSample,
     MidiMetricConfig,
     MidiReadError,
+    build_midi_diagnostics,
     build_dataset_report,
+    compute_midi_alignment_diagnostics,
+    compute_midi_audibility_metrics,
     compute_midi_metrics,
     find_midi_track_index_by_name,
+    infer_midi_failure_modes,
     load_manifest,
     read_midi_notes,
     read_midi_track_info,
@@ -53,8 +59,19 @@ class SampleRunResult:
     produced_midi_path: Path | None
     metrics: dict[str, Any] | None
     stage_records: list[StageRecord]
+    quality_gate: dict[str, Any] | None = None
+    logs: dict[str, str] = field(default_factory=dict)
+    workspace_path: Path | None = None
     error: dict[str, Any] | None = None
     warnings: list[str] = field(default_factory=list)
+
+
+QUALITY_GATE_THRESHOLDS: dict[str, float | int] = {
+    "first_note_delay_sec_max": 15.0,
+    "midi_coverage_ratio_min": 0.45,
+    "note_recall_min": 0.05,
+    "matched_notes_min": 10,
+}
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -109,7 +126,7 @@ def main(argv: list[str] | None = None) -> int:
             readiness_report=readiness.to_dict(),
         )
         print(f"readiness failed; report written to {run_root / 'readiness_report.json'}", file=sys.stderr)
-        return 2
+        return 1
     config_snapshot = _build_config_snapshot(args=args, run_id=run_id, manifest=manifest)
     _write_json(run_root / "config.json", config_snapshot)
 
@@ -121,7 +138,6 @@ def main(argv: list[str] | None = None) -> int:
                 manifest=manifest,
                 run_root=run_root,
                 projects_root=projects_root,
-                keep_project_workspaces=args.keep_project_workspaces,
                 metric_config=MidiMetricConfig(onset_tolerance_sec=args.onset_tolerance_ms / 1000.0),
             )
         )
@@ -135,8 +151,12 @@ def main(argv: list[str] | None = None) -> int:
         dataset_report=dataset_report.to_dict(),
         readiness_report=readiness.to_dict(),
     )
-    failed = [result for result in results if result.status != "success"]
-    return 1 if failed else 0
+    _write_quality_diagnostics(run_root=run_root, results=results)
+    if any(result.status == "failed" for result in results):
+        return 1
+    if any(result.status == "quality_failed" for result in results):
+        return 2
+    return 0
 
 
 async def _run_sample(
@@ -145,17 +165,46 @@ async def _run_sample(
     manifest: BenchmarkManifest,
     run_root: Path,
     projects_root: Path,
-    keep_project_workspaces: bool,
     metric_config: MidiMetricConfig,
 ) -> SampleRunResult:
     sample_run_dir = run_root / sample.id
     sample_run_dir.mkdir(parents=True, exist_ok=True)
+    logs_dir = sample_run_dir / "logs"
+    logs_dir.mkdir(parents=True, exist_ok=True)
+    logs = {
+        "stdout": str(logs_dir / "stdout.log"),
+        "stderr": str(logs_dir / "stderr.log"),
+        "python_logging": str(logs_dir / "python_logging.log"),
+    }
+    with _sample_logging_context(logs=logs):
+        return await _run_sample_logged(
+            sample=sample,
+            manifest=manifest,
+            sample_run_dir=sample_run_dir,
+            projects_root=projects_root,
+            logs=logs,
+            metric_config=metric_config,
+        )
+
+
+async def _run_sample_logged(
+    *,
+    sample: BenchmarkSample,
+    manifest: BenchmarkManifest,
+    sample_run_dir: Path,
+    projects_root: Path,
+    logs: dict[str, str],
+    metric_config: MidiMetricConfig,
+) -> SampleRunResult:
     stage_records: list[StageRecord] = []
     produced_midi_path: Path | None = None
     metrics_payload: dict[str, Any] | None = None
+    quality_gate_payload: dict[str, Any] | None = None
     warnings: list[str] = []
     error_payload: dict[str, Any] | None = None
     project_id = _project_id_for_sample(sample.id)
+    project_dir = projects_root / project_id
+    status = "failed"
 
     try:
         validation_record = _validate_sample_stage(sample=sample, root=manifest.root)
@@ -180,6 +229,8 @@ async def _run_sample(
         warnings.extend(str(warning) for warning in result_dict.get("warnings") or [])
         produced_midi_path = Path(str(analysis_result.midi_path)) if analysis_result.midi_path else None
         outputs = _pipeline_outputs(result_dict)
+        outputs["workspace_path"] = str(project_dir)
+        outputs["logs"] = logs
         required_errors = _required_pipeline_errors(result_dict, produced_midi_path)
         pipeline_status = "success" if not required_errors else "failed"
         stage_records.append(
@@ -208,17 +259,19 @@ async def _run_sample(
         if metrics_record.status != "success":
             raise RuntimeError("MIDI metrics failed")
         _write_json(sample_run_dir / "metrics.json", metrics_payload)
-        status = "success"
+        quality_record, quality_gate_payload = _quality_gate_stage(metrics_payload=metrics_payload)
+        stage_records.append(quality_record)
+        _write_json(sample_run_dir / "quality_gate.json", quality_gate_payload)
+        status = "success" if quality_record.status == "success" else "quality_failed"
     except Exception as exc:
         status = "failed"
         error_payload = _error_payload(exc)
         _write_json(sample_run_dir / "error.json", error_payload)
     finally:
-        _write_json(sample_run_dir / "stage_status.json", {"stages": [record.to_dict() for record in stage_records]})
-        if not keep_project_workspaces:
-            project_dir = projects_root / project_id
-            if project_dir.exists():
-                shutil.rmtree(project_dir, ignore_errors=True)
+        _write_json(
+            sample_run_dir / "stage_status.json",
+            {"stages": [record.to_dict() for record in stage_records], "logs": logs, "workspace_path": str(project_dir)},
+        )
 
     return SampleRunResult(
         sample_id=sample.id,
@@ -227,6 +280,9 @@ async def _run_sample(
         produced_midi_path=sample_run_dir / "produced.mid" if (sample_run_dir / "produced.mid").exists() else produced_midi_path,
         metrics=metrics_payload,
         stage_records=stage_records,
+        quality_gate=quality_gate_payload,
+        logs=logs,
+        workspace_path=project_dir,
         error=error_payload,
         warnings=warnings,
     )
@@ -282,6 +338,10 @@ def _compute_metrics_stage(
             predicted_lead_track = next((track.index for track in predicted_tracks if track.note_count > 0), None)
         predicted_notes = read_midi_notes(produced_midi_path, track_index=predicted_lead_track)
         metrics = compute_midi_metrics(expected_notes, predicted_notes, config=metric_config)
+        audibility = compute_midi_audibility_metrics(expected_notes, predicted_notes)
+        alignment = compute_midi_alignment_diagnostics(expected_notes, predicted_notes, config=metric_config)
+        diagnostics = build_midi_diagnostics(metrics, audibility, alignment)
+        failure_modes = infer_midi_failure_modes(metrics, audibility, alignment)
         hook_track = next(
             (track for track in predicted_tracks if str(track.name or "").strip().lower() == "instrumental hook"),
             None,
@@ -297,6 +357,10 @@ def _compute_metrics_stage(
             "expected_tracks": [track.to_dict() for track in read_midi_track_info(sample.expected_midi)],
             "predicted_tracks": [track.to_dict() for track in predicted_tracks],
             "metrics": metrics.to_dict(),
+            "audibility": audibility.to_dict(),
+            "alignment": alignment.to_dict(),
+            "diagnostics": diagnostics,
+            "suspected_failure_modes": failure_modes,
         }
         return (
             StageRecord(
@@ -305,7 +369,12 @@ def _compute_metrics_stage(
                 started_at=started_at,
                 duration_sec=time.perf_counter() - start,
                 inputs={"expected_midi": str(sample.expected_midi), "produced_midi": str(produced_midi_path)},
-                outputs={"metrics": metrics.to_dict()},
+                outputs={
+                    "metrics": metrics.to_dict(),
+                    "audibility": audibility.to_dict(),
+                    "alignment": alignment.to_dict(),
+                    "suspected_failure_modes": failure_modes,
+                },
             ),
             payload,
         )
@@ -323,6 +392,83 @@ def _compute_metrics_stage(
         )
 
 
+def _quality_gate_stage(*, metrics_payload: dict[str, Any]) -> tuple[StageRecord, dict[str, Any]]:
+    started_at = _utc_now()
+    start = time.perf_counter()
+    metrics = metrics_payload.get("metrics") or {}
+    audibility = metrics_payload.get("audibility") or {}
+    checks = [
+        _quality_check_max(
+            name="first_note_delay_sec",
+            actual=audibility.get("first_note_delay_sec"),
+            threshold=QUALITY_GATE_THRESHOLDS["first_note_delay_sec_max"],
+        ),
+        _quality_check_min(
+            name="midi_coverage_ratio",
+            actual=audibility.get("midi_coverage_ratio"),
+            threshold=QUALITY_GATE_THRESHOLDS["midi_coverage_ratio_min"],
+        ),
+        _quality_check_min(
+            name="note_recall",
+            actual=metrics.get("note_recall"),
+            threshold=QUALITY_GATE_THRESHOLDS["note_recall_min"],
+        ),
+        _quality_check_min(
+            name="matched_notes",
+            actual=metrics.get("matched_note_count"),
+            threshold=QUALITY_GATE_THRESHOLDS["matched_notes_min"],
+        ),
+    ]
+    failed_checks = [check for check in checks if not check["passed"]]
+    payload = {
+        "status": "success" if not failed_checks else "quality_failed",
+        "thresholds": QUALITY_GATE_THRESHOLDS,
+        "checks": checks,
+        "failed_checks": failed_checks,
+        "diagnostic_only": {
+            "note_f1": metrics.get("note_f1"),
+            "note_precision": metrics.get("note_precision"),
+            "pitch_accuracy": metrics.get("pitch_accuracy"),
+            "octave_error_rate": metrics.get("octave_error_rate"),
+        },
+        "suspected_failure_modes": metrics_payload.get("suspected_failure_modes") or [],
+    }
+    return (
+        StageRecord(
+            name="quality_gate",
+            status=payload["status"],
+            started_at=started_at,
+            duration_sec=time.perf_counter() - start,
+            inputs={"metrics_json": metrics_payload.get("produced_midi")},
+            outputs=payload,
+            error={"failed_checks": failed_checks} if failed_checks else None,
+        ),
+        payload,
+    )
+
+
+def _quality_check_min(*, name: str, actual: Any, threshold: float | int) -> dict[str, Any]:
+    value = _as_float(actual)
+    return {
+        "name": name,
+        "operator": ">=",
+        "actual": actual,
+        "threshold": threshold,
+        "passed": value is not None and value >= float(threshold),
+    }
+
+
+def _quality_check_max(*, name: str, actual: Any, threshold: float | int) -> dict[str, Any]:
+    value = _as_float(actual)
+    return {
+        "name": name,
+        "operator": "<=",
+        "actual": actual,
+        "threshold": threshold,
+        "passed": value is not None and value <= float(threshold),
+    }
+
+
 def _write_summary_files(
     *,
     run_root: Path,
@@ -331,13 +477,21 @@ def _write_summary_files(
     dataset_report: dict[str, Any],
     readiness_report: dict[str, Any] | None = None,
 ) -> None:
-    metrics_values = [result.metrics["metrics"] for result in results if result.metrics and result.metrics.get("metrics")]
+    metric_payloads = [result.metrics for result in results if result.metrics]
+    metrics_values = [payload["metrics"] for payload in metric_payloads if payload.get("metrics")]
+    status_counts = {
+        "success": sum(1 for result in results if result.status == "success"),
+        "quality_failed": sum(1 for result in results if result.status == "quality_failed"),
+        "failed": sum(1 for result in results if result.status == "failed"),
+    }
     summary = {
         "run_root": str(run_root),
         "created_at": _utc_now(),
         "manifest": manifest.to_dict(),
         "dataset": dataset_report,
         "readiness": readiness_report,
+        "status_counts": status_counts,
+        "quality_gate_thresholds": QUALITY_GATE_THRESHOLDS,
         "results": [
             {
                 "sample_id": result.sample_id,
@@ -345,12 +499,19 @@ def _write_summary_files(
                 "run_dir": str(result.run_dir),
                 "produced_midi_path": str(result.produced_midi_path) if result.produced_midi_path else None,
                 "metrics": result.metrics.get("metrics") if result.metrics else None,
+                "audibility": result.metrics.get("audibility") if result.metrics else None,
+                "alignment": result.metrics.get("alignment") if result.metrics else None,
+                "diagnostics": result.metrics.get("diagnostics") if result.metrics else None,
+                "suspected_failure_modes": result.metrics.get("suspected_failure_modes") if result.metrics else [],
+                "quality_gate": result.quality_gate,
+                "logs": result.logs,
+                "workspace_path": str(result.workspace_path) if result.workspace_path else None,
                 "error": result.error,
                 "warnings": result.warnings,
             }
             for result in results
         ],
-        "aggregate_metrics": _aggregate_metrics(metrics_values),
+        "aggregate_metrics": _aggregate_metrics(metrics_values, metric_payloads=metric_payloads),
     }
     _write_json(run_root / "summary.json", summary)
     (run_root / "summary.md").write_text(_summary_markdown(summary), encoding="utf-8")
@@ -365,25 +526,36 @@ def _summary_markdown(summary: dict[str, Any]) -> str:
         "",
         f"- Created at: `{summary.get('created_at')}`",
         f"- Samples run: `{len(results)}`",
-        f"- Success: `{sum(1 for result in results if result.get('status') == 'success')}`",
-        f"- Failed: `{sum(1 for result in results if result.get('status') != 'success')}`",
+        f"- Success: `{(summary.get('status_counts') or {}).get('success', 0)}`",
+        f"- Quality failed: `{(summary.get('status_counts') or {}).get('quality_failed', 0)}`",
+        f"- Failed: `{(summary.get('status_counts') or {}).get('failed', 0)}`",
         f"- Mean note F1: `{aggregate.get('note_f1_mean')}`",
         f"- Mean pitch accuracy: `{aggregate.get('pitch_accuracy_mean')}`",
+        f"- Mean MIDI coverage: `{aggregate.get('midi_coverage_ratio_mean')}`",
+        f"- Mean first-note delay: `{aggregate.get('first_note_delay_sec_mean')}`",
         f"- Readiness: `{readiness.get('status', 'not_checked')}`",
         "",
-        "| Sample | Status | Note F1 | Pitch Acc | Onset MAE ms | Error |",
-        "| --- | --- | ---: | ---: | ---: | --- |",
+        "| Sample | Status | Note F1 | Recall | Matched | Coverage | First Delay s | Best Oct Rec | Best Time Rec | Pitch Acc | Failure Modes | Error |",
+        "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- | --- |",
     ]
     for result in results:
         metrics = result.get("metrics") or {}
+        audibility = result.get("audibility") or {}
+        alignment = result.get("alignment") or {}
         error = result.get("error") or {}
         lines.append(
-            "| {sample} | {status} | {f1} | {pitch} | {onset} | {error} |".format(
+            "| {sample} | {status} | {f1} | {recall} | {matched} | {coverage} | {delay} | {best_oct} | {best_time} | {pitch} | {modes} | {error} |".format(
                 sample=result.get("sample_id"),
                 status=result.get("status"),
                 f1=_fmt_metric(metrics.get("note_f1")),
+                recall=_fmt_metric(metrics.get("note_recall")),
+                matched=metrics.get("matched_note_count") if metrics else "",
+                coverage=_fmt_metric(audibility.get("midi_coverage_ratio")),
+                delay=_fmt_metric(audibility.get("first_note_delay_sec")),
+                best_oct=_fmt_metric(alignment.get("best_octave_shift_note_recall")),
+                best_time=_fmt_metric(alignment.get("best_time_shift_note_recall")),
                 pitch=_fmt_metric(metrics.get("pitch_accuracy")),
-                onset=_fmt_metric(metrics.get("onset_mae_ms")),
+                modes=", ".join(result.get("suspected_failure_modes") or []),
                 error=(error.get("type") or ""),
             )
         )
@@ -414,7 +586,7 @@ def _summary_markdown(summary: dict[str, Any]) -> str:
     return "\n".join(lines) + "\n"
 
 
-def _aggregate_metrics(metrics_values: list[dict[str, Any]]) -> dict[str, Any]:
+def _aggregate_metrics(metrics_values: list[dict[str, Any]], *, metric_payloads: list[dict[str, Any]] | None = None) -> dict[str, Any]:
     keys = ["note_precision", "note_recall", "note_f1", "pitch_accuracy", "duration_overlap", "octave_error_rate"]
     aggregate: dict[str, Any] = {"metric_sample_count": len(metrics_values)}
     for key in keys:
@@ -422,6 +594,10 @@ def _aggregate_metrics(metrics_values: list[dict[str, Any]]) -> dict[str, Any]:
         aggregate[f"{key}_mean"] = (sum(values) / len(values)) if values else None
     onset_values = [float(metrics["onset_mae_ms"]) for metrics in metrics_values if metrics.get("onset_mae_ms") is not None]
     aggregate["onset_mae_ms_mean"] = (sum(onset_values) / len(onset_values)) if onset_values else None
+    audibility_values = [payload.get("audibility") or {} for payload in metric_payloads or []]
+    for key in ["midi_coverage_ratio", "first_note_delay_sec", "duration_ratio", "longest_silence_sec"]:
+        values = [float(item[key]) for item in audibility_values if item.get(key) is not None]
+        aggregate[f"{key}_mean"] = (sum(values) / len(values)) if values else None
     return aggregate
 
 
@@ -456,6 +632,159 @@ def _required_pipeline_errors(result_dict: dict[str, Any], produced_midi_path: P
     if produced_midi_path is None or not produced_midi_path.exists():
         errors.append({"code": "MIDI_EXPORT_FAILED"})
     return errors
+
+
+class _TeeStream:
+    def __init__(self, *streams: Any) -> None:
+        self._streams = streams
+
+    def write(self, data: str) -> int:
+        for stream in self._streams:
+            stream.write(data)
+            stream.flush()
+        return len(data)
+
+    def flush(self) -> None:
+        for stream in self._streams:
+            stream.flush()
+
+    def isatty(self) -> bool:
+        return any(bool(getattr(stream, "isatty", lambda: False)()) for stream in self._streams)
+
+
+@contextlib.contextmanager
+def _sample_logging_context(*, logs: dict[str, str]):
+    stdout_path = Path(logs["stdout"])
+    stderr_path = Path(logs["stderr"])
+    logging_path = Path(logs["python_logging"])
+    stdout_path.parent.mkdir(parents=True, exist_ok=True)
+    handler = logging.FileHandler(logging_path, encoding="utf-8")
+    handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s - %(message)s"))
+    root_logger = logging.getLogger()
+    root_logger.addHandler(handler)
+    with stdout_path.open("a", encoding="utf-8", buffering=1) as stdout_file, stderr_path.open(
+        "a", encoding="utf-8", buffering=1
+    ) as stderr_file:
+        with contextlib.redirect_stdout(_TeeStream(sys.__stdout__, stdout_file)), contextlib.redirect_stderr(
+            _TeeStream(sys.__stderr__, stderr_file)
+        ):
+            try:
+                yield
+            finally:
+                root_logger.removeHandler(handler)
+                handler.close()
+
+
+def _write_quality_diagnostics(*, run_root: Path, results: list[SampleRunResult]) -> None:
+    samples: list[dict[str, Any]] = []
+    for result in results:
+        metrics = result.metrics.get("metrics") if result.metrics else None
+        audibility = result.metrics.get("audibility") if result.metrics else None
+        alignment = result.metrics.get("alignment") if result.metrics else None
+        samples.append(
+            {
+                "sample_id": result.sample_id,
+                "status": result.status,
+                "run_dir": str(result.run_dir),
+                "produced_midi_path": str(result.produced_midi_path) if result.produced_midi_path else None,
+                "metrics_json": str(result.run_dir / "metrics.json") if result.metrics else None,
+                "quality_gate_json": str(result.run_dir / "quality_gate.json") if result.quality_gate else None,
+                "stage_status_json": str(result.run_dir / "stage_status.json"),
+                "logs": result.logs,
+                "workspace_path": str(result.workspace_path) if result.workspace_path else None,
+                "metrics": metrics,
+                "audibility": audibility,
+                "alignment": alignment,
+                "diagnostics": result.metrics.get("diagnostics") if result.metrics else None,
+                "quality_gate": result.quality_gate,
+                "suspected_failure_modes": result.metrics.get("suspected_failure_modes") if result.metrics else [],
+                "error": result.error,
+            }
+        )
+    payload = {
+        "run_root": str(run_root),
+        "created_at": _utc_now(),
+        "quality_gate_thresholds": QUALITY_GATE_THRESHOLDS,
+        "status_counts": {
+            "success": sum(1 for result in results if result.status == "success"),
+            "quality_failed": sum(1 for result in results if result.status == "quality_failed"),
+            "failed": sum(1 for result in results if result.status == "failed"),
+        },
+        "samples": samples,
+    }
+    _write_json(run_root / "quality_diagnostics.json", payload)
+    (run_root / "quality_diagnostics.md").write_text(_quality_diagnostics_markdown(payload), encoding="utf-8")
+
+
+def _quality_diagnostics_markdown(payload: dict[str, Any]) -> str:
+    samples = payload.get("samples") or []
+    metric_samples = [sample for sample in samples if sample.get("metrics")]
+    lines = [
+        "# Benchmark Quality Diagnostics",
+        "",
+        f"- Run root: `{payload.get('run_root')}`",
+        f"- Created at: `{payload.get('created_at')}`",
+        f"- Success: `{(payload.get('status_counts') or {}).get('success', 0)}`",
+        f"- Quality failed: `{(payload.get('status_counts') or {}).get('quality_failed', 0)}`",
+        f"- Failed: `{(payload.get('status_counts') or {}).get('failed', 0)}`",
+        "",
+        "## Worst By Note F1",
+        "",
+        "| Sample | Status | F1 | Recall | Matched | Coverage | First Delay s | Best Oct Rec | Best Time Rec | Failure Modes |",
+        "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |",
+    ]
+    for sample in sorted(metric_samples, key=lambda item: _sort_float((item.get("metrics") or {}).get("note_f1")))[:20]:
+        lines.append(_quality_table_row(sample))
+    lines.extend(
+        [
+            "",
+            "## Worst By MIDI Coverage",
+            "",
+            "| Sample | Status | F1 | Recall | Matched | Coverage | First Delay s | Best Oct Rec | Best Time Rec | Failure Modes |",
+            "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |",
+        ]
+    )
+    for sample in sorted(metric_samples, key=lambda item: _sort_float((item.get("audibility") or {}).get("midi_coverage_ratio")))[:20]:
+        lines.append(_quality_table_row(sample))
+    lines.extend(
+        [
+            "",
+            "## Worst By First-Note Delay",
+            "",
+            "| Sample | Status | F1 | Recall | Matched | Coverage | First Delay s | Best Oct Rec | Best Time Rec | Failure Modes |",
+            "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |",
+        ]
+    )
+    for sample in sorted(
+        metric_samples,
+        key=lambda item: _sort_float((item.get("audibility") or {}).get("first_note_delay_sec")),
+        reverse=True,
+    )[:20]:
+        lines.append(_quality_table_row(sample))
+    lines.extend(["", "## Logs", ""])
+    for sample in samples:
+        logs = sample.get("logs") or {}
+        if logs:
+            lines.append(f"- `{sample.get('sample_id')}`: stdout `{logs.get('stdout')}`, stderr `{logs.get('stderr')}`, logging `{logs.get('python_logging')}`")
+    return "\n".join(lines) + "\n"
+
+
+def _quality_table_row(sample: dict[str, Any]) -> str:
+    metrics = sample.get("metrics") or {}
+    audibility = sample.get("audibility") or {}
+    alignment = sample.get("alignment") or {}
+    return "| {sample_id} | {status} | {f1} | {recall} | {matched} | {coverage} | {delay} | {best_oct} | {best_time} | {modes} |".format(
+        sample_id=sample.get("sample_id"),
+        status=sample.get("status"),
+        f1=_fmt_metric(metrics.get("note_f1")),
+        recall=_fmt_metric(metrics.get("note_recall")),
+        matched=metrics.get("matched_note_count"),
+        coverage=_fmt_metric(audibility.get("midi_coverage_ratio")),
+        delay=_fmt_metric(audibility.get("first_note_delay_sec")),
+        best_oct=_fmt_metric(alignment.get("best_octave_shift_note_recall")),
+        best_time=_fmt_metric(alignment.get("best_time_shift_note_recall")),
+        modes=", ".join(sample.get("suspected_failure_modes") or []),
+    )
 
 
 def _parse_args(argv: list[str] | None) -> argparse.Namespace:
@@ -552,6 +881,20 @@ def _fmt_metric(value: Any) -> str:
         return f"{float(value):.4f}"
     except Exception:
         return str(value)
+
+
+def _as_float(value: Any) -> float | None:
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _sort_float(value: Any) -> float:
+    parsed = _as_float(value)
+    return parsed if parsed is not None else float("inf")
 
 
 if __name__ == "__main__":

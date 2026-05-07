@@ -791,3 +791,34 @@ python -m app.scripts.mp4_midi_benchmark run --manifest ../samples/manifest.v1.j
 - `expected_melody_track` 在 manifest 中手工标注。
 - production profile 是默认门禁，不允许 RMVPE 或 required separation 静默 fallback。
 - 第一次落地只记录质量指标，不设置硬性 `note_f1` 阈值。
+
+### 16.4 Quality gate and diagnostics update
+
+The v1 benchmark now separates pipeline correctness from output quality:
+
+- Exit `0`: every selected sample is `success`.
+- Exit `1`: at least one sample has a pipeline/program failure.
+- Exit `2`: the pipeline completed, but at least one sample is `quality_failed`.
+
+Hard quality gate thresholds:
+
+- `first_note_delay_sec <= 15.0`
+- `midi_coverage_ratio >= 0.45`
+- `note_recall >= 0.05`
+- `matched_notes >= 10`
+
+`note_f1`, precision, pitch accuracy, and octave error rate are diagnostic-only in this first version. They are recorded in `metrics.json`, `summary.md`, and `quality_diagnostics.md`, but do not directly fail a sample.
+
+Additional per-song outputs:
+
+- `quality_gate.json`
+- `logs/stdout.log`
+- `logs/stderr.log`
+- `logs/python_logging.log`
+
+Per-run outputs now also include:
+
+- `quality_diagnostics.json`
+- `quality_diagnostics.md`
+
+Project workspaces are always retained under `samples/benchmark_runs/<run_id>/projects/<project_id>/` for MIR diagnosis. This keeps canonical audio, separated vocals/accompaniment, F0 tracks, note candidates, rhythm grid, and ScoreIR artifacts available after benchmark completion.

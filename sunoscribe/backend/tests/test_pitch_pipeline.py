@@ -1,12 +1,33 @@
 import unittest
 from unittest.mock import patch
 
+import numpy as np
+
 from app.modules.pitch.config import PitchDetectionConfig
+from app.modules.pitch.detector import PitchDetector
 from app.modules.pitch.pipeline import PitchPipeline
 from app.modules.pitch.types import ArrangementDecision, ArrangementSegmentDecision, Note, PitchPipelineRequest
 
 
 class TestPitchPipeline(unittest.TestCase):
+    def test_frames_to_notes_keeps_moderate_vibrato_phrase(self):
+        detector = PitchDetector(PitchDetectionConfig())
+        times = np.arange(40, dtype=float) * 0.01
+        midi_values = 60.0 + 1.2 * np.sin(np.linspace(0.0, 2.0 * np.pi, times.size))
+        frequencies = 440.0 * (2.0 ** ((midi_values - 69.0) / 12.0))
+        confidences = np.full(times.shape, 0.9, dtype=float)
+
+        notes = detector._frames_to_notes(
+            times=times,
+            frequencies=frequencies,
+            confidences=confidences,
+            duration_sec=float(times[-1]) + 0.01,
+        )
+
+        self.assertEqual(len(notes), 1)
+        self.assertEqual(notes[0].pitch, "C4")
+        self.assertGreater(notes[0].end_time - notes[0].start_time, 0.35)
+
     def test_run_with_mocks(self):
         pipeline = PitchPipeline()
 

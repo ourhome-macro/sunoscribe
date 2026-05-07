@@ -9,6 +9,7 @@ This runbook defines the first safe MVP trial path for SunoScribe's backend/audi
 - Production pitch uses RMVPE with fallback disabled.
 - The benchmark manifest contains 19 enabled paired samples under `samples/source_mp4` and `samples/source_mid`.
 - The benchmark CLI can validate data, check MVP runtime readiness, run one sample, or run all enabled samples.
+- Benchmark `success` now means the pipeline completed and the first-pass audibility quality gate passed; pipeline failures and quality failures are separate states.
 
 ## Step 0: Runtime Doctor
 
@@ -61,7 +62,7 @@ Expected v1 dataset state:
 Run one short sample first:
 
 ```powershell
-.venv310\Scripts\python.exe -m app.scripts.mp4_midi_benchmark run --manifest ..\samples\manifest.v1.json --sample-id mojito --keep-project-workspaces
+.venv310\Scripts\python.exe -m app.scripts.mp4_midi_benchmark run --manifest ..\samples\manifest.v1.json --sample-id mojito
 ```
 
 Expected per-song outputs:
@@ -69,26 +70,39 @@ Expected per-song outputs:
 - `produced.mid`
 - `stage_status.json`
 - `metrics.json`
+- `quality_gate.json`
 - `artifacts.json`
+- `logs/stdout.log`, `logs/stderr.log`, `logs/python_logging.log`
 - `error.json` only when the sample fails
+
+Per-sample project workspaces are always retained under `samples/benchmark_runs/<run_id>/projects/<project_id>/` so `vocals.wav`, `f0_track.json`, `note_candidates.json`, and `score_ir.json` remain available for diagnosis. `--keep-project-workspaces` is kept only as a compatibility no-op.
 
 Required stages are canonical audio, vocals stem, F0 track, note candidates, score data, and MIDI export.
 
-## Step 3: 19-Song Observe-Only Benchmark
+## Step 3: 19-Song Quality-Gated Benchmark
 
 ```powershell
 .venv310\Scripts\python.exe -m app.scripts.mp4_midi_benchmark run --manifest ..\samples\manifest.v1.json
 ```
 
-Use the first successful full run as an observation baseline. Do not set hard `note_f1` gates until at least two or three stable runs exist.
+Exit codes are intentionally distinct:
+
+- `0`: all selected samples are `success`.
+- `1`: at least one sample has a pipeline/program failure.
+- `2`: no pipeline failures occurred, but at least one sample is `quality_failed`.
+
+First-pass hard quality gates are `first_note_delay_sec <= 15.0`, `midi_coverage_ratio >= 0.45`, `note_recall >= 0.05`, and `matched_notes >= 10`. `note_f1` is diagnostic-only for now and appears in summaries and quality reports.
 
 ## Failure Reading Order
 
 1. `readiness_report.json`: dependency/model readiness.
 2. `dataset_report.json`: manifest, checksum, expected track problems.
 3. `<sample_id>/stage_status.json`: stage-level failure.
-4. `<sample_id>/error.json`: exception type and traceback summary.
-5. `<sample_id>/metrics.json`: note-level quality, only if MIDI export succeeded.
+4. `<sample_id>/quality_gate.json`: quality gate checks when MIDI metrics succeeded.
+5. `<sample_id>/metrics.json`: note-level quality, audibility metrics, diagnostics, and suspected failure modes.
+6. `<sample_id>/logs/*.log`: captured stdout/stderr/python logging for the sample.
+7. `<sample_id>/error.json`: exception type and traceback summary, only for pipeline/program failures.
+8. `quality_diagnostics.md`: run-level low-F1, low-coverage, and first-note-delay triage.
 
 ## MVP Success Criteria
 

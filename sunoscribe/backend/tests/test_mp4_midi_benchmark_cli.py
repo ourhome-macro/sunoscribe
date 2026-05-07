@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from app.modules.benchmark.dataset import BenchmarkSample
@@ -31,6 +32,62 @@ def _write_dual_track_midi(path: Path) -> None:
     hook.notes.append(pretty_midi.Note(velocity=90, pitch=72, start=0.0, end=0.5))
     midi.instruments.extend([lead, hook])
     midi.write(str(path))
+
+
+def _write_sequence_midi(path: Path, *, start_offset: float = 0.0, note_count: int = 12, duration: float = 1.0) -> None:
+    import pretty_midi
+
+    midi = pretty_midi.PrettyMIDI(initial_tempo=120)
+    instrument = pretty_midi.Instrument(program=0, name="Lead Vocal")
+    for index in range(note_count):
+        start = start_offset + index * duration
+        instrument.notes.append(pretty_midi.Note(velocity=90, pitch=60 + (index % 3), start=start, end=start + duration))
+    midi.instruments.append(instrument)
+    midi.write(str(path))
+
+
+class _FakeAudioAnalysisService:
+    produced_midi_source: Path | None = None
+    should_raise = False
+
+    def __init__(self, *, projects_root: Path) -> None:
+        self.projects_root = Path(projects_root)
+
+    async def process_audio(self, input_path: Path, options: object) -> SimpleNamespace:
+        if self.should_raise:
+            raise RuntimeError("pipeline exploded")
+        project_id = getattr(options, "project_id")
+        workspace = self.projects_root / project_id
+        export_dir = workspace / "exports"
+        preprocess_dir = workspace / "preprocess"
+        separation_dir = workspace / "separation"
+        pitch_dir = workspace / "pitch"
+        for directory in [export_dir, preprocess_dir, separation_dir, pitch_dir]:
+            directory.mkdir(parents=True, exist_ok=True)
+        midi_path = export_dir / "final_score.mid"
+        if self.produced_midi_source is None:
+            raise RuntimeError("missing produced MIDI fixture")
+        midi_path.write_bytes(self.produced_midi_source.read_bytes())
+        print("fake pipeline stdout")
+        return SimpleNamespace(
+            midi_path=str(midi_path),
+            to_dict=lambda: {
+                "source_audio_path": str(input_path),
+                "normalized_audio_path": str(preprocess_dir / "source.wav"),
+                "vocals_path": str(separation_dir / "vocals.wav"),
+                "accompaniment_path": str(separation_dir / "accompaniment.wav"),
+                "midi_path": str(midi_path),
+                "stem_paths": {
+                    "vocals": str(separation_dir / "vocals.wav"),
+                    "accompaniment": str(separation_dir / "accompaniment.wav"),
+                },
+                "f0_track": {"frames": []},
+                "note_candidates": {"melody_candidates": {}},
+                "rhythm_grid": {"beat_times": []},
+                "score_data": {"measures": []},
+                "warnings": [],
+            },
+        )
 
 
 class Mp4MidiBenchmarkCliTests(unittest.TestCase):
@@ -138,7 +195,7 @@ class Mp4MidiBenchmarkCliTests(unittest.TestCase):
                     ]
                 )
 
-            self.assertEqual(exit_code, 2)
+            self.assertEqual(exit_code, 1)
             self.assertTrue((output_root / "blocked_run" / "readiness_report.json").exists())
             self.assertFalse((output_root / "blocked_run" / "song").exists())
 
@@ -166,20 +223,177 @@ class Mp4MidiBenchmarkCliTests(unittest.TestCase):
         self.assertIsNotNone(payload)
         self.assertEqual(payload["metrics"]["predicted_note_count"], 1)
         self.assertEqual(payload["metrics"]["note_f1"], 1.0)
+        self.assertIn("audibility", payload)
+        self.assertIn("alignment", payload)
+        self.assertIn("diagnostics", payload)
+        self.assertIn("alignment", payload["diagnostics"])
+        self.assertIn("suspected_failure_modes", payload)
         self.assertEqual(payload["instrumental_hook_note_count"], 1)
         self.assertIsNotNone(payload["predicted_lead_track"])
+
+    def test_run_marks_quality_failed_with_exit_2_and_keeps_workspace(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            manifest = _write_manifest_fixture(root, expected_writer=lambda path: _write_sequence_midi(path, note_count=12))
+            produced = root / "low_quality.mid"
+            _write_sequence_midi(produced, start_offset=30.0, note_count=12)
+            output_root = root / "runs"
+            _FakeAudioAnalysisService.produced_midi_source = produced
+            _FakeAudioAnalysisService.should_raise = False
+
+            with patch("app.scripts.mp4_midi_benchmark.AudioAnalysisService", _FakeAudioAnalysisService):
+                exit_code = main(
+                    [
+                        "run",
+                        "--manifest",
+                        str(manifest),
+                        "--output-root",
+                        str(output_root),
+                        "--run-id",
+                        "quality_run",
+                        "--skip-checksum",
+                        "--ignore-readiness",
+                    ]
+                )
+
+            run_root = output_root / "quality_run"
+            summary = json.loads((run_root / "summary.json").read_text(encoding="utf-8"))
+            stage_status = json.loads((run_root / "song" / "stage_status.json").read_text(encoding="utf-8"))
+            quality_gate = json.loads((run_root / "song" / "quality_gate.json").read_text(encoding="utf-8"))
+
+            self.assertEqual(exit_code, 2)
+            self.assertEqual(summary["results"][0]["status"], "quality_failed")
+            self.assertIn("alignment", summary["results"][0])
+            self.assertEqual(quality_gate["status"], "quality_failed")
+            self.assertFalse((run_root / "song" / "error.json").exists())
+            self.assertTrue(Path(stage_status["workspace_path"]).exists())
+            self.assertTrue((run_root / "song" / "logs" / "stdout.log").exists())
+            self.assertTrue((run_root / "song" / "logs" / "stderr.log").exists())
+            self.assertTrue((run_root / "song" / "logs" / "python_logging.log").exists())
+            self.assertTrue((run_root / "quality_diagnostics.json").exists())
+
+    def test_run_pipeline_failure_uses_exit_1(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            manifest = _write_manifest_fixture(root, expected_writer=lambda path: _write_sequence_midi(path, note_count=12))
+            output_root = root / "runs"
+            _FakeAudioAnalysisService.should_raise = True
+
+            with patch("app.scripts.mp4_midi_benchmark.AudioAnalysisService", _FakeAudioAnalysisService):
+                exit_code = main(
+                    [
+                        "run",
+                        "--manifest",
+                        str(manifest),
+                        "--output-root",
+                        str(output_root),
+                        "--run-id",
+                        "failed_run",
+                        "--skip-checksum",
+                        "--ignore-readiness",
+                    ]
+                )
+
+            run_root = output_root / "failed_run"
+            summary = json.loads((run_root / "summary.json").read_text(encoding="utf-8"))
+            self.assertEqual(exit_code, 1)
+            self.assertEqual(summary["results"][0]["status"], "failed")
+            self.assertTrue((run_root / "song" / "error.json").exists())
+
+    def test_run_pipeline_failure_takes_precedence_over_quality_failed_exit(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            samples = root / "samples"
+            (samples / "source_mp4").mkdir(parents=True)
+            (samples / "source_mid").mkdir()
+            (samples / "source_mp4" / "Good.mp4").write_bytes(b"not real mp4")
+            (samples / "source_mp4" / "Bad.mp4").write_bytes(b"not real mp4")
+            _write_sequence_midi(samples / "source_mid" / "Good.mid", note_count=12)
+            _write_sequence_midi(samples / "source_mid" / "Bad.mid", note_count=12)
+            manifest = samples / "manifest.json"
+            manifest.write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "root": ".",
+                        "samples": [
+                            {"id": "quality", "input_mp4": "source_mp4/Good.mp4", "expected_midi": "source_mid/Good.mid", "expected_melody_track": 1},
+                            {"id": "failed", "input_mp4": "source_mp4/Bad.mp4", "expected_midi": "source_mid/Bad.mid", "expected_melody_track": 1},
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            produced = root / "low_quality.mid"
+            _write_sequence_midi(produced, start_offset=30.0, note_count=12)
+            output_root = root / "runs"
+
+            async def fake_run_sample(**kwargs):
+                from app.scripts.mp4_midi_benchmark import SampleRunResult
+
+                sample = kwargs["sample"]
+                run_dir = kwargs["run_root"] / sample.id
+                run_dir.mkdir(parents=True, exist_ok=True)
+                status = "failed" if sample.id == "failed" else "quality_failed"
+                return SampleRunResult(sample_id=sample.id, status=status, run_dir=run_dir, produced_midi_path=None, metrics=None, stage_records=[])
+
+            with patch("app.scripts.mp4_midi_benchmark._run_sample", fake_run_sample):
+                exit_code = main(
+                    [
+                        "run",
+                        "--manifest",
+                        str(manifest),
+                        "--output-root",
+                        str(output_root),
+                        "--run-id",
+                        "mixed_run",
+                        "--skip-checksum",
+                        "--ignore-readiness",
+                    ]
+                )
+
+            self.assertEqual(exit_code, 1)
+
+    def test_run_success_uses_exit_0(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            manifest = _write_manifest_fixture(root, expected_writer=lambda path: _write_sequence_midi(path, note_count=12))
+            produced = root / "good.mid"
+            _write_sequence_midi(produced, note_count=12)
+            output_root = root / "runs"
+            _FakeAudioAnalysisService.produced_midi_source = produced
+            _FakeAudioAnalysisService.should_raise = False
+
+            with patch("app.scripts.mp4_midi_benchmark.AudioAnalysisService", _FakeAudioAnalysisService):
+                exit_code = main(
+                    [
+                        "run",
+                        "--manifest",
+                        str(manifest),
+                        "--output-root",
+                        str(output_root),
+                        "--run-id",
+                        "success_run",
+                        "--skip-checksum",
+                        "--ignore-readiness",
+                    ]
+                )
+
+            summary = json.loads((output_root / "success_run" / "summary.json").read_text(encoding="utf-8"))
+            self.assertEqual(exit_code, 0)
+            self.assertEqual(summary["results"][0]["status"], "success")
 
 
 if __name__ == "__main__":
     unittest.main()
 
 
-def _write_manifest_fixture(root: Path) -> Path:
+def _write_manifest_fixture(root: Path, *, expected_writer=_write_midi) -> Path:
     samples = root / "samples"
     (samples / "source_mp4").mkdir(parents=True)
     (samples / "source_mid").mkdir()
     (samples / "source_mp4" / "Song.mp4").write_bytes(b"not real mp4")
-    _write_midi(samples / "source_mid" / "Song.mid")
+    expected_writer(samples / "source_mid" / "Song.mid")
     manifest = samples / "manifest.json"
     manifest.write_text(
         json.dumps(

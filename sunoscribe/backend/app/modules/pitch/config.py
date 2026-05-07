@@ -34,9 +34,9 @@ class PitchDetectionConfig:
     crepe_max_unvoiced_gap_sec: float = 0.03
     crepe_smoothing_window: int = 7
     crepe_note_mad_good_semitones: float = 0.18
-    crepe_note_mad_bad_semitones: float = 0.75
+    crepe_note_mad_bad_semitones: float = 1.2
     crepe_note_span_soft_semitones: float = 0.8
-    crepe_note_span_hard_semitones: float = 3.0
+    crepe_note_span_hard_semitones: float = 5.0
 
     # Quantization settings (P1)
     quantize_mode: str = "adaptive"  # "strict" / "adaptive"
