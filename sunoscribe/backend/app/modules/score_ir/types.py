@@ -120,6 +120,7 @@ class AnalysisHints:
 class ScoreIR:
     meta: ScoreMeta
     notes: List[ScoreNote] = field(default_factory=list)
+    instrumental_melody_notes: List[ScoreNote] = field(default_factory=list)
     bassline_notes: List[ScoreNote] = field(default_factory=list)
     measures: List[ScoreMeasure] = field(default_factory=list)
     chord_timeline: List[ScoreChord] = field(default_factory=list)

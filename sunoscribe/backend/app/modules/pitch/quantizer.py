@@ -49,6 +49,7 @@ class NoteQuantizer:
                     measure_num=measure_num,
                     beat_position=beat_position,
                     lyric=None,
+                    source=getattr(note, "source", None),
                 )
             )
 

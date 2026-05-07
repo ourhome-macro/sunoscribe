@@ -15,6 +15,8 @@ RMVPE_MODULE_CANDIDATES = (
     "rmvpe",
     "rmvpe.inference",
     "rmvpe.model",
+    "rmvpe_onnx",
+    "rmvpe_onnx.model",
     "infer.lib.rmvpe",
     "rvc.lib.rmvpe",
     "rvc.lib.predictors.RMVPE",

@@ -71,6 +71,102 @@ class TestVocalModule(unittest.TestCase):
             self.assertIn("accompaniment", result.stem_paths)
             self.assertEqual(mocked_save.call_count, 5)
 
+    def test_mdx_separator_falls_back_to_output_dir_cwd_for_legacy_signature(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            input_wav = root / "source.wav"
+            out_dir = root / "out"
+            input_wav.write_bytes(b"dummy")
+
+            class _LegacySeparator:
+                def separate(self, audio_path, output_dir=None):
+                    if output_dir is not None:
+                        raise TypeError("legacy signature")
+                    Path("source_(Vocals)_UVR_MDXNET_Main.wav").write_bytes(b"vocals")
+                    Path("source_(Instrumental)_UVR_MDXNET_Main.wav").write_bytes(b"instrumental")
+                    return []
+
+            class _Manager:
+                selected_device = torch.device("cpu")
+
+                def load_separator(self):
+                    return _LegacySeparator()
+
+            separator = VocalSeparator(model_manager=_Manager(), backend="mdx-net")
+            result = separator.separate(str(input_wav), str(out_dir), stem_prefix="x")
+
+            self.assertTrue(Path(result.vocal_path).exists())
+            self.assertTrue(Path(result.accompaniment_path).exists())
+            self.assertTrue(result.vocal_path.endswith("x_vocals.wav"))
+            self.assertTrue(result.accompaniment_path.endswith("x_accompaniment.wav"))
+            self.assertFalse((root / "source_(Vocals)_UVR_MDXNET_Main.wav").exists())
+
+    def test_mdx_separator_runs_output_dir_signature_inside_output_dir(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            input_wav = root / "source.wav"
+            out_dir = root / "out"
+            input_wav.write_bytes(b"dummy")
+
+            class _OutputDirSeparator:
+                def separate(self, audio_path, output_dir=None):
+                    Path("source_(Vocals)_UVR_MDXNET_Main.wav").write_bytes(b"vocals")
+                    Path("source_(Instrumental)_UVR_MDXNET_Main.wav").write_bytes(b"instrumental")
+                    return []
+
+            class _Manager:
+                selected_device = torch.device("cpu")
+
+                def load_separator(self):
+                    return _OutputDirSeparator()
+
+            separator = VocalSeparator(model_manager=_Manager(), backend="mdx-net")
+            result = separator.separate(str(input_wav), str(out_dir), stem_prefix="x")
+
+            self.assertTrue(Path(result.vocal_path).exists())
+            self.assertTrue(Path(result.accompaniment_path).exists())
+            self.assertTrue(result.vocal_path.endswith("x_vocals.wav"))
+            self.assertTrue(result.accompaniment_path.endswith("x_accompaniment.wav"))
+            self.assertFalse((root / "source_(Vocals)_UVR_MDXNET_Main.wav").exists())
+
+    def test_mdx_separator_collects_fresh_outputs_from_current_working_directory(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            input_wav = root / "source.wav"
+            out_dir = root / "out"
+            input_wav.write_bytes(b"dummy")
+            stale_vocals = root / "source_(Vocals)_UVR_MDXNET_Main.wav"
+            stale_vocals.write_bytes(b"stale")
+
+            class _CwdSeparator:
+                def __init__(self, cwd: Path):
+                    self.cwd = cwd
+
+                def separate(self, audio_path, output_dir=None):
+                    (self.cwd / "source_(Vocals)_UVR_MDXNET_Main.wav").write_bytes(b"fresh vocals")
+                    (self.cwd / "source_(Instrumental)_UVR_MDXNET_Main.wav").write_bytes(b"fresh instrumental")
+                    return []
+
+            class _Manager:
+                selected_device = torch.device("cpu")
+
+                def load_separator(self):
+                    return _CwdSeparator(root)
+
+            separator = VocalSeparator(model_manager=_Manager(), backend="mdx-net")
+            previous_cwd = Path.cwd()
+            try:
+                import os
+
+                os.chdir(root)
+                result = separator.separate(str(input_wav), str(out_dir), stem_prefix="x")
+            finally:
+                os.chdir(previous_cwd)
+
+            self.assertTrue(Path(result.vocal_path).exists())
+            self.assertTrue(Path(result.accompaniment_path).exists())
+            self.assertEqual(Path(result.vocal_path).read_bytes(), b"fresh vocals")
+
     def test_prepare_waveform_for_save_limited_to_target_peak(self) -> None:
         waveform = torch.tensor([[2.0, -2.0, 0.5], [1.5, -1.5, 0.25]], dtype=torch.float32)
         prepared = VocalSeparator._prepare_waveform_for_save(waveform)

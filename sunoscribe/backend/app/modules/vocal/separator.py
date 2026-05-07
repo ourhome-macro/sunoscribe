@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import re
 import shutil
 import threading
@@ -136,10 +137,15 @@ class VocalSeparator:
                 lock.acquire()
 
         try:
+            fallback_snapshot = self._snapshot_mdx_fallback_outputs(source_stem=src.stem, raw_output_dir=raw_output_dir)
             result = self._invoke_mdx_separator(src=src, output_dir=raw_output_dir)
             candidates = self._collect_output_candidates(
                 result,
-                fallback=raw_output_dir.glob("**/*"),
+                fallback=self._iter_mdx_fallback_outputs(
+                    source_stem=src.stem,
+                    raw_output_dir=raw_output_dir,
+                    before=fallback_snapshot,
+                ),
                 base_dir=raw_output_dir,
             )
             stem_sources = self._pick_mdx_stem_map(candidates)
@@ -195,12 +201,18 @@ class VocalSeparator:
 
         errors: list[str] = []
         call_candidates = [
-            lambda: separator.separate(str(src)),
-            lambda: separator.separate(audio_file=str(src)),
-            lambda: separator.separate(audio_path=str(src)),
-            lambda: separator.separate(str(src), output_dir=str(output_dir)),
-            lambda: separator.separate(audio_file=str(src), output_dir=str(output_dir)),
-            lambda: separator.separate(audio_path=str(src), output_dir=str(output_dir)),
+            lambda: self._invoke_mdx_separator_in_output_dir(
+                lambda: separator.separate(str(src), output_dir=str(output_dir)), output_dir
+            ),
+            lambda: self._invoke_mdx_separator_in_output_dir(
+                lambda: separator.separate(audio_file=str(src), output_dir=str(output_dir)), output_dir
+            ),
+            lambda: self._invoke_mdx_separator_in_output_dir(
+                lambda: separator.separate(audio_path=str(src), output_dir=str(output_dir)), output_dir
+            ),
+            lambda: self._invoke_mdx_separator_in_output_dir(lambda: separator.separate(str(src)), output_dir),
+            lambda: self._invoke_mdx_separator_in_output_dir(lambda: separator.separate(audio_file=str(src)), output_dir),
+            lambda: self._invoke_mdx_separator_in_output_dir(lambda: separator.separate(audio_path=str(src)), output_dir),
         ]
 
         for call in call_candidates:
@@ -215,6 +227,16 @@ class VocalSeparator:
         raise SeparationError(
             "Unable to call MDX separator with known signatures: " + " | ".join(errors[-2:])
         )
+
+    @staticmethod
+    def _invoke_mdx_separator_in_output_dir(call: Any, output_dir: Path) -> Any:
+        previous_cwd = Path.cwd()
+        output_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            os.chdir(output_dir)
+            return call()
+        finally:
+            os.chdir(previous_cwd)
 
     def _collect_output_candidates(
         self,
@@ -274,6 +296,55 @@ class VocalSeparator:
             normalized.append(resolved)
 
         return normalized
+
+    @staticmethod
+    def _snapshot_mdx_fallback_outputs(*, source_stem: str, raw_output_dir: Path) -> dict[str, tuple[int, int]]:
+        snapshot: dict[str, tuple[int, int]] = {}
+        for path in VocalSeparator._iter_mdx_candidate_locations(source_stem=source_stem, raw_output_dir=raw_output_dir):
+            try:
+                stat = path.stat()
+            except OSError:
+                continue
+            snapshot[str(path.resolve(strict=False))] = (int(stat.st_mtime_ns), int(stat.st_size))
+        return snapshot
+
+    @staticmethod
+    def _iter_mdx_fallback_outputs(
+        *,
+        source_stem: str,
+        raw_output_dir: Path,
+        before: dict[str, tuple[int, int]],
+    ) -> Iterable[Path]:
+        for path in raw_output_dir.glob("**/*"):
+            yield path
+
+        for path in VocalSeparator._iter_mdx_candidate_locations(source_stem=source_stem, raw_output_dir=raw_output_dir):
+            key = str(path.resolve(strict=False))
+            try:
+                stat = path.stat()
+            except OSError:
+                continue
+            current = (int(stat.st_mtime_ns), int(stat.st_size))
+            if before.get(key) != current:
+                yield path
+
+    @staticmethod
+    def _iter_mdx_candidate_locations(*, source_stem: str, raw_output_dir: Path) -> Iterable[Path]:
+        allowed_suffixes = {".wav", ".flac", ".mp3", ".m4a", ".ogg"}
+        candidate_dirs = [raw_output_dir, Path.cwd()]
+        seen_dirs: set[str] = set()
+        safe_source_stem = str(source_stem or "").strip()
+        patterns = [f"{safe_source_stem}*", "*Vocals*", "*Instrumental*"] if safe_source_stem else ["*Vocals*", "*Instrumental*"]
+
+        for directory in candidate_dirs:
+            key = str(directory.resolve(strict=False))
+            if key in seen_dirs or not directory.exists() or not directory.is_dir():
+                continue
+            seen_dirs.add(key)
+            for pattern in patterns:
+                for path in directory.glob(pattern):
+                    if path.is_file() and path.suffix.lower() in allowed_suffixes:
+                        yield path
 
     def _pick_mdx_stem_map(self, candidates: list[Path]) -> dict[str, Path]:
         if not candidates:

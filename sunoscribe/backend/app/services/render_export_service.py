@@ -254,7 +254,7 @@ def build_midi_bytes_from_score_data(score_data: dict[str, Any] | None) -> bytes
 
     try:
         exporter = MidiExporter()
-        return exporter.export_from_measures(measures=measures, bpm=bpm)
+        return exporter.export_from_score_data(score_data=score_data, bpm=bpm)
     except Exception as exc:
         raise ValidationAppError("failed to export MIDI from score revision") from exc
 

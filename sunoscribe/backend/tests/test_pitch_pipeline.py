@@ -3,7 +3,7 @@ from unittest.mock import patch
 
 from app.modules.pitch.config import PitchDetectionConfig
 from app.modules.pitch.pipeline import PitchPipeline
-from app.modules.pitch.types import Note, PitchPipelineRequest
+from app.modules.pitch.types import ArrangementDecision, ArrangementSegmentDecision, Note, PitchPipelineRequest
 
 
 class TestPitchPipeline(unittest.TestCase):
@@ -340,6 +340,55 @@ class TestPitchPipeline(unittest.TestCase):
         self.assertEqual(decision["lead_note_count"], 1)
         self.assertIn("support_note_count", decision)
         self.assertIn("max_polyphony", decision)
+
+    def test_instrumental_topline_prefers_higher_pitch_on_tie(self):
+        pipeline = PitchPipeline(PitchDetectionConfig(arrangement_support_conflict_window_sec=0.08))
+
+        selected = pipeline._select_instrumental_topline(
+            [
+                Note(pitch="C4", start_time=0.0, end_time=0.6, confidence=0.8),
+                Note(pitch="G4", start_time=0.0, end_time=0.6, confidence=0.8),
+            ]
+        )
+
+        self.assertEqual([note.pitch for note in selected], ["G4"])
+
+    def test_instrumental_topline_caps_duration_for_pedal_bass(self):
+        pipeline = PitchPipeline(PitchDetectionConfig(arrangement_support_conflict_window_sec=0.08))
+
+        selected = pipeline._select_instrumental_topline(
+            [
+                Note(pitch="C2", start_time=0.0, end_time=8.0, confidence=0.5),
+                Note(pitch="C5", start_time=0.02, end_time=1.38, confidence=0.95),
+            ]
+        )
+
+        self.assertEqual([note.pitch for note in selected], ["C5"])
+
+    def test_instrumental_hook_notes_only_use_instrumental_segments(self):
+        pipeline = PitchPipeline(PitchDetectionConfig(arrangement_support_conflict_window_sec=0.08))
+        decision = ArrangementDecision(
+            selected_support_notes=[
+                Note(pitch="D5", start_time=0.1, end_time=0.7, confidence=0.9),
+                Note(pitch="E5", start_time=2.1, end_time=2.7, confidence=0.9),
+            ],
+            segment_decisions=[
+                ArrangementSegmentDecision(start_time=0.0, end_time=1.0, state="instrumental"),
+                ArrangementSegmentDecision(start_time=2.0, end_time=3.0, state="vocal"),
+            ],
+        )
+
+        notes = pipeline._build_instrumental_hook_notes(
+            decision=decision,
+            bpm=120.0,
+            beat_times=[0.0, 0.5, 1.0, 1.5, 2.0, 2.5, 3.0],
+            boundaries=[0.0, 2.0, 4.0],
+            beats_per_bar=4,
+        )
+
+        self.assertEqual([note.pitch for note in notes], ["D5"])
+        self.assertEqual(notes[0].measure_num, 1)
+        self.assertEqual(notes[0].source, "instrumental_hook")
 
 
 if __name__ == "__main__":

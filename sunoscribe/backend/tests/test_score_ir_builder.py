@@ -1,7 +1,7 @@
 import unittest
 
 from app.modules.analysis_ir.types import AnalysisIR, AnalysisIRMeta, ChordSpan, FormSection
-from app.modules.pitch.types import MetaInfo, Note, PitchAnalysisResult
+from app.modules.pitch.types import MetaInfo, Note, NoteType, PitchAnalysisResult, QuantizedNote
 from app.modules.score_ir import ScoreIRBuilder, ScoreIRSerializer
 
 
@@ -147,6 +147,65 @@ class TestScoreIRBuilder(unittest.TestCase):
         self.assertEqual(score_data["chord_timeline"][1]["symbol"], "Dm")
         self.assertEqual(len(score_data["form_sections"]), 1)
         self.assertEqual(score_data["form_sections"][0]["label"], "section_a")
+
+    def test_serializer_outputs_instrumental_melody_notes_without_polluting_measures(self):
+        builder = ScoreIRBuilder()
+        pitch_result = PitchAnalysisResult(
+            version="1.4",
+            meta=MetaInfo(
+                bpm=120.0,
+                bpm_confidence=0.9,
+                key="C Major",
+                key_confidence=0.81,
+                duration_sec=4.0,
+                time_signature="4/4",
+                rhythm_type="stable",
+                total_measures=2,
+            ),
+            measures=[
+                {
+                    "measure_num": 1,
+                    "start_time": 0.0,
+                    "end_time": 2.0,
+                    "is_anacrusis": False,
+                    "notes": [
+                        {
+                            "pitch": "C4",
+                            "start_time": 0.0,
+                            "end_time": 0.5,
+                            "duration_beats": 1.0,
+                            "note_type": "quarter",
+                            "beat_position": 1.0,
+                            "confidence": 0.9,
+                        }
+                    ],
+                },
+                {"measure_num": 2, "start_time": 2.0, "end_time": 4.0, "is_anacrusis": False, "notes": []},
+            ],
+            instrumental_melody_notes=[
+                QuantizedNote(
+                    pitch="G5",
+                    start_time=2.1,
+                    end_time=2.6,
+                    confidence=0.88,
+                    duration_beats=1.0,
+                    note_type=NoteType.QUARTER,
+                    measure_num=2,
+                    beat_position=1.2,
+                    source="instrumental_hook",
+                )
+            ],
+        )
+
+        score_ir = builder.build(pitch_result)
+        score_data = ScoreIRSerializer.to_score_data(score_ir)
+
+        self.assertEqual(len(score_data["measures"][0]["notes"]), 1)
+        self.assertEqual(score_data["measures"][1]["notes"], [])
+        self.assertEqual(len(score_data["instrumental_melody_notes"]), 1)
+        self.assertEqual(score_data["instrumental_melody_notes"][0]["pitch"], "G5")
+        self.assertEqual(score_data["instrumental_melody_notes"][0]["measure_num"], 2)
+        self.assertEqual(score_data["instrumental_melody_notes"][0]["source"], "instrumental_hook")
 
 
 if __name__ == "__main__":

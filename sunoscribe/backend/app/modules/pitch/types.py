@@ -30,6 +30,7 @@ class QuantizedNote(Note):
     measure_num: Optional[int] = None
     beat_position: Optional[float] = None
     lyric: Optional[str] = None
+    source: Optional[str] = None
 
 
 @dataclass
@@ -181,6 +182,7 @@ class PitchAnalysisResult:
     analysis_info: Dict[str, Any] = field(default_factory=dict)
     measures: List[Dict[str, Any]] = field(default_factory=list)
     lead_notes: List[Note] = field(default_factory=list)
+    instrumental_melody_notes: List[QuantizedNote] = field(default_factory=list)
     raw_notes: List[Note] = field(default_factory=list)
     f0_track: Optional[F0Track] = None
     semantic_audio: Optional[SemanticAudioResult] = None

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from dataclasses import replace
 
 import librosa
@@ -32,6 +33,14 @@ from .types import (
     SemanticAudioResult,
     VocalActivitySegment,
 )
+
+
+@dataclass(frozen=True)
+class _ScoredHookNote:
+    note: Note
+    score: float
+    pitch_midi: int
+    duration_sec: float
 
 
 class PitchPipeline:
@@ -404,6 +413,136 @@ class PitchPipeline:
             "segment_decisions": list(info.get("segment_decisions") or []),
         }
 
+    def _build_instrumental_hook_notes(
+        self,
+        *,
+        decision: ArrangementDecision,
+        bpm: float,
+        beat_times: list[float],
+        boundaries: list[float],
+        beats_per_bar: int,
+    ) -> list[QuantizedNote]:
+        raw_candidates = self._instrumental_support_candidates(decision)
+        selected = self._select_instrumental_topline(raw_candidates)
+        if not selected:
+            return []
+
+        quantized = self.quantizer.quantize(selected, bpm, beat_times)
+        self._recompute_quantized_positions(quantized, boundaries, beats_per_bar)
+        for note in quantized:
+            note.source = "instrumental_hook"
+        return quantized
+
+    def _instrumental_support_candidates(self, decision: ArrangementDecision) -> list[Note]:
+        segments = [
+            segment
+            for segment in decision.segment_decisions
+            if str(segment.state or "").strip().lower() == "instrumental"
+        ]
+        if not segments or not decision.selected_support_notes:
+            return []
+
+        candidates: list[Note] = []
+        for note in decision.selected_support_notes:
+            if any(self._note_overlaps_window(note, float(segment.start_time), float(segment.end_time)) for segment in segments):
+                candidates.append(
+                    Note(
+                        pitch=str(note.pitch),
+                        start_time=float(note.start_time),
+                        end_time=float(note.end_time),
+                        confidence=float(note.confidence),
+                    )
+                )
+        return candidates
+
+    def _select_instrumental_topline(self, notes: list[Note]) -> list[Note]:
+        if not notes:
+            return []
+
+        window_sec = max(0.01, float(getattr(self.config, "arrangement_support_conflict_window_sec", 0.08) or 0.08))
+        scored = [item for item in (self._score_hook_note(note) for note in notes) if item is not None]
+        scored.sort(key=lambda item: (float(item.note.start_time), -item.score, -item.pitch_midi))
+
+        selected: list[_ScoredHookNote] = []
+        for item in scored:
+            conflicting_indexes = [
+                idx
+                for idx, current in enumerate(selected)
+                if self._notes_share_window(item.note, current.note, window_sec=window_sec)
+            ]
+            if not conflicting_indexes:
+                selected.append(item)
+                continue
+
+            best = item
+            best_index: int | None = None
+            for idx in conflicting_indexes:
+                current = selected[idx]
+                if self._hook_priority_key(best) > self._hook_priority_key(current):
+                    best_index = idx
+                else:
+                    best = current
+
+            if best is item and best_index is not None:
+                selected[best_index] = item
+
+        selected.sort(key=lambda item: (float(item.note.start_time), item.pitch_midi, float(item.note.end_time)))
+        return self._resolve_hook_overlaps(selected)
+
+    def _resolve_hook_overlaps(self, selected: list[_ScoredHookNote]) -> list[Note]:
+        resolved: list[_ScoredHookNote] = []
+        for item in selected:
+            if not resolved:
+                resolved.append(item)
+                continue
+            previous = resolved[-1]
+            if float(item.note.start_time) < float(previous.note.end_time):
+                if self._hook_priority_key(item) > self._hook_priority_key(previous):
+                    resolved[-1] = item
+                continue
+            resolved.append(item)
+
+        return [
+            Note(
+                pitch=str(item.note.pitch),
+                start_time=float(item.note.start_time),
+                end_time=float(item.note.end_time),
+                confidence=float(item.note.confidence),
+            )
+            for item in resolved
+            if float(item.note.end_time) > float(item.note.start_time)
+        ]
+
+    @staticmethod
+    def _hook_priority_key(item: _ScoredHookNote) -> tuple[float, int, float, float]:
+        return (round(float(item.score), 6), int(item.pitch_midi), -float(item.note.start_time), float(item.duration_sec))
+
+    @staticmethod
+    def _note_overlaps_window(note: Note, start_time: float, end_time: float) -> bool:
+        return float(note.end_time) > float(start_time) and float(note.start_time) < float(end_time)
+
+    @staticmethod
+    def _notes_share_window(left: Note, right: Note, *, window_sec: float) -> bool:
+        left_start = float(left.start_time)
+        right_start = float(right.start_time)
+        if abs(left_start - right_start) <= window_sec:
+            return True
+        return float(left.end_time) > right_start and float(right.end_time) > left_start
+
+    def _score_hook_note(self, note: Note) -> _ScoredHookNote | None:
+        duration_sec = max(0.0, float(note.end_time) - float(note.start_time))
+        if duration_sec <= 0.0:
+            return None
+        try:
+            from .note_utils import note_to_midi
+
+            pitch_midi = int(round(float(note_to_midi(str(note.pitch)))))
+        except Exception:
+            return None
+        confidence = max(0.0, min(1.0, float(note.confidence)))
+        score = (min(duration_sec, 1.5) * 0.6) + (confidence * 0.4)
+        return _ScoredHookNote(note=note, score=score, pitch_midi=pitch_midi, duration_sec=duration_sec)
+
     @staticmethod
     def _backend_from_source_id(source_id: str | None) -> str | None:
         if not source_id:
@@ -596,6 +735,15 @@ class PitchPipeline:
             lead_source_stem=lead_source_stem,
             support_source_stem=support_source_stem,
         )
+        instrumental_hook_notes = self._build_instrumental_hook_notes(
+            decision=arrangement_decision,
+            bpm=beat_result.bpm,
+            beat_times=beat_result.beat_times,
+            boundaries=boundaries,
+            beats_per_bar=effective_beats_per_bar,
+        )
+        arrangement_summary["instrumental_hook_note_count"] = len(instrumental_hook_notes)
+        arrangement_summary["instrumental_hook_status"] = "selected" if instrumental_hook_notes else "empty"
         meta = MetaInfo(
             bpm=beat_result.bpm,
             bpm_confidence=beat_result.confidence,
@@ -708,6 +856,7 @@ class PitchPipeline:
             },
             measures=measures,
             lead_notes=lead_notes,
+            instrumental_melody_notes=instrumental_hook_notes,
             raw_notes=detected_notes,
             f0_track=lead_f0_track,
             semantic_audio=semantic_audio,

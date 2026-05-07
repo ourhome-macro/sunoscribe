@@ -64,6 +64,82 @@ class TestMidiExporter(unittest.TestCase):
         data = exporter.export_from_measures(measures=measures, bpm=110.0)
         self.assertTrue(data.startswith(b"MThd"))
 
+    def test_export_from_score_data_writes_optional_hook_track(self):
+        import pretty_midi
+
+        exporter = MidiExporter()
+        score_data = {
+            "bpm": 120.0,
+            "measures": [
+                {
+                    "measure_num": 1,
+                    "notes": [
+                        {
+                            "pitch": "C4",
+                            "start_time": 0.0,
+                            "end_time": 0.5,
+                            "duration_beats": 1.0,
+                            "note_type": "quarter",
+                            "beat_position": 1.0,
+                            "confidence": 0.9,
+                        }
+                    ],
+                }
+            ],
+            "instrumental_melody_notes": [
+                {
+                    "pitch": "G5",
+                    "start_time": 1.0,
+                    "end_time": 1.5,
+                    "duration_beats": 1.0,
+                    "measure_num": 1,
+                    "beat_position": 3.0,
+                    "confidence": 0.85,
+                    "source": "instrumental_hook",
+                }
+            ],
+        }
+
+        with tempfile.TemporaryDirectory() as td:
+            out = Path(td) / "dual.mid"
+            data = exporter.export_from_score_data(score_data=score_data, bpm=120.0, output_path=out)
+            midi = pretty_midi.PrettyMIDI(str(out))
+
+        self.assertTrue(data.startswith(b"MThd"))
+        self.assertEqual([instrument.name for instrument in midi.instruments], ["Lead Vocal", "Instrumental Hook"])
+        self.assertEqual([len(instrument.notes) for instrument in midi.instruments], [1, 1])
+
+    def test_export_from_score_data_keeps_single_track_when_hook_empty(self):
+        import pretty_midi
+
+        exporter = MidiExporter()
+        score_data = {
+            "bpm": 120.0,
+            "measures": [
+                {
+                    "measure_num": 1,
+                    "notes": [
+                        {
+                            "pitch": "C4",
+                            "start_time": 0.0,
+                            "end_time": 0.5,
+                            "duration_beats": 1.0,
+                            "note_type": "quarter",
+                            "confidence": 0.9,
+                        }
+                    ],
+                }
+            ],
+            "instrumental_melody_notes": [],
+        }
+
+        with tempfile.TemporaryDirectory() as td:
+            out = Path(td) / "lead.mid"
+            exporter.export_from_score_data(score_data=score_data, bpm=120.0, output_path=out)
+            midi = pretty_midi.PrettyMIDI(str(out))
+
+        self.assertEqual([instrument.name for instrument in midi.instruments], ["Lead Vocal"])
+
 
 if __name__ == "__main__":
     unittest.main()

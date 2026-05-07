@@ -44,6 +44,7 @@ class ScoreIRBuilder:
             measure_note_ids = self._build_measure_note_ids_from_notes(pitch_result, notes, measure_note_ids)
 
         measures = self._build_measures(pitch_result, measure_note_ids)
+        instrumental_melody_notes = self._build_instrumental_melody_notes(pitch_result, measures)
         bassline_notes = self._build_bassline_notes(analysis_ir, measures)
         chord_timeline = self._build_chord_timeline(analysis_ir)
         form_sections = self._build_form_sections(analysis_ir)
@@ -63,6 +64,7 @@ class ScoreIRBuilder:
         return ScoreIR(
             meta=meta,
             notes=notes,
+            instrumental_melody_notes=instrumental_melody_notes,
             bassline_notes=bassline_notes,
             measures=measures,
             chord_timeline=chord_timeline,
@@ -241,6 +243,22 @@ class ScoreIRBuilder:
             measures_hint=measures,
         )
 
+    def _build_instrumental_melody_notes(
+        self,
+        pitch_result: PitchAnalysisResult,
+        measures: List[ScoreMeasure],
+    ) -> List[ScoreNote]:
+        hook_notes = list(getattr(pitch_result, "instrumental_melody_notes", None) or [])
+        if not hook_notes:
+            return []
+        return self._build_score_notes_from_note_list(
+            notes=hook_notes,
+            source="instrumental_hook",
+            id_prefix="ih",
+            is_raw=False,
+            measures_hint=measures,
+        )
+
     def _build_score_notes_from_note_list(
         self,
         *,
@@ -257,6 +275,9 @@ class ScoreIRBuilder:
             if end_time < start_time:
                 end_time = start_time
             measure_num = self._find_measure_num_for_time(start_time, measures_hint or [])
+            raw_measure_num = getattr(note, "measure_num", None)
+            if raw_measure_num is not None:
+                measure_num = self._safe_optional_int(raw_measure_num)
             confidence = self._safe_float(getattr(note, "confidence", 0.0), 0.0)
             note_id = f"{id_prefix}{idx:06d}"
 
@@ -268,10 +289,10 @@ class ScoreIRBuilder:
                     start_time=start_time,
                     end_time=end_time,
                     duration_sec=max(0.0, end_time - start_time),
-                    duration_beats=None,
-                    note_type=None,
+                    duration_beats=self._safe_optional_float(getattr(note, "duration_beats", None)),
+                    note_type=self._safe_optional_str(getattr(note, "note_type", None)),
                     measure_num=measure_num,
-                    beat_position=None,
+                    beat_position=self._safe_optional_float(getattr(note, "beat_position", None)),
                     confidence=confidence,
                     lyric=None,
                     is_raw=is_raw,

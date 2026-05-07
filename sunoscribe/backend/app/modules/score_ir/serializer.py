@@ -60,6 +60,21 @@ class ScoreIRSerializer:
             "key": score_ir.meta.key,
             "time_signature": score_ir.meta.time_signature,
             "measures": measures,
+            "instrumental_melody_notes": [
+                {
+                    "id": note.id,
+                    "pitch": note.pitch,
+                    "pitch_midi": note.pitch_midi,
+                    "start_time": note.start_time,
+                    "end_time": note.end_time,
+                    "confidence": note.confidence,
+                    "duration_beats": note.duration_beats,
+                    "measure_num": note.measure_num,
+                    "beat_position": note.beat_position,
+                    "source": note.source,
+                }
+                for note in (score_ir.instrumental_melody_notes or [])
+            ],
             "bassline_notes": [
                 {
                     "id": note.id,

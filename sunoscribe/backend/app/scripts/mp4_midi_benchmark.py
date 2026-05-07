@@ -21,6 +21,7 @@ from app.modules.benchmark import (
     MidiReadError,
     build_dataset_report,
     compute_midi_metrics,
+    find_midi_track_index_by_name,
     load_manifest,
     read_midi_notes,
     read_midi_track_info,
@@ -275,16 +276,26 @@ def _compute_metrics_stage(
     start = time.perf_counter()
     try:
         expected_notes = read_midi_notes(sample.expected_midi, track_index=sample.expected_melody_track)
-        predicted_notes = read_midi_notes(produced_midi_path, track_index=None)
+        predicted_tracks = read_midi_track_info(produced_midi_path)
+        predicted_lead_track = find_midi_track_index_by_name(produced_midi_path, "Lead Vocal")
+        if predicted_lead_track is None:
+            predicted_lead_track = next((track.index for track in predicted_tracks if track.note_count > 0), None)
+        predicted_notes = read_midi_notes(produced_midi_path, track_index=predicted_lead_track)
         metrics = compute_midi_metrics(expected_notes, predicted_notes, config=metric_config)
+        hook_track = next(
+            (track for track in predicted_tracks if str(track.name or "").strip().lower() == "instrumental hook"),
+            None,
+        )
         payload = {
             "sample_id": sample.id,
             "expected_midi": str(sample.expected_midi),
             "expected_melody_track": sample.expected_melody_track,
             "produced_midi": str(produced_midi_path),
+            "predicted_lead_track": predicted_lead_track,
+            "instrumental_hook_note_count": hook_track.note_count if hook_track else 0,
             "config": asdict(metric_config),
             "expected_tracks": [track.to_dict() for track in read_midi_track_info(sample.expected_midi)],
-            "predicted_tracks": [track.to_dict() for track in read_midi_track_info(produced_midi_path)],
+            "predicted_tracks": [track.to_dict() for track in predicted_tracks],
             "metrics": metrics.to_dict(),
         }
         return (

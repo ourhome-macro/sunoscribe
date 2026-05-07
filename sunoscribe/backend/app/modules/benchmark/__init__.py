@@ -15,6 +15,7 @@ from .midi_metrics import (
     MidiTrackInfo,
     NoteEvent,
     compute_midi_metrics,
+    find_midi_track_index_by_name,
     read_midi_notes,
     read_midi_track_info,
 )
@@ -36,6 +37,7 @@ __all__ = [
     "build_dataset_report",
     "compute_midi_metrics",
     "discover_sample_pairs",
+    "find_midi_track_index_by_name",
     "load_manifest",
     "normalize_sample_key",
     "read_midi_notes",

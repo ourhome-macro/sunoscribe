@@ -6,7 +6,9 @@ from tempfile import TemporaryDirectory
 import unittest
 from unittest.mock import patch
 
-from app.scripts.mp4_midi_benchmark import main
+from app.modules.benchmark.dataset import BenchmarkSample
+from app.modules.benchmark.midi_metrics import MidiMetricConfig
+from app.scripts.mp4_midi_benchmark import _compute_metrics_stage, main
 
 
 def _write_midi(path: Path) -> None:
@@ -16,6 +18,18 @@ def _write_midi(path: Path) -> None:
     instrument = pretty_midi.Instrument(program=0, name="melody")
     instrument.notes.append(pretty_midi.Note(velocity=90, pitch=60, start=0.0, end=0.5))
     midi.instruments.append(instrument)
+    midi.write(str(path))
+
+
+def _write_dual_track_midi(path: Path) -> None:
+    import pretty_midi
+
+    midi = pretty_midi.PrettyMIDI(initial_tempo=120)
+    lead = pretty_midi.Instrument(program=0, name="Lead Vocal")
+    lead.notes.append(pretty_midi.Note(velocity=90, pitch=60, start=0.0, end=0.5))
+    hook = pretty_midi.Instrument(program=0, name="Instrumental Hook")
+    hook.notes.append(pretty_midi.Note(velocity=90, pitch=72, start=0.0, end=0.5))
+    midi.instruments.extend([lead, hook])
     midi.write(str(path))
 
 
@@ -127,6 +141,33 @@ class Mp4MidiBenchmarkCliTests(unittest.TestCase):
             self.assertEqual(exit_code, 2)
             self.assertTrue((output_root / "blocked_run" / "readiness_report.json").exists())
             self.assertFalse((output_root / "blocked_run" / "song").exists())
+
+    def test_metrics_stage_reads_produced_lead_track_only(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            expected = root / "expected.mid"
+            produced = root / "produced.mid"
+            _write_midi(expected)
+            _write_dual_track_midi(produced)
+            sample = BenchmarkSample(
+                id="song",
+                input_mp4=root / "song.mp4",
+                expected_midi=expected,
+                expected_melody_track=1,
+            )
+
+            stage, payload = _compute_metrics_stage(
+                sample=sample,
+                produced_midi_path=produced,
+                metric_config=MidiMetricConfig(onset_tolerance_sec=0.12),
+            )
+
+        self.assertEqual(stage.status, "success")
+        self.assertIsNotNone(payload)
+        self.assertEqual(payload["metrics"]["predicted_note_count"], 1)
+        self.assertEqual(payload["metrics"]["note_f1"], 1.0)
+        self.assertEqual(payload["instrumental_hook_note_count"], 1)
+        self.assertIsNotNone(payload["predicted_lead_track"])
 
 
 if __name__ == "__main__":

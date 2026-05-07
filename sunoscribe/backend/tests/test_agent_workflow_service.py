@@ -1,5 +1,6 @@
 ﻿from __future__ import annotations
 
+import importlib
 import json
 import tempfile
 import unittest
@@ -14,7 +15,9 @@ from app.models.user import User
 from app.modules.agents import AgentScorePatch, RvcJobSpec, TranscriptionDiagnosis
 from app.modules.agents.types import AgentSkill, AgentSkillContext
 from app.modules.agents.validators import RvcSpecValidationResult
-from app.services.agent_workflow_service import AgentWorkflowService
+
+agent_workflow_module = importlib.import_module("app.services.agent_workflow_service")
+AgentWorkflowService = agent_workflow_module.AgentWorkflowService
 
 
 def _build_revision() -> tuple[Score, ScoreRevision]:
@@ -133,7 +136,7 @@ class TestAgentWorkflowService(unittest.TestCase):
         service._list_revision_artifacts = lambda *args, **kwargs: []
         user = User(id=uuid.uuid4(), username="agent", email="agent@example.com", password_hash="x")
 
-        with patch("app.services.agent_workflow_service.get_score_revision_by_id", return_value=revision):
+        with patch.object(agent_workflow_module, "get_score_revision_by_id", return_value=revision):
             service.diagnose_transcription(None, user=user, revision_id=str(revision.id))
             service.propose_score_patch(None, user=user, revision_id=str(revision.id), instruction="patch n1")
             service.prepare_rvc_job(
@@ -183,7 +186,7 @@ class TestAgentWorkflowService(unittest.TestCase):
         service._list_revision_artifacts = lambda *args, **kwargs: []
         user = User(id=uuid.uuid4(), username="agent", email="agent@example.com", password_hash="x")
 
-        with patch("app.services.agent_workflow_service.get_score_revision_by_id", return_value=revision):
+        with patch.object(agent_workflow_module, "get_score_revision_by_id", return_value=revision):
             proposal = service.propose_score_patch(
                 None,
                 user=user,
@@ -206,7 +209,7 @@ class TestAgentWorkflowService(unittest.TestCase):
         service._list_revision_artifacts = lambda *args, **kwargs: []
         user = User(id=uuid.uuid4(), username="agent", email="agent@example.com", password_hash="x")
 
-        with patch("app.services.agent_workflow_service.get_score_revision_by_id", return_value=revision):
+        with patch.object(agent_workflow_module, "get_score_revision_by_id", return_value=revision):
             proposal = service.propose_score_patch(
                 None,
                 user=user,

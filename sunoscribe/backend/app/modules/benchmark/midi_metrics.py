@@ -116,6 +116,16 @@ def read_midi_notes(path: str | Path, *, track_index: int | None = None) -> list
     return sorted(notes, key=lambda note: (note.start, note.pitch, note.end, note.track_index or -1))
 
 
+def find_midi_track_index_by_name(path: str | Path, track_name: str) -> int | None:
+    target = str(track_name or "").strip().lower()
+    if not target:
+        return None
+    for track in read_midi_track_info(path):
+        if str(track.name or "").strip().lower() == target:
+            return track.index
+    return None
+
+
 def compute_midi_metrics(
     expected_notes: list[NoteEvent],
     predicted_notes: list[NoteEvent],
