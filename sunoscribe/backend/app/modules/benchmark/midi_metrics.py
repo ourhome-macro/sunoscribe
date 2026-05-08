@@ -46,6 +46,7 @@ class MidiMetricConfig:
     onset_tolerance_sec: float = 0.12
     pitch_tolerance_semitones: int = 0
     octave_tolerance_semitones: int = 12
+    auto_octave_normalize: bool = True
 
 
 @dataclass(frozen=True, slots=True)
@@ -63,6 +64,11 @@ class MidiMetrics:
     semitone_error_rate: float
     unmatched_expected_count: int
     unmatched_predicted_count: int
+    octave_shift_applied: int
+    octave_shift_target: str | None
+    expected_median_pitch_raw: float | None
+    predicted_median_pitch_raw: float | None
+    median_pitch_delta_raw: float | None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -88,6 +94,20 @@ class MidiAudibilityMetrics:
 
 
 @dataclass(frozen=True, slots=True)
+class MidiDtwDiagnostics:
+    best_dtw_octave_shift_semitones: int | None
+    dtw_normalized_cost: float | None
+    dtw_aligned_note_pairs: int
+    dtw_pitch_match_recall_proxy: float | None
+    dtw_pitch_match_precision_proxy: float | None
+    dtw_mean_abs_pitch_delta: float | None
+    dtw_skipped_reason: str | None
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(frozen=True, slots=True)
 class MidiAlignmentDiagnostics:
     best_octave_shift_semitones: int
     best_octave_shift_note_recall: float
@@ -103,6 +123,7 @@ class MidiAlignmentDiagnostics:
     expected_pitch_range: list[int | None]
     predicted_pitch_range: list[int | None]
     reference_track_suspect_reasons: list[str]
+    dtw: MidiDtwDiagnostics
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -193,9 +214,22 @@ def compute_midi_metrics(
     config: MidiMetricConfig | None = None,
 ) -> MidiMetrics:
     config = config or MidiMetricConfig()
-    matches = _match_notes(expected_notes, predicted_notes, config=config)
+    octave_normalization = _infer_octave_normalization(expected_notes, predicted_notes, config=config)
+    evaluated_predicted_notes = predicted_notes
+    if octave_normalization["octave_shift_applied"]:
+        evaluated_predicted_notes = _shift_notes(predicted_notes, pitch_shift=int(octave_normalization["octave_shift_applied"]))
+
+    match_config = config
+    if config.auto_octave_normalize:
+        match_config = MidiMetricConfig(
+            onset_tolerance_sec=config.onset_tolerance_sec,
+            pitch_tolerance_semitones=config.pitch_tolerance_semitones,
+            octave_tolerance_semitones=-1,
+            auto_octave_normalize=False,
+        )
+    matches = _match_notes(expected_notes, evaluated_predicted_notes, config=match_config)
     matched_count = len(matches)
-    precision = _safe_div(matched_count, len(predicted_notes))
+    precision = _safe_div(matched_count, len(evaluated_predicted_notes))
     recall = _safe_div(matched_count, len(expected_notes))
     note_f1 = _safe_div(2 * precision * recall, precision + recall)
 
@@ -207,7 +241,7 @@ def compute_midi_metrics(
 
     return MidiMetrics(
         expected_note_count=len(expected_notes),
-        predicted_note_count=len(predicted_notes),
+        predicted_note_count=len(evaluated_predicted_notes),
         matched_note_count=matched_count,
         note_precision=precision,
         note_recall=recall,
@@ -218,7 +252,12 @@ def compute_midi_metrics(
         octave_error_rate=_safe_div(octave_errors, matched_count),
         semitone_error_rate=_safe_div(semitone_errors, matched_count),
         unmatched_expected_count=max(0, len(expected_notes) - matched_count),
-        unmatched_predicted_count=max(0, len(predicted_notes) - matched_count),
+        unmatched_predicted_count=max(0, len(evaluated_predicted_notes) - matched_count),
+        octave_shift_applied=int(octave_normalization["octave_shift_applied"]),
+        octave_shift_target=octave_normalization["octave_shift_target"],
+        expected_median_pitch_raw=octave_normalization["expected_median_pitch_raw"],
+        predicted_median_pitch_raw=octave_normalization["predicted_median_pitch_raw"],
+        median_pitch_delta_raw=octave_normalization["median_pitch_delta_raw"],
     )
 
 
@@ -259,11 +298,18 @@ def compute_midi_alignment_diagnostics(
     config: MidiMetricConfig | None = None,
 ) -> MidiAlignmentDiagnostics:
     config = config or MidiMetricConfig()
-    base_metrics = compute_midi_metrics(expected_notes, predicted_notes, config=config)
+    raw_metric_config = MidiMetricConfig(
+        onset_tolerance_sec=config.onset_tolerance_sec,
+        pitch_tolerance_semitones=config.pitch_tolerance_semitones,
+        octave_tolerance_semitones=config.octave_tolerance_semitones,
+        auto_octave_normalize=False,
+    )
+    base_metrics = compute_midi_metrics(expected_notes, predicted_notes, config=raw_metric_config)
     strict_pitch_config = MidiMetricConfig(
         onset_tolerance_sec=config.onset_tolerance_sec,
         pitch_tolerance_semitones=config.pitch_tolerance_semitones,
         octave_tolerance_semitones=-1,
+        auto_octave_normalize=False,
     )
     expected_median_pitch = _median_pitch(expected_notes)
     predicted_median_pitch = _median_pitch(predicted_notes)
@@ -289,7 +335,7 @@ def compute_midi_alignment_diagnostics(
     time_candidates: list[tuple[float, float, int, float]] = []
     for time_shift in time_shifts:
         shifted_notes = _shift_notes(predicted_notes, time_shift=time_shift)
-        shifted_metrics = compute_midi_metrics(expected_notes, shifted_notes, config=config)
+        shifted_metrics = compute_midi_metrics(expected_notes, shifted_notes, config=raw_metric_config)
         time_candidates.append(
             (
                 shifted_metrics.note_recall,
@@ -299,11 +345,13 @@ def compute_midi_alignment_diagnostics(
             )
         )
     best_time = max(time_candidates, key=lambda item: (item[0], item[1], item[2], -abs(item[3])))
+    dtw = _compute_dtw_diagnostics(expected_notes, predicted_notes, config=config)
 
     suspect_reasons = _infer_reference_track_suspect_reasons(
         base_metrics=base_metrics,
         best_octave=best_octave,
         best_time=best_time,
+        dtw=dtw,
         expected_notes=expected_notes,
         predicted_notes=predicted_notes,
         median_pitch_delta=median_pitch_delta,
@@ -324,6 +372,7 @@ def compute_midi_alignment_diagnostics(
         expected_pitch_range=_pitch_range(expected_notes),
         predicted_pitch_range=_pitch_range(predicted_notes),
         reference_track_suspect_reasons=suspect_reasons,
+        dtw=dtw,
     )
 
 
@@ -343,6 +392,9 @@ def build_midi_diagnostics(
         "note_recall": metrics.note_recall,
         "pitch_accuracy": metrics.pitch_accuracy,
         "octave_error_rate": metrics.octave_error_rate,
+        "octave_shift_applied": metrics.octave_shift_applied,
+        "octave_shift_target": metrics.octave_shift_target,
+        "median_pitch_delta_raw": metrics.median_pitch_delta_raw,
         "onset_mae_ms": metrics.onset_mae_ms,
         "audibility": audibility.to_dict(),
     }
@@ -517,6 +569,31 @@ def _match_notes(
     return matches
 
 
+def _infer_octave_normalization(
+    expected_notes: list[NoteEvent],
+    predicted_notes: list[NoteEvent],
+    *,
+    config: MidiMetricConfig,
+) -> dict[str, Any]:
+    expected_median = _median_pitch(expected_notes)
+    predicted_median = _median_pitch(predicted_notes)
+    median_delta = None
+    shift = 0
+    target: str | None = None
+    if expected_median is not None and predicted_median is not None:
+        median_delta = predicted_median - expected_median
+        if config.auto_octave_normalize and 11.0 <= abs(median_delta) <= 13.0:
+            shift = -12 if median_delta > 0 else 12
+            target = "predicted"
+    return {
+        "octave_shift_applied": shift,
+        "octave_shift_target": target,
+        "expected_median_pitch_raw": expected_median,
+        "predicted_median_pitch_raw": predicted_median,
+        "median_pitch_delta_raw": median_delta,
+    }
+
+
 def _duration_iou(expected: NoteEvent, predicted: NoteEvent) -> float:
     intersection = max(0.0, min(expected.end, predicted.end) - max(expected.start, predicted.start))
     union = max(expected.end, predicted.end) - min(expected.start, predicted.start)
@@ -560,11 +637,127 @@ def _candidate_time_shifts(expected_notes: list[NoteEvent], predicted_notes: lis
     return sorted(candidates)
 
 
+_DTW_NOTE_PAIR_LIMIT = 5_000_000
+_DTW_GAP_COST = 18.0
+
+
+def _compute_dtw_diagnostics(
+    expected_notes: list[NoteEvent],
+    predicted_notes: list[NoteEvent],
+    *,
+    config: MidiMetricConfig,
+) -> MidiDtwDiagnostics:
+    expected_count = len(expected_notes)
+    predicted_count = len(predicted_notes)
+    if expected_count == 0 or predicted_count == 0:
+        return MidiDtwDiagnostics(
+            best_dtw_octave_shift_semitones=None,
+            dtw_normalized_cost=None,
+            dtw_aligned_note_pairs=0,
+            dtw_pitch_match_recall_proxy=None,
+            dtw_pitch_match_precision_proxy=None,
+            dtw_mean_abs_pitch_delta=None,
+            dtw_skipped_reason="empty_note_sequence",
+        )
+    if expected_count * predicted_count > _DTW_NOTE_PAIR_LIMIT:
+        return MidiDtwDiagnostics(
+            best_dtw_octave_shift_semitones=None,
+            dtw_normalized_cost=None,
+            dtw_aligned_note_pairs=0,
+            dtw_pitch_match_recall_proxy=None,
+            dtw_pitch_match_precision_proxy=None,
+            dtw_mean_abs_pitch_delta=None,
+            dtw_skipped_reason="too_many_note_pairs",
+        )
+
+    expected_sorted = sorted(expected_notes, key=lambda note: (note.start, note.pitch, note.end))
+    predicted_sorted = sorted(predicted_notes, key=lambda note: (note.start, note.pitch, note.end))
+    expected_duration = max((note.end for note in expected_sorted), default=0.0) - min((note.start for note in expected_sorted), default=0.0)
+    predicted_duration = max((note.end for note in predicted_sorted), default=0.0) - min((note.start for note in predicted_sorted), default=0.0)
+    duration_basis = max(expected_duration, predicted_duration, 1.0)
+
+    candidates: list[tuple[float, int, int, int, float]] = []
+    for semitone_shift in (-24, -12, 0, 12, 24):
+        shifted_notes = _shift_notes(predicted_sorted, pitch_shift=semitone_shift)
+        raw_cost, aligned_pairs, pitch_matches, pitch_delta_sum = _dtw_sequence_cost(
+            expected_sorted,
+            shifted_notes,
+            duration_basis=duration_basis,
+            config=config,
+        )
+        path_units = max(1, expected_count + predicted_count)
+        normalized_cost = raw_cost / path_units
+        candidates.append((normalized_cost, semitone_shift, aligned_pairs, pitch_matches, pitch_delta_sum))
+
+    normalized_cost, semitone_shift, aligned_pairs, pitch_matches, pitch_delta_sum = min(
+        candidates,
+        key=lambda item: (item[0], abs(item[1])),
+    )
+    return MidiDtwDiagnostics(
+        best_dtw_octave_shift_semitones=semitone_shift,
+        dtw_normalized_cost=normalized_cost,
+        dtw_aligned_note_pairs=aligned_pairs,
+        dtw_pitch_match_recall_proxy=_safe_div(pitch_matches, expected_count),
+        dtw_pitch_match_precision_proxy=_safe_div(pitch_matches, predicted_count),
+        dtw_mean_abs_pitch_delta=_safe_div(pitch_delta_sum, aligned_pairs),
+        dtw_skipped_reason=None,
+    )
+
+
+def _dtw_sequence_cost(
+    expected_notes: list[NoteEvent],
+    predicted_notes: list[NoteEvent],
+    *,
+    duration_basis: float,
+    config: MidiMetricConfig,
+) -> tuple[float, int, int, float]:
+    previous_row: list[tuple[float, int, int, float]] = [(0.0, 0, 0, 0.0)]
+    for predicted_index in range(1, len(predicted_notes) + 1):
+        prev_cost, prev_pairs, prev_matches, prev_delta = previous_row[-1]
+        previous_row.append((prev_cost + _DTW_GAP_COST, prev_pairs, prev_matches, prev_delta))
+
+    for expected_index, expected in enumerate(expected_notes, start=1):
+        current_row: list[tuple[float, int, int, float]] = []
+        prev_cost, prev_pairs, prev_matches, prev_delta = previous_row[0]
+        current_row.append((prev_cost + _DTW_GAP_COST, prev_pairs, prev_matches, prev_delta))
+        for predicted_index, predicted in enumerate(predicted_notes, start=1):
+            pitch_delta = abs(expected.pitch - predicted.pitch)
+            time_delta = abs(_note_relative_position(expected, duration_basis) - _note_relative_position(predicted, duration_basis))
+            pair_cost = float(pitch_delta) + min(4.0, time_delta * 4.0) + (1.0 - _duration_iou(expected, predicted)) * 0.1
+            diagonal = _append_dtw_pair(previous_row[predicted_index - 1], pair_cost, pitch_delta, config)
+            delete_expected = _append_dtw_gap(previous_row[predicted_index])
+            delete_predicted = _append_dtw_gap(current_row[predicted_index - 1])
+            current_row.append(min((diagonal, delete_expected, delete_predicted), key=lambda item: (item[0], -item[2], item[3])))
+        previous_row = current_row
+    return previous_row[-1]
+
+
+def _append_dtw_pair(
+    state: tuple[float, int, int, float],
+    pair_cost: float,
+    pitch_delta: int,
+    config: MidiMetricConfig,
+) -> tuple[float, int, int, float]:
+    cost, pairs, matches, pitch_delta_sum = state
+    pitch_match = pitch_delta <= config.pitch_tolerance_semitones
+    return (cost + pair_cost, pairs + 1, matches + (1 if pitch_match else 0), pitch_delta_sum + pitch_delta)
+
+
+def _append_dtw_gap(state: tuple[float, int, int, float]) -> tuple[float, int, int, float]:
+    cost, pairs, matches, pitch_delta_sum = state
+    return (cost + _DTW_GAP_COST, pairs, matches, pitch_delta_sum)
+
+
+def _note_relative_position(note: NoteEvent, duration_basis: float) -> float:
+    return _safe_div(float(note.start), duration_basis)
+
+
 def _infer_reference_track_suspect_reasons(
     *,
     base_metrics: MidiMetrics,
     best_octave: tuple[float, float, int, int],
     best_time: tuple[float, float, int, float],
+    dtw: MidiDtwDiagnostics,
     expected_notes: list[NoteEvent],
     predicted_notes: list[NoteEvent],
     median_pitch_delta: float | None,
@@ -596,6 +789,14 @@ def _infer_reference_track_suspect_reasons(
         reasons.append("expected_track_starts_before_vocal")
     if median_pitch_delta is not None and abs(median_pitch_delta) >= 10.0 and base_metrics.pitch_accuracy < 0.2:
         reasons.append("median_pitch_range_mismatch")
+    if dtw.dtw_skipped_reason is None and dtw.dtw_pitch_match_recall_proxy is not None:
+        dtw_recall = float(dtw.dtw_pitch_match_recall_proxy)
+        if dtw_recall >= max(0.05, base_recall * 2.0) and dtw.dtw_aligned_note_pairs >= max(5, base_metrics.matched_note_count + 5):
+            reasons.append("dtw_alignment_improves_recall")
+        if dtw_recall >= max(0.5, time_recall * 2.0) and dtw.dtw_mean_abs_pitch_delta is not None and dtw.dtw_mean_abs_pitch_delta <= 2.0:
+            reasons.append("possible_nonlinear_time_alignment")
+        if dtw.dtw_mean_abs_pitch_delta is not None and dtw.dtw_mean_abs_pitch_delta >= 7.0 and dtw_recall < 0.05:
+            reasons.append("possible_reference_sequence_mismatch")
     return reasons
 
 

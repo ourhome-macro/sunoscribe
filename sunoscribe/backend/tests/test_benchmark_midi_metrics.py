@@ -48,7 +48,11 @@ class BenchmarkMidiMetricsTests(unittest.TestCase):
             _note(3.0, 3.5, 67),
         ]
 
-        metrics = compute_midi_metrics(expected, predicted, config=MidiMetricConfig(onset_tolerance_sec=0.12))
+        metrics = compute_midi_metrics(
+            expected,
+            predicted,
+            config=MidiMetricConfig(onset_tolerance_sec=0.12, auto_octave_normalize=False),
+        )
 
         self.assertEqual(metrics.matched_note_count, 2)
         self.assertAlmostEqual(metrics.note_precision, 2 / 3)

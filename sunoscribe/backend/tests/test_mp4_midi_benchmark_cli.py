@@ -9,7 +9,7 @@ from unittest.mock import patch
 
 from app.modules.benchmark.dataset import BenchmarkSample
 from app.modules.benchmark.midi_metrics import MidiMetricConfig
-from app.scripts.mp4_midi_benchmark import _compute_metrics_stage, main
+from app.scripts.mp4_midi_benchmark import _aggregate_metrics_for_reference_status, _compute_metrics_stage, _quality_gate_stage, _reference_review_sample, main
 
 
 def _write_midi(path: Path) -> None:
@@ -34,14 +34,14 @@ def _write_dual_track_midi(path: Path) -> None:
     midi.write(str(path))
 
 
-def _write_sequence_midi(path: Path, *, start_offset: float = 0.0, note_count: int = 12, duration: float = 1.0) -> None:
+def _write_sequence_midi(path: Path, *, start_offset: float = 0.0, note_count: int = 12, duration: float = 1.0, pitch_offset: int = 0) -> None:
     import pretty_midi
 
     midi = pretty_midi.PrettyMIDI(initial_tempo=120)
     instrument = pretty_midi.Instrument(program=0, name="Lead Vocal")
     for index in range(note_count):
         start = start_offset + index * duration
-        instrument.notes.append(pretty_midi.Note(velocity=90, pitch=60 + (index % 3), start=start, end=start + duration))
+        instrument.notes.append(pretty_midi.Note(velocity=90, pitch=60 + pitch_offset + (index % 3), start=start, end=start + duration))
     midi.instruments.append(instrument)
     midi.write(str(path))
 
@@ -91,6 +91,131 @@ class _FakeAudioAnalysisService:
 
 
 class Mp4MidiBenchmarkCliTests(unittest.TestCase):
+    def test_reference_review_flags_high_expected_note_count(self) -> None:
+        sample = _reference_review_sample(
+            {
+                "sample_id": "dense_reference",
+                "status": "quality_failed",
+                "metrics": {"expected_note_count": 1200, "predicted_note_count": 150, "note_recall": 0.02},
+                "audibility": {"expected_duration_sec": 120.0, "first_note_delay_sec": 0.0},
+                "alignment": {"best_time_shift_note_recall": 0.02, "dtw": {"dtw_pitch_match_recall_proxy": 0.03, "best_dtw_octave_shift_semitones": 0}},
+                "quality_gate": {"failed_checks": []},
+            }
+        )
+
+        self.assertEqual(sample["reference_status"], "reference_suspect")
+        self.assertIn("expected_note_count_too_high", sample["reference_suspect_reasons"])
+        self.assertIn("expected_note_density_too_high", sample["reference_suspect_reasons"])
+
+    def test_reference_review_flags_dtw_and_octave_suspects(self) -> None:
+        sample = _reference_review_sample(
+            {
+                "sample_id": "octave_dtw",
+                "status": "quality_failed",
+                "metrics": {"expected_note_count": 100, "predicted_note_count": 90, "note_recall": 0.04},
+                "audibility": {"expected_duration_sec": 80.0, "first_note_delay_sec": 0.0},
+                "alignment": {"best_time_shift_note_recall": 0.04, "dtw": {"dtw_pitch_match_recall_proxy": 0.22, "best_dtw_octave_shift_semitones": 12}},
+                "quality_gate": {"failed_checks": []},
+            }
+        )
+
+        self.assertEqual(sample["reference_status"], "reference_suspect")
+        self.assertIn("octave_reference_suspect", sample["reference_suspect_reasons"])
+        self.assertIn("dtw_sequence_alignment_suspect", sample["reference_suspect_reasons"])
+
+    def test_reference_review_accepts_auto_corrected_octave_shift(self) -> None:
+        sample = _reference_review_sample(
+            {
+                "sample_id": "auto_octave",
+                "status": "success",
+                "metrics": {
+                    "expected_note_count": 408,
+                    "predicted_note_count": 169,
+                    "note_recall": 0.0907,
+                    "octave_shift_applied": 12,
+                    "octave_shift_target": "predicted",
+                    "median_pitch_delta_raw": -13.0,
+                },
+                "audibility": {"expected_duration_sec": 176.3, "first_note_delay_sec": 1.39},
+                "alignment": {
+                    "best_time_shift_note_recall": 0.0539,
+                    "dtw": {"dtw_pitch_match_recall_proxy": 0.2941, "best_dtw_octave_shift_semitones": 12},
+                },
+                "quality_gate": {"failed_checks": []},
+            }
+        )
+
+        self.assertEqual(sample["reference_status"], "likely_comparable")
+        self.assertNotIn("octave_reference_suspect", sample["reference_suspect_reasons"])
+        self.assertNotIn("dtw_sequence_alignment_suspect", sample["reference_suspect_reasons"])
+
+    def test_reference_review_keeps_comparable_sample_clean(self) -> None:
+        sample = _reference_review_sample(
+            {
+                "sample_id": "clean",
+                "status": "success",
+                "metrics": {"expected_note_count": 80, "predicted_note_count": 75, "note_recall": 0.2},
+                "audibility": {"expected_duration_sec": 80.0, "first_note_delay_sec": 1.0},
+                "alignment": {"best_time_shift_note_recall": 0.2, "dtw": {"dtw_pitch_match_recall_proxy": 0.22, "best_dtw_octave_shift_semitones": 0}},
+                "quality_gate": {"failed_checks": []},
+            }
+        )
+
+        self.assertEqual(sample["reference_status"], "likely_comparable")
+        self.assertEqual(sample["reference_suspect_reasons"], [])
+
+    def test_aggregate_metrics_filters_reference_suspects(self) -> None:
+        rows = [
+            {
+                "sample_id": "clean",
+                "reference_status": "likely_comparable",
+                "metrics": {"note_precision": 0.6, "note_recall": 0.5, "note_f1": 0.55},
+                "audibility": {"midi_coverage_ratio": 0.7, "first_note_delay_sec": 1.0},
+            },
+            {
+                "sample_id": "dirty_reference",
+                "reference_status": "reference_suspect",
+                "metrics": {"note_precision": 0.0, "note_recall": 0.01, "note_f1": 0.02},
+                "audibility": {"midi_coverage_ratio": 0.1, "first_note_delay_sec": 31.0},
+            },
+        ]
+
+        aggregate = _aggregate_metrics_for_reference_status(rows, reference_status="likely_comparable")
+        unfiltered = _aggregate_metrics_for_reference_status(rows, reference_status=None)
+
+        self.assertEqual(aggregate["reference_status_filter"], "likely_comparable")
+        self.assertEqual(aggregate["metric_sample_count"], 1)
+        self.assertEqual(aggregate["excluded_metric_sample_count"], 1)
+        self.assertEqual(aggregate["overall_f1"], 0.55)
+        self.assertEqual(aggregate["metric_sample_ids"], ["clean"])
+        self.assertEqual(unfiltered["metric_sample_count"], 2)
+        self.assertAlmostEqual(unfiltered["overall_f1"], 0.285)
+
+    def test_quality_gate_uses_dynamic_coverage_threshold(self) -> None:
+        _, payload = _quality_gate_stage(
+            metrics_payload={
+                "produced_midi": "produced.mid",
+                "metrics": {
+                    "expected_note_count": 408,
+                    "predicted_note_count": 169,
+                    "note_recall": 0.0907,
+                    "matched_note_count": 37,
+                    "note_f1": 0.1282,
+                    "note_precision": 0.2189,
+                    "pitch_accuracy": 0.4594,
+                    "octave_error_rate": 0.0,
+                },
+                "audibility": {"first_note_delay_sec": 1.39, "midi_coverage_ratio": 0.3540},
+                "suspected_failure_modes": [],
+            }
+        )
+
+        coverage_check = next(check for check in payload["checks"] if check["name"] == "midi_coverage_ratio")
+        self.assertEqual(payload["status"], "success")
+        self.assertTrue(coverage_check["passed"])
+        self.assertAlmostEqual(coverage_check["threshold"], (169 / 408) * 0.85)
+        self.assertEqual(payload["effective_thresholds"]["midi_coverage_ratio_min"], coverage_check["threshold"])
+
     def test_validate_writes_dataset_and_summary(self) -> None:
         with TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -225,11 +350,63 @@ class Mp4MidiBenchmarkCliTests(unittest.TestCase):
         self.assertEqual(payload["metrics"]["note_f1"], 1.0)
         self.assertIn("audibility", payload)
         self.assertIn("alignment", payload)
+        self.assertIn("dtw", payload["alignment"])
         self.assertIn("diagnostics", payload)
         self.assertIn("alignment", payload["diagnostics"])
+        self.assertIn("dtw", payload["diagnostics"]["alignment"])
         self.assertIn("suspected_failure_modes", payload)
         self.assertEqual(payload["instrumental_hook_note_count"], 1)
         self.assertIsNotNone(payload["predicted_lead_track"])
+
+    def test_metrics_stage_records_octave_normalization(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            expected = root / "expected.mid"
+            produced = root / "produced.mid"
+            _write_sequence_midi(expected, note_count=12)
+            _write_sequence_midi(produced, note_count=6)
+            sample = BenchmarkSample(
+                id="octave_song",
+                input_mp4=root / "song.mp4",
+                expected_midi=expected,
+                expected_melody_track=1,
+            )
+
+            stage, payload = _compute_metrics_stage(
+                sample=sample,
+                produced_midi_path=produced,
+                metric_config=MidiMetricConfig(onset_tolerance_sec=0.12),
+            )
+
+        self.assertEqual(stage.status, "success")
+        self.assertIsNotNone(payload)
+        self.assertEqual(payload["metrics"]["octave_shift_applied"], 0)
+
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            expected = root / "expected.mid"
+            produced = root / "produced.mid"
+            _write_sequence_midi(expected, note_count=12)
+            _write_sequence_midi(produced, note_count=6, pitch_offset=-12)
+            sample = BenchmarkSample(
+                id="octave_song",
+                input_mp4=root / "song.mp4",
+                expected_midi=expected,
+                expected_melody_track=1,
+            )
+
+            stage, payload = _compute_metrics_stage(
+                sample=sample,
+                produced_midi_path=produced,
+                metric_config=MidiMetricConfig(onset_tolerance_sec=0.12),
+            )
+
+        self.assertEqual(stage.status, "success")
+        self.assertIsNotNone(payload)
+        self.assertEqual(payload["metrics"]["octave_shift_applied"], 12)
+        self.assertEqual(payload["metrics"]["octave_shift_target"], "predicted")
+        self.assertEqual(payload["metrics"]["note_recall"], 0.5)
+        self.assertEqual(payload["diagnostics"]["octave_shift_applied"], 12)
 
     def test_run_marks_quality_failed_with_exit_2_and_keeps_workspace(self) -> None:
         with TemporaryDirectory() as temp_dir:
@@ -260,11 +437,25 @@ class Mp4MidiBenchmarkCliTests(unittest.TestCase):
             summary = json.loads((run_root / "summary.json").read_text(encoding="utf-8"))
             stage_status = json.loads((run_root / "song" / "stage_status.json").read_text(encoding="utf-8"))
             quality_gate = json.loads((run_root / "song" / "quality_gate.json").read_text(encoding="utf-8"))
+            quality_diagnostics = json.loads((run_root / "quality_diagnostics.json").read_text(encoding="utf-8"))
+            reference_review = json.loads((run_root / "reference_review.json").read_text(encoding="utf-8"))
 
             self.assertEqual(exit_code, 2)
             self.assertEqual(summary["results"][0]["status"], "quality_failed")
             self.assertIn("alignment", summary["results"][0])
+            self.assertIn("dtw", summary["results"][0]["alignment"])
+            self.assertIn("reference_status", summary["results"][0])
+            self.assertIn("reference_suspect_reasons", summary["results"][0])
+            self.assertIn("reference_review", summary)
+            self.assertEqual(summary["aggregate_metrics"]["reference_status_filter"], "likely_comparable")
+            self.assertIn("aggregate_metrics_unfiltered", summary)
+            self.assertEqual(quality_diagnostics["aggregate_metrics"]["reference_status_filter"], "likely_comparable")
+            self.assertIn("aggregate_metrics_unfiltered", quality_diagnostics)
+            self.assertTrue((run_root / "reference_review.md").exists())
+            self.assertEqual(reference_review["samples"][0]["sample_id"], "song")
             self.assertEqual(quality_gate["status"], "quality_failed")
+            self.assertNotIn("reference_status", quality_gate)
+            self.assertNotIn("reference_suspect_reasons", quality_gate)
             self.assertFalse((run_root / "song" / "error.json").exists())
             self.assertTrue(Path(stage_status["workspace_path"]).exists())
             self.assertTrue((run_root / "song" / "logs" / "stdout.log").exists())

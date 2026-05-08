@@ -93,6 +93,8 @@ Exit codes are intentionally distinct:
 
 First-pass hard quality gates are `first_note_delay_sec <= 15.0`, `midi_coverage_ratio >= 0.45`, `note_recall >= 0.05`, and `matched_notes >= 10`. `note_f1` is diagnostic-only for now and appears in summaries and quality reports.
 
+Use `alignment.best_octave_shift_note_recall`, `alignment.best_time_shift_note_recall`, `alignment.dtw.dtw_pitch_match_recall_proxy`, and `alignment.reference_track_suspect_reasons` as triage-only signals. If shifted or DTW recall is much higher than base recall, review `expected_melody_track` and the reference MIDI timing/pitch range before tuning F0 extraction, note segmentation, or quantization.
+
 ## Failure Reading Order
 
 1. `readiness_report.json`: dependency/model readiness.

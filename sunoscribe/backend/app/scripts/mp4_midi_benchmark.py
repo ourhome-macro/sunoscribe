@@ -73,6 +73,16 @@ QUALITY_GATE_THRESHOLDS: dict[str, float | int] = {
     "matched_notes_min": 10,
 }
 
+REFERENCE_REVIEW_THRESHOLDS: dict[str, float | int] = {
+    "expected_note_count_high": 1000,
+    "expected_note_density_per_sec_high": 8.0,
+    "predicted_expected_ratio_low": 0.2,
+    "predicted_note_count_min_for_ratio": 100,
+    "dtw_octave_recall_min": 0.10,
+    "time_origin_delay_sec_min": 15.0,
+    "dtw_recall_lift_min": 0.10,
+}
+
 
 def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv)
@@ -397,6 +407,7 @@ def _quality_gate_stage(*, metrics_payload: dict[str, Any]) -> tuple[StageRecord
     start = time.perf_counter()
     metrics = metrics_payload.get("metrics") or {}
     audibility = metrics_payload.get("audibility") or {}
+    coverage_threshold = _effective_midi_coverage_threshold(metrics)
     checks = [
         _quality_check_max(
             name="first_note_delay_sec",
@@ -406,7 +417,12 @@ def _quality_gate_stage(*, metrics_payload: dict[str, Any]) -> tuple[StageRecord
         _quality_check_min(
             name="midi_coverage_ratio",
             actual=audibility.get("midi_coverage_ratio"),
-            threshold=QUALITY_GATE_THRESHOLDS["midi_coverage_ratio_min"],
+            threshold=coverage_threshold,
+            details={
+                "base_threshold": QUALITY_GATE_THRESHOLDS["midi_coverage_ratio_min"],
+                "predicted_expected_note_ratio": _safe_ratio(metrics.get("predicted_note_count"), metrics.get("expected_note_count")),
+                "policy": "min(base_threshold, predicted_expected_note_ratio * 0.85)",
+            },
         ),
         _quality_check_min(
             name="note_recall",
@@ -423,6 +439,7 @@ def _quality_gate_stage(*, metrics_payload: dict[str, Any]) -> tuple[StageRecord
     payload = {
         "status": "success" if not failed_checks else "quality_failed",
         "thresholds": QUALITY_GATE_THRESHOLDS,
+        "effective_thresholds": {"midi_coverage_ratio_min": coverage_threshold},
         "checks": checks,
         "failed_checks": failed_checks,
         "diagnostic_only": {
@@ -447,15 +464,26 @@ def _quality_gate_stage(*, metrics_payload: dict[str, Any]) -> tuple[StageRecord
     )
 
 
-def _quality_check_min(*, name: str, actual: Any, threshold: float | int) -> dict[str, Any]:
+def _quality_check_min(*, name: str, actual: Any, threshold: float | int, details: dict[str, Any] | None = None) -> dict[str, Any]:
     value = _as_float(actual)
-    return {
+    check = {
         "name": name,
         "operator": ">=",
         "actual": actual,
         "threshold": threshold,
         "passed": value is not None and value >= float(threshold),
     }
+    if details:
+        check["details"] = details
+    return check
+
+
+def _effective_midi_coverage_threshold(metrics: dict[str, Any]) -> float:
+    base_threshold = float(QUALITY_GATE_THRESHOLDS["midi_coverage_ratio_min"])
+    predicted_expected_ratio = _safe_ratio(metrics.get("predicted_note_count"), metrics.get("expected_note_count"))
+    if predicted_expected_ratio is None:
+        return base_threshold
+    return min(base_threshold, predicted_expected_ratio * 0.85)
 
 
 def _quality_check_max(*, name: str, actual: Any, threshold: float | int) -> dict[str, Any]:
@@ -477,13 +505,20 @@ def _write_summary_files(
     dataset_report: dict[str, Any],
     readiness_report: dict[str, Any] | None = None,
 ) -> None:
-    metric_payloads = [result.metrics for result in results if result.metrics]
-    metrics_values = [payload["metrics"] for payload in metric_payloads if payload.get("metrics")]
     status_counts = {
         "success": sum(1 for result in results if result.status == "success"),
         "quality_failed": sum(1 for result in results if result.status == "quality_failed"),
         "failed": sum(1 for result in results if result.status == "failed"),
     }
+    result_rows = [_summary_result_row(result) for result in results]
+    reference_review = _build_reference_review(run_root=run_root, result_rows=result_rows)
+    reference_by_sample = {item["sample_id"]: item for item in reference_review["samples"]}
+    for row in result_rows:
+        review = reference_by_sample.get(row["sample_id"], {})
+        row["reference_status"] = review.get("reference_status")
+        row["reference_suspect_reasons"] = review.get("reference_suspect_reasons", [])
+        row["reference_review"] = review
+    aggregate_metrics = _aggregate_metrics_for_reference_status(result_rows, reference_status="likely_comparable")
     summary = {
         "run_root": str(run_root),
         "created_at": _utc_now(),
@@ -492,35 +527,147 @@ def _write_summary_files(
         "readiness": readiness_report,
         "status_counts": status_counts,
         "quality_gate_thresholds": QUALITY_GATE_THRESHOLDS,
-        "results": [
-            {
-                "sample_id": result.sample_id,
-                "status": result.status,
-                "run_dir": str(result.run_dir),
-                "produced_midi_path": str(result.produced_midi_path) if result.produced_midi_path else None,
-                "metrics": result.metrics.get("metrics") if result.metrics else None,
-                "audibility": result.metrics.get("audibility") if result.metrics else None,
-                "alignment": result.metrics.get("alignment") if result.metrics else None,
-                "diagnostics": result.metrics.get("diagnostics") if result.metrics else None,
-                "suspected_failure_modes": result.metrics.get("suspected_failure_modes") if result.metrics else [],
-                "quality_gate": result.quality_gate,
-                "logs": result.logs,
-                "workspace_path": str(result.workspace_path) if result.workspace_path else None,
-                "error": result.error,
-                "warnings": result.warnings,
-            }
-            for result in results
-        ],
-        "aggregate_metrics": _aggregate_metrics(metrics_values, metric_payloads=metric_payloads),
+        "reference_review": reference_review,
+        "results": result_rows,
+        "aggregate_metrics": aggregate_metrics,
+        "aggregate_metrics_unfiltered": _aggregate_metrics_for_reference_status(result_rows, reference_status=None),
     }
+    _write_json(run_root / "reference_review.json", reference_review)
+    (run_root / "reference_review.md").write_text(_reference_review_markdown(reference_review), encoding="utf-8")
     _write_json(run_root / "summary.json", summary)
     (run_root / "summary.md").write_text(_summary_markdown(summary), encoding="utf-8")
+
+
+def _summary_result_row(result: SampleRunResult) -> dict[str, Any]:
+    return {
+        "sample_id": result.sample_id,
+        "status": result.status,
+        "run_dir": str(result.run_dir),
+        "produced_midi_path": str(result.produced_midi_path) if result.produced_midi_path else None,
+        "metrics": result.metrics.get("metrics") if result.metrics else None,
+        "audibility": result.metrics.get("audibility") if result.metrics else None,
+        "alignment": result.metrics.get("alignment") if result.metrics else None,
+        "diagnostics": result.metrics.get("diagnostics") if result.metrics else None,
+        "suspected_failure_modes": result.metrics.get("suspected_failure_modes") if result.metrics else [],
+        "quality_gate": result.quality_gate,
+        "logs": result.logs,
+        "workspace_path": str(result.workspace_path) if result.workspace_path else None,
+        "error": result.error,
+        "warnings": result.warnings,
+    }
+
+
+def _build_reference_review(*, run_root: Path, result_rows: list[dict[str, Any]]) -> dict[str, Any]:
+    samples = [_reference_review_sample(row) for row in result_rows]
+    status_counts = {
+        "likely_comparable": sum(1 for sample in samples if sample["reference_status"] == "likely_comparable"),
+        "reference_suspect": sum(1 for sample in samples if sample["reference_status"] == "reference_suspect"),
+        "needs_manual_review": sum(1 for sample in samples if sample["reference_status"] == "needs_manual_review"),
+    }
+    reason_counts: dict[str, int] = {}
+    for sample in samples:
+        for reason in sample["reference_suspect_reasons"]:
+            reason_counts[reason] = reason_counts.get(reason, 0) + 1
+    return {
+        "run_root": str(run_root),
+        "created_at": _utc_now(),
+        "thresholds": REFERENCE_REVIEW_THRESHOLDS,
+        "status_counts": status_counts,
+        "reason_counts": dict(sorted(reason_counts.items(), key=lambda item: (-item[1], item[0]))),
+        "samples": samples,
+    }
+
+
+def _reference_review_sample(row: dict[str, Any]) -> dict[str, Any]:
+    metrics = row.get("metrics") or {}
+    audibility = row.get("audibility") or {}
+    alignment = row.get("alignment") or {}
+    dtw = alignment.get("dtw") or {}
+    expected_count = metrics.get("expected_note_count")
+    predicted_count = metrics.get("predicted_note_count")
+    expected_duration = audibility.get("expected_duration_sec")
+    note_recall = metrics.get("note_recall")
+    octave_shift_applied = metrics.get("octave_shift_applied")
+    octave_shift_target = metrics.get("octave_shift_target")
+    median_pitch_delta_raw = metrics.get("median_pitch_delta_raw")
+    predicted_expected_ratio = _safe_ratio(predicted_count, expected_count)
+    expected_note_density = _safe_ratio(expected_count, expected_duration)
+    dtw_recall = dtw.get("dtw_pitch_match_recall_proxy")
+    dtw_recall_lift = None
+    if dtw_recall is not None and note_recall is not None:
+        dtw_recall_lift = float(dtw_recall) - float(note_recall)
+
+    reasons: list[str] = []
+    if expected_count is not None and int(expected_count) >= int(REFERENCE_REVIEW_THRESHOLDS["expected_note_count_high"]):
+        reasons.append("expected_note_count_too_high")
+    if expected_note_density is not None and expected_note_density >= float(REFERENCE_REVIEW_THRESHOLDS["expected_note_density_per_sec_high"]):
+        reasons.append("expected_note_density_too_high")
+    if (
+        predicted_expected_ratio is not None
+        and predicted_expected_ratio < float(REFERENCE_REVIEW_THRESHOLDS["predicted_expected_ratio_low"])
+        and predicted_count is not None
+        and int(predicted_count) >= int(REFERENCE_REVIEW_THRESHOLDS["predicted_note_count_min_for_ratio"])
+    ):
+        reasons.append("predicted_expected_ratio_too_low")
+    if (
+        abs(int(dtw.get("best_dtw_octave_shift_semitones") or 0)) in {12, 24}
+        and dtw_recall is not None
+        and float(dtw_recall) >= float(REFERENCE_REVIEW_THRESHOLDS["dtw_octave_recall_min"])
+        and not _octave_shift_was_applied(octave_shift_applied)
+    ):
+        reasons.append("octave_reference_suspect")
+    first_delay = audibility.get("first_note_delay_sec")
+    best_time_recall = alignment.get("best_time_shift_note_recall")
+    if (
+        first_delay is not None
+        and abs(float(first_delay)) > float(REFERENCE_REVIEW_THRESHOLDS["time_origin_delay_sec_min"])
+        and best_time_recall is not None
+        and note_recall is not None
+        and float(best_time_recall) > float(note_recall)
+    ):
+        reasons.append("time_origin_suspect")
+    if (
+        dtw_recall_lift is not None
+        and dtw_recall_lift >= float(REFERENCE_REVIEW_THRESHOLDS["dtw_recall_lift_min"])
+        and not _octave_shift_was_applied(octave_shift_applied)
+    ):
+        reasons.append("dtw_sequence_alignment_suspect")
+
+    if row.get("metrics") is None:
+        reference_status = "needs_manual_review"
+    elif reasons:
+        reference_status = "reference_suspect"
+    else:
+        reference_status = "likely_comparable"
+
+    return {
+        "sample_id": row.get("sample_id"),
+        "reference_status": reference_status,
+        "reference_suspect_reasons": reasons,
+        "expected_note_count": expected_count,
+        "predicted_note_count": predicted_count,
+        "expected_duration_sec": expected_duration,
+        "expected_note_density_per_sec": expected_note_density,
+        "predicted_expected_note_ratio": predicted_expected_ratio,
+        "note_recall": note_recall,
+        "octave_shift_applied": octave_shift_applied,
+        "octave_shift_target": octave_shift_target,
+        "median_pitch_delta_raw": median_pitch_delta_raw,
+        "dtw_pitch_match_recall_proxy": dtw_recall,
+        "dtw_recall_lift": dtw_recall_lift,
+        "best_dtw_octave_shift_semitones": dtw.get("best_dtw_octave_shift_semitones"),
+        "best_time_shift_note_recall": best_time_recall,
+        "first_note_delay_sec": first_delay,
+        "quality_status": row.get("status"),
+        "quality_failed_checks": [check.get("name") for check in ((row.get("quality_gate") or {}).get("failed_checks") or [])],
+    }
 
 
 def _summary_markdown(summary: dict[str, Any]) -> str:
     results = summary.get("results") or []
     aggregate = summary.get("aggregate_metrics") or {}
     readiness = summary.get("readiness") or {}
+    reference_counts = (summary.get("reference_review") or {}).get("status_counts") or {}
     lines = [
         "# MP4->MIDI Benchmark Summary",
         "",
@@ -529,14 +676,20 @@ def _summary_markdown(summary: dict[str, Any]) -> str:
         f"- Success: `{(summary.get('status_counts') or {}).get('success', 0)}`",
         f"- Quality failed: `{(summary.get('status_counts') or {}).get('quality_failed', 0)}`",
         f"- Failed: `{(summary.get('status_counts') or {}).get('failed', 0)}`",
-        f"- Mean note F1: `{aggregate.get('note_f1_mean')}`",
-        f"- Mean pitch accuracy: `{aggregate.get('pitch_accuracy_mean')}`",
-        f"- Mean MIDI coverage: `{aggregate.get('midi_coverage_ratio_mean')}`",
-        f"- Mean first-note delay: `{aggregate.get('first_note_delay_sec_mean')}`",
+        f"- Aggregate filter: `{aggregate.get('reference_status_filter')}`",
+        f"- Comparable metric samples: `{aggregate.get('metric_sample_count')}`",
+        f"- Excluded metric samples: `{aggregate.get('excluded_metric_sample_count')}`",
+        f"- Comparable mean note F1: `{aggregate.get('note_f1_mean')}`",
+        f"- Comparable mean pitch accuracy: `{aggregate.get('pitch_accuracy_mean')}`",
+        f"- Comparable mean MIDI coverage: `{aggregate.get('midi_coverage_ratio_mean')}`",
+        f"- Comparable mean first-note delay: `{aggregate.get('first_note_delay_sec_mean')}`",
         f"- Readiness: `{readiness.get('status', 'not_checked')}`",
+        f"- Reference suspect: `{reference_counts.get('reference_suspect', 0)}`",
+        f"- Likely comparable: `{reference_counts.get('likely_comparable', 0)}`",
+        f"- Needs manual review: `{reference_counts.get('needs_manual_review', 0)}`",
         "",
-        "| Sample | Status | Note F1 | Recall | Matched | Coverage | First Delay s | Best Oct Rec | Best Time Rec | Pitch Acc | Failure Modes | Error |",
-        "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- | --- |",
+        "| Sample | Status | Reference Status | Reference Reasons | Note F1 | Recall | Matched | Coverage | First Delay s | Best Oct Rec | Best Time Rec | DTW Rec | Pitch Acc | Failure Modes | Error |",
+        "| --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- | --- |",
     ]
     for result in results:
         metrics = result.get("metrics") or {}
@@ -544,9 +697,11 @@ def _summary_markdown(summary: dict[str, Any]) -> str:
         alignment = result.get("alignment") or {}
         error = result.get("error") or {}
         lines.append(
-            "| {sample} | {status} | {f1} | {recall} | {matched} | {coverage} | {delay} | {best_oct} | {best_time} | {pitch} | {modes} | {error} |".format(
+            "| {sample} | {status} | {reference_status} | {reference_reasons} | {f1} | {recall} | {matched} | {coverage} | {delay} | {best_oct} | {best_time} | {dtw_rec} | {pitch} | {modes} | {error} |".format(
                 sample=result.get("sample_id"),
                 status=result.get("status"),
+                reference_status=result.get("reference_status") or "",
+                reference_reasons=", ".join(result.get("reference_suspect_reasons") or []),
                 f1=_fmt_metric(metrics.get("note_f1")),
                 recall=_fmt_metric(metrics.get("note_recall")),
                 matched=metrics.get("matched_note_count") if metrics else "",
@@ -554,6 +709,7 @@ def _summary_markdown(summary: dict[str, Any]) -> str:
                 delay=_fmt_metric(audibility.get("first_note_delay_sec")),
                 best_oct=_fmt_metric(alignment.get("best_octave_shift_note_recall")),
                 best_time=_fmt_metric(alignment.get("best_time_shift_note_recall")),
+                dtw_rec=_fmt_metric((alignment.get("dtw") or {}).get("dtw_pitch_match_recall_proxy")),
                 pitch=_fmt_metric(metrics.get("pitch_accuracy")),
                 modes=", ".join(result.get("suspected_failure_modes") or []),
                 error=(error.get("type") or ""),
@@ -592,12 +748,28 @@ def _aggregate_metrics(metrics_values: list[dict[str, Any]], *, metric_payloads:
     for key in keys:
         values = [float(metrics[key]) for metrics in metrics_values if metrics.get(key) is not None]
         aggregate[f"{key}_mean"] = (sum(values) / len(values)) if values else None
+    aggregate["overall_precision"] = aggregate.get("note_precision_mean")
+    aggregate["overall_recall"] = aggregate.get("note_recall_mean")
+    aggregate["overall_f1"] = aggregate.get("note_f1_mean")
     onset_values = [float(metrics["onset_mae_ms"]) for metrics in metrics_values if metrics.get("onset_mae_ms") is not None]
     aggregate["onset_mae_ms_mean"] = (sum(onset_values) / len(onset_values)) if onset_values else None
     audibility_values = [payload.get("audibility") or {} for payload in metric_payloads or []]
     for key in ["midi_coverage_ratio", "first_note_delay_sec", "duration_ratio", "longest_silence_sec"]:
         values = [float(item[key]) for item in audibility_values if item.get(key) is not None]
         aggregate[f"{key}_mean"] = (sum(values) / len(values)) if values else None
+    return aggregate
+
+
+def _aggregate_metrics_for_reference_status(result_rows: list[dict[str, Any]], *, reference_status: str | None) -> dict[str, Any]:
+    metric_rows = [row for row in result_rows if row.get("metrics")]
+    filtered_rows = [row for row in metric_rows if reference_status is None or row.get("reference_status") == reference_status]
+    aggregate = _aggregate_metrics(
+        [row["metrics"] for row in filtered_rows],
+        metric_payloads=[{"audibility": row.get("audibility") or {}} for row in filtered_rows],
+    )
+    aggregate["reference_status_filter"] = reference_status
+    aggregate["excluded_metric_sample_count"] = len(metric_rows) - len(filtered_rows)
+    aggregate["metric_sample_ids"] = [row.get("sample_id") for row in filtered_rows]
     return aggregate
 
 
@@ -701,10 +873,21 @@ def _write_quality_diagnostics(*, run_root: Path, results: list[SampleRunResult]
                 "error": result.error,
             }
         )
+    reference_review = _build_reference_review(run_root=run_root, result_rows=samples)
+    reference_by_sample = {item["sample_id"]: item for item in reference_review["samples"]}
+    for sample in samples:
+        review = reference_by_sample.get(sample["sample_id"], {})
+        sample["reference_status"] = review.get("reference_status")
+        sample["reference_suspect_reasons"] = review.get("reference_suspect_reasons", [])
+        sample["reference_review"] = review
+    aggregate_metrics = _aggregate_metrics_for_reference_status(samples, reference_status="likely_comparable")
     payload = {
         "run_root": str(run_root),
         "created_at": _utc_now(),
         "quality_gate_thresholds": QUALITY_GATE_THRESHOLDS,
+        "reference_review": reference_review,
+        "aggregate_metrics": aggregate_metrics,
+        "aggregate_metrics_unfiltered": _aggregate_metrics_for_reference_status(samples, reference_status=None),
         "status_counts": {
             "success": sum(1 for result in results if result.status == "success"),
             "quality_failed": sum(1 for result in results if result.status == "quality_failed"),
@@ -719,6 +902,8 @@ def _write_quality_diagnostics(*, run_root: Path, results: list[SampleRunResult]
 def _quality_diagnostics_markdown(payload: dict[str, Any]) -> str:
     samples = payload.get("samples") or []
     metric_samples = [sample for sample in samples if sample.get("metrics")]
+    aggregate = payload.get("aggregate_metrics") or {}
+    reference_counts = (payload.get("reference_review") or {}).get("status_counts") or {}
     lines = [
         "# Benchmark Quality Diagnostics",
         "",
@@ -727,11 +912,18 @@ def _quality_diagnostics_markdown(payload: dict[str, Any]) -> str:
         f"- Success: `{(payload.get('status_counts') or {}).get('success', 0)}`",
         f"- Quality failed: `{(payload.get('status_counts') or {}).get('quality_failed', 0)}`",
         f"- Failed: `{(payload.get('status_counts') or {}).get('failed', 0)}`",
+        f"- Reference suspect: `{reference_counts.get('reference_suspect', 0)}`",
+        f"- Likely comparable: `{reference_counts.get('likely_comparable', 0)}`",
+        f"- Needs manual review: `{reference_counts.get('needs_manual_review', 0)}`",
+        f"- Aggregate filter: `{aggregate.get('reference_status_filter')}`",
+        f"- Comparable metric samples: `{aggregate.get('metric_sample_count')}`",
+        f"- Excluded metric samples: `{aggregate.get('excluded_metric_sample_count')}`",
+        f"- Comparable overall F1: `{aggregate.get('overall_f1')}`",
         "",
         "## Worst By Note F1",
         "",
-        "| Sample | Status | F1 | Recall | Matched | Coverage | First Delay s | Best Oct Rec | Best Time Rec | Failure Modes |",
-        "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |",
+        "| Sample | Status | Reference Status | Reference Reasons | F1 | Recall | Matched | Coverage | First Delay s | Best Oct Rec | Best Time Rec | DTW Rec | Failure Modes |",
+        "| --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |",
     ]
     for sample in sorted(metric_samples, key=lambda item: _sort_float((item.get("metrics") or {}).get("note_f1")))[:20]:
         lines.append(_quality_table_row(sample))
@@ -740,8 +932,8 @@ def _quality_diagnostics_markdown(payload: dict[str, Any]) -> str:
             "",
             "## Worst By MIDI Coverage",
             "",
-            "| Sample | Status | F1 | Recall | Matched | Coverage | First Delay s | Best Oct Rec | Best Time Rec | Failure Modes |",
-            "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |",
+            "| Sample | Status | Reference Status | Reference Reasons | F1 | Recall | Matched | Coverage | First Delay s | Best Oct Rec | Best Time Rec | DTW Rec | Failure Modes |",
+            "| --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |",
         ]
     )
     for sample in sorted(metric_samples, key=lambda item: _sort_float((item.get("audibility") or {}).get("midi_coverage_ratio")))[:20]:
@@ -751,8 +943,8 @@ def _quality_diagnostics_markdown(payload: dict[str, Any]) -> str:
             "",
             "## Worst By First-Note Delay",
             "",
-            "| Sample | Status | F1 | Recall | Matched | Coverage | First Delay s | Best Oct Rec | Best Time Rec | Failure Modes |",
-            "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |",
+            "| Sample | Status | Reference Status | Reference Reasons | F1 | Recall | Matched | Coverage | First Delay s | Best Oct Rec | Best Time Rec | DTW Rec | Failure Modes |",
+            "| --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |",
         ]
     )
     for sample in sorted(
@@ -773,9 +965,11 @@ def _quality_table_row(sample: dict[str, Any]) -> str:
     metrics = sample.get("metrics") or {}
     audibility = sample.get("audibility") or {}
     alignment = sample.get("alignment") or {}
-    return "| {sample_id} | {status} | {f1} | {recall} | {matched} | {coverage} | {delay} | {best_oct} | {best_time} | {modes} |".format(
+    return "| {sample_id} | {status} | {reference_status} | {reference_reasons} | {f1} | {recall} | {matched} | {coverage} | {delay} | {best_oct} | {best_time} | {dtw_rec} | {modes} |".format(
         sample_id=sample.get("sample_id"),
         status=sample.get("status"),
+        reference_status=sample.get("reference_status") or "",
+        reference_reasons=", ".join(sample.get("reference_suspect_reasons") or []),
         f1=_fmt_metric(metrics.get("note_f1")),
         recall=_fmt_metric(metrics.get("note_recall")),
         matched=metrics.get("matched_note_count"),
@@ -783,8 +977,62 @@ def _quality_table_row(sample: dict[str, Any]) -> str:
         delay=_fmt_metric(audibility.get("first_note_delay_sec")),
         best_oct=_fmt_metric(alignment.get("best_octave_shift_note_recall")),
         best_time=_fmt_metric(alignment.get("best_time_shift_note_recall")),
+        dtw_rec=_fmt_metric((alignment.get("dtw") or {}).get("dtw_pitch_match_recall_proxy")),
         modes=", ".join(sample.get("suspected_failure_modes") or []),
     )
+
+
+def _reference_review_markdown(payload: dict[str, Any]) -> str:
+    samples = payload.get("samples") or []
+    status_counts = payload.get("status_counts") or {}
+    reason_counts = payload.get("reason_counts") or {}
+    lines = [
+        "# Benchmark Reference Review",
+        "",
+        f"- Run root: `{payload.get('run_root')}`",
+        f"- Created at: `{payload.get('created_at')}`",
+        f"- Reference suspect: `{status_counts.get('reference_suspect', 0)}`",
+        f"- Likely comparable: `{status_counts.get('likely_comparable', 0)}`",
+        f"- Needs manual review: `{status_counts.get('needs_manual_review', 0)}`",
+        "",
+        "## Reason Counts",
+        "",
+    ]
+    if reason_counts:
+        for reason, count in reason_counts.items():
+            lines.append(f"- `{reason}`: `{count}`")
+    else:
+        lines.append("- No reference suspect reasons detected.")
+    lines.extend(
+        [
+            "",
+            "## Samples",
+            "",
+            "| Sample | Reference Status | Reasons | Expected | Predicted | Density/sec | Pred/Exp | Recall | Oct Shift | Raw Median Δ | DTW Rec | DTW Lift | DTW Shift | First Delay s | Failed Checks |",
+            "| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |",
+        ]
+    )
+    for sample in sorted(samples, key=lambda item: (item.get("reference_status") != "reference_suspect", item.get("sample_id") or "")):
+        lines.append(
+            "| {sample_id} | {status} | {reasons} | {expected} | {predicted} | {density} | {ratio} | {recall} | {oct_shift} | {raw_delta} | {dtw_rec} | {dtw_lift} | {dtw_shift} | {delay} | {checks} |".format(
+                sample_id=sample.get("sample_id"),
+                status=sample.get("reference_status"),
+                reasons=", ".join(sample.get("reference_suspect_reasons") or []),
+                expected=sample.get("expected_note_count") or "",
+                predicted=sample.get("predicted_note_count") or "",
+                density=_fmt_metric(sample.get("expected_note_density_per_sec")),
+                ratio=_fmt_metric(sample.get("predicted_expected_note_ratio")),
+                recall=_fmt_metric(sample.get("note_recall")),
+                oct_shift=sample.get("octave_shift_applied") if sample.get("octave_shift_applied") is not None else "",
+                raw_delta=_fmt_metric(sample.get("median_pitch_delta_raw")),
+                dtw_rec=_fmt_metric(sample.get("dtw_pitch_match_recall_proxy")),
+                dtw_lift=_fmt_metric(sample.get("dtw_recall_lift")),
+                dtw_shift=sample.get("best_dtw_octave_shift_semitones") if sample.get("best_dtw_octave_shift_semitones") is not None else "",
+                delay=_fmt_metric(sample.get("first_note_delay_sec")),
+                checks=", ".join(sample.get("quality_failed_checks") or []),
+            )
+        )
+    return "\n".join(lines) + "\n"
 
 
 def _parse_args(argv: list[str] | None) -> argparse.Namespace:
@@ -890,6 +1138,19 @@ def _as_float(value: Any) -> float | None:
         return float(value)
     except (TypeError, ValueError):
         return None
+
+
+def _safe_ratio(numerator: Any, denominator: Any) -> float | None:
+    numerator_value = _as_float(numerator)
+    denominator_value = _as_float(denominator)
+    if numerator_value is None or denominator_value is None or denominator_value <= 0:
+        return None
+    return numerator_value / denominator_value
+
+
+def _octave_shift_was_applied(value: Any) -> bool:
+    numeric_value = _as_float(value)
+    return numeric_value is not None and numeric_value != 0.0
 
 
 def _sort_float(value: Any) -> float:

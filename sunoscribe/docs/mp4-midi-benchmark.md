@@ -809,6 +809,8 @@ Hard quality gate thresholds:
 
 `note_f1`, precision, pitch accuracy, and octave error rate are diagnostic-only in this first version. They are recorded in `metrics.json`, `summary.md`, and `quality_diagnostics.md`, but do not directly fail a sample.
 
+Alignment diagnostics are also diagnostic-only. Each sample records `alignment.best_octave_shift_*`, `alignment.best_time_shift_*`, `alignment.dtw`, median pitch/range deltas, and `alignment.reference_track_suspect_reasons` so low F1 can be separated into transcription quality failure versus likely reference-track octave/time-offset/nonlinear-alignment mismatch before changing the MIR pipeline.
+
 Additional per-song outputs:
 
 - `quality_gate.json`
