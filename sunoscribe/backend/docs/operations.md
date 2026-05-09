@@ -30,7 +30,9 @@ Remove-Item -Recurse -Force .venv, .pytest_cache, .tmp, .tmp_tests -ErrorAction 
 
 ```env
 PITCH_BACKEND=rmvpe
-PITCH_BACKEND_FALLBACKS=crepe,basic-pitch
+PITCH_PROFILE=production
+PITCH_ALLOW_BACKEND_FALLBACKS=false
+PITCH_BACKEND_FALLBACKS=
 PITCH_CACHE_DIR=~/.cache/sunoscribe/pitch
 RMVPE_MODEL_PATH=
 ```
@@ -38,10 +40,17 @@ RMVPE_MODEL_PATH=
 说明：
 
 - `PITCH_BACKEND=rmvpe` 是默认音高检测模型。
-- `PITCH_BACKEND_FALLBACKS` 是逗号分隔列表，RMVPE runtime 或模型不可用时依次尝试。
+- `PITCH_PROFILE` 控制当前运行语义，production / diagnostic / benchmark 的正式规则见 `../../docs/production-runtime-policy.md`。
+- `PITCH_ALLOW_BACKEND_FALLBACKS` 控制是否允许备用 backend。
+- `PITCH_BACKEND_FALLBACKS` 是逗号分隔列表，只有在明确允许 fallback 的 profile 下才生效。
 - `PITCH_CACHE_DIR` 是 SunoScribe 的 pitch 缓存目录。
 - `RMVPE_MODEL_PATH` 指向本地 RMVPE 模型文件；如果 runtime 能自行管理模型，可以留空。
 - 模型文件和本地缓存不提交到 git，根目录 `.cache/`、常见模型扩展名和 venv 已被 `.gitignore` 忽略。
+
+注意：
+
+- production 语义下不应依赖 fallback 继续产出谱面或导出文件。
+- 本文件只描述运行与缓存入口，不覆盖正式的 production policy。
 
 ## 健康检查
 
@@ -66,8 +75,8 @@ GET /api/health/pitch?deep=true
 状态含义：
 
 - `ok`：缓存和默认 backend 检查通过。
-- `degraded`：默认 RMVPE 不完整，但存在 fallback，服务可降级运行。
-- `fail`：默认 backend 不可用且没有 fallback。
+- `degraded`：运行时条件不完整，当前环境不适合作为 production 成功路径。
+- `fail`：默认 backend 不可用，或健康检查已确认不满足当前运行语义。
 
 ## 测试缓存
 

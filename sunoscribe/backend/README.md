@@ -1,6 +1,13 @@
 # SunoScribe Backend
 
-FastAPI 后端负责账号、项目、上传、异步任务、歌词、谱面生成和导出。音频处理主链路已经接入 `AudioAnalysisService`，默认音高 backend 为 RMVPE，并配置了 CREPE/basic-pitch fallback。
+FastAPI 后端负责账号、项目、上传、异步任务、歌词、谱面生成和导出。
+
+正式的音频流水线与 production runtime 语义以这两份文档为唯一事实源：
+
+- `../docs/backend-audio-pipeline.md`
+- `../docs/production-runtime-policy.md`
+
+本文件只保留当前后端的运行入口、API 概览和与实现对齐的简要说明；不再单独定义 fallback、stub 或 legacy export 语义。
 
 ## 本地环境
 
@@ -37,7 +44,9 @@ SMTP_FROM_EMAIL=no-reply@example.com
 SMTP_USE_TLS=true
 
 PITCH_BACKEND=rmvpe
-PITCH_BACKEND_FALLBACKS=crepe,basic-pitch
+PITCH_PROFILE=production
+PITCH_ALLOW_BACKEND_FALLBACKS=false
+PITCH_BACKEND_FALLBACKS=
 PITCH_CACHE_DIR=~/.cache/sunoscribe/pitch
 RMVPE_MODEL_PATH=
 ```
@@ -82,12 +91,22 @@ $env:PYTHONPATH='.'
 `POST /api/upload/audio` 或 `POST /api/upload/video` 会保存媒体文件，并把路径写入 `projects.audio_path`。谱面生成任务随后调用 `AudioAnalysisService`：
 
 1. 复制原始输入到项目 workspace。
-2. 可选人声分离，得到 vocals/accompaniment/stems。
-3. 用 vocals 或归一化 fallback 音频做歌词识别。
-4. 用 RMVPE 默认检测主旋律音高；缺模型或 runtime 时回退。
-5. 生成 Analysis IR、Score IR、歌词对齐和 MIDI/MusicXML/PDF 导出数据。
+2. 通过 `MediaIngestService` 生成 canonical `preprocess/source.wav`。
+3. 执行主唱/伴奏分离，产出 `vocals.wav`、`accompaniment.wav` 等 stems。
+4. 基于主唱音频做旋律转写、节奏网格提取、ScoreIR 构建与歌词对齐。
+5. 生成 `ScoreRevision` 与 `Artifact`，并从选定 revision 派生 MIDI / MusicXML / score view 导出。
 
-更详细说明见 [audio_pipeline.md](docs/audio_pipeline.md)。
+当前 production 语义：
+
+- required stage 失败必须显式失败；
+- production 禁止 pitch backend fallback 与 audio stub fallback；
+- 导出必须 revision-scoped；
+- `ScoreRevision` / `ScoreIR` 是导出和修订链的中心边界。
+
+详细说明见：
+
+- `../docs/backend-audio-pipeline.md`
+- `../docs/production-runtime-policy.md`
 
 ## 测试
 

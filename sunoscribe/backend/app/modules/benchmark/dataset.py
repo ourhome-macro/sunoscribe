@@ -19,6 +19,7 @@ class BenchmarkSample:
     input_mp4: Path
     expected_midi: Path
     expected_melody_track: int | None
+    expected_reference_strategy: str | None = None
     enabled: bool = True
     tags: list[str] = field(default_factory=list)
     notes: str | None = None
@@ -160,6 +161,7 @@ def load_manifest(path: str | Path) -> BenchmarkManifest:
                 input_mp4=input_mp4,
                 expected_midi=expected_midi,
                 expected_melody_track=melody_track,
+                expected_reference_strategy=raw_sample.get("expected_reference_strategy"),
                 enabled=bool(raw_sample.get("enabled", True)),
                 tags=[str(tag) for tag in tags],
                 notes=raw_sample.get("notes"),
@@ -245,6 +247,7 @@ def _sample_dataset_status(sample: BenchmarkSample, *, root: Path, include_check
         "input_mp4": _display_path(sample.input_mp4, root),
         "expected_midi": _display_path(sample.expected_midi, root),
         "expected_melody_track": sample.expected_melody_track,
+        "expected_reference_strategy": sample.expected_reference_strategy,
         "input_exists": input_exists,
         "expected_exists": expected_exists,
         "checksums": checksum_status,

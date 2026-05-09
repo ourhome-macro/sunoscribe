@@ -1,87 +1,44 @@
-# 音频处理链路
+# 音频处理链路（兼容入口）
 
-## 入口
+本文件不再单独定义 SunoScribe 后端的正式音频流水线事实。
 
-上传接口：
+唯一正式事实源为：
 
-- `POST /api/upload/audio`
-- `POST /api/upload/video`
+- `../../docs/backend-audio-pipeline.md`
+- `../../docs/production-runtime-policy.md`
 
-上传成功后，后端会把返回的本地路径或 `s3://...` 对象路径写入 `projects.audio_path`。谱面生成时以这个字段作为音频分析入口。
+## 目的
 
-## 主流程
+保留本文件仅为了兼容历史链接、README 引用和旧的工程入口说明，避免在仓库中继续传播过期语义。
 
-`generate_or_regenerate_score` 会读取项目并调用 `AudioAnalysisService`：
+## 当前应遵循的统一语义
 
-1. `ProjectWorkspace.save_input_copy` 保存原始输入副本。
-2. `AudioProcessor` 在没有可用 stems 时生成归一化 fallback 音频。
-3. `VocalSeparator` 可选做人声/伴奏/stems 分离。
-4. 歌词识别优先使用 vocals，否则使用 fallback 音频。
-5. `PitchPipeline` 处理主旋律、节拍、调式、下拍、量化、小节。
-6. `BaselineAnalysisInferencer` 生成 Analysis IR。
-7. `ScoreIRBuilder` 生成 Score IR、和弦、结构段落和 bassline。
-8. `InitialLyricsAligner` 和可选 LLM refine 生成歌词-音符对齐。
-9. 导出或持久化 `score_data`、`score_ir`、alignment、MIDI 等产物。
+- required stage 失败必须显式失败。
+- production 禁止 pitch backend fallback。
+- production 禁止 audio stub / fake score / silent downgrade。
+- 导出必须绑定到明确的 `ScoreRevision`。
+- `ScoreIR` / `ScoreRevision` 是导出与修订链的中心边界。
 
-生成后的 `scores.score_data` 包含：
+## 已废弃的旧说法
 
-- `measures`：导出 MIDI/MusicXML 的主要输入。
-- `pitch_result`：pitch pipeline 原始分析摘要。
-- `analysis_ir`：伴奏、和弦、结构等推断结果。
-- `score_ir`：规范化谱面 IR。
-- `alignment`：baseline/refined/final 歌词对齐。
-- `midi_path` / `final_midi_path`：可复用的 MIDI 产物路径。
-- `warnings`：分析、序列化、导出阶段的合并告警。
+以下表述已废弃，不应再作为当前系统行为理解：
 
-## 音高检测
+- “缺少 RMVPE runtime 或模型时回退到 CREPE/basic-pitch”
+- “无音频时生成 backend stub fallback”
+- “导出优先从 workspace 或 `score_data.measures` 作为主真相源生成”
+- “workspace 中已有 MIDI/MusicXML 优先于 revision 语义”
 
-默认 backend 是 RMVPE：
+## 迁移说明
 
-```env
-PITCH_BACKEND=rmvpe
-PITCH_BACKEND_FALLBACKS=crepe,basic-pitch
-RMVPE_MODEL_PATH=
-```
+如果你是从旧文档入口进入这里，请直接改读下面两份文档：
 
-预期效果：
+- `../../docs/backend-audio-pipeline.md`
+- `../../docs/production-runtime-policy.md`
 
-- RMVPE 通常比 basic-pitch 更适合人声音高轮廓，尤其是滑音、颤音和连续 f0 轨迹。
-- 对伴奏较重或人声分离较差的素材，输入 stems 质量仍然会显著影响结果。
-- 缺少 RMVPE runtime 或模型时，当前实现会记录 fallback warning，并尝试 CREPE/basic-pitch，避免整条链路直接失败。
+它们描述的是当前正式的：
 
-## 导出
-
-`GET /api/scores/{score_id}/export?export_format=...` 支持：
-
-- `midi`：优先读取 workspace 中已有 MIDI；没有时从 `score_data.measures` 生成。
-- `musicxml`：优先读取已有 MusicXML；没有时从 `score_data.measures`、`chord_timeline`、`form_sections` 生成。
-- `pdf`：当前为后端摘要 PDF fallback。
-
-## 覆盖测试
-
-主链路测试：
-
-- `tests/test_audio_flow_integration.py`：上传回写、分析落谱、歌词对齐、MIDI/MusicXML 导出。
-- `tests/test_audio_analysis_service.py`：workspace、stems、fallback 音频和 pitch 请求路由。
-- `tests/test_score_generation_service.py`：生成谱面、歌词持久化、无音频 stub fallback。
-- `tests/test_score_export_service.py`：MIDI/MusicXML/PDF 导出。
-- `tests/test_pitch_runtime_health.py`：RMVPE/cache 健康检查。
-
-推荐命令：
-
-```powershell
-cd backend
-$env:PYTHONPATH='.'
-.\.venv310\Scripts\python.exe -m unittest tests.test_audio_flow_integration tests.test_pitch_runtime_health
-.\.venv310\Scripts\python.exe -m pytest -q tests -o cache_dir=.tmp_tests\.pytest_cache
-```
-
-## 真实音频验证清单
-
-单元测试不会下载模型，也不会跑真实长音频。接入部署前需要用真实样本补一轮手工或半自动验证：
-
-- `GET /api/health/pitch?deep=true` 能加载 RMVPE。
-- 上传 30-60 秒人声音频后能生成非空 `measures`。
-- `score_data.pitch_result.analysis_info.detector` 为 `rmvpe` 或明确记录 fallback。
-- MIDI 可播放，MusicXML 可被 MuseScore/同类软件打开。
-- 歌词对齐 `alignment.final.alignments` 非空，且 token/note 顺序没有明显倒退。
+- typed data lineage
+- required stage contract
+- artifact lineage
+- production runtime policy
+- revision-scoped export boundary

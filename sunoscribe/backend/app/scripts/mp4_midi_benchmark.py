@@ -26,6 +26,7 @@ from app.modules.benchmark import (
     compute_midi_alignment_diagnostics,
     compute_midi_audibility_metrics,
     compute_midi_metrics,
+    extract_reference_melody_notes,
     find_midi_track_index_by_name,
     infer_midi_failure_modes,
     load_manifest,
@@ -326,6 +327,7 @@ def _validate_sample_stage(*, sample: BenchmarkSample, root: Path) -> StageRecor
             "input_mp4": _relative_or_str(sample.input_mp4, root),
             "expected_midi": _relative_or_str(sample.expected_midi, root),
             "expected_melody_track": sample.expected_melody_track,
+            "expected_reference_strategy": sample.expected_reference_strategy,
         },
         outputs={"expected_midi_tracks": track_info},
         error={"errors": errors} if errors else None,
@@ -341,7 +343,11 @@ def _compute_metrics_stage(
     started_at = _utc_now()
     start = time.perf_counter()
     try:
-        expected_notes = read_midi_notes(sample.expected_midi, track_index=sample.expected_melody_track)
+        expected_notes, reference_extraction = extract_reference_melody_notes(
+            sample.expected_midi,
+            track_index=sample.expected_melody_track,
+            strategy=sample.expected_reference_strategy,
+        )
         predicted_tracks = read_midi_track_info(produced_midi_path)
         predicted_lead_track = find_midi_track_index_by_name(produced_midi_path, "Lead Vocal")
         if predicted_lead_track is None:
@@ -360,6 +366,8 @@ def _compute_metrics_stage(
             "sample_id": sample.id,
             "expected_midi": str(sample.expected_midi),
             "expected_melody_track": sample.expected_melody_track,
+            "expected_reference_strategy": sample.expected_reference_strategy or "track",
+            "expected_reference_extraction": reference_extraction.to_dict(),
             "produced_midi": str(produced_midi_path),
             "predicted_lead_track": predicted_lead_track,
             "instrumental_hook_note_count": hook_track.note_count if hook_track else 0,
@@ -380,6 +388,7 @@ def _compute_metrics_stage(
                 duration_sec=time.perf_counter() - start,
                 inputs={"expected_midi": str(sample.expected_midi), "produced_midi": str(produced_midi_path)},
                 outputs={
+                    "expected_reference_extraction": reference_extraction.to_dict(),
                     "metrics": metrics.to_dict(),
                     "audibility": audibility.to_dict(),
                     "alignment": alignment.to_dict(),

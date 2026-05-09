@@ -13,6 +13,8 @@ from app.modules.benchmark.midi_metrics import (
     compute_midi_alignment_diagnostics,
     compute_midi_audibility_metrics,
     compute_midi_metrics,
+    extract_reference_melody_notes,
+    extract_skyline_melody,
     infer_midi_failure_modes,
     read_midi_notes,
 )
@@ -72,6 +74,44 @@ class MidiMetricsTests(unittest.TestCase):
         self.assertEqual(len(notes), 1)
         self.assertAlmostEqual(notes[0].start, 1.0)
         self.assertAlmostEqual(notes[0].end, 2.0)
+
+    def test_skyline_melody_extracts_highest_voice(self) -> None:
+        notes = [
+            NoteEvent(start=0.0, end=1.0, pitch=48),
+            NoteEvent(start=0.0, end=0.5, pitch=60),
+            NoteEvent(start=0.5, end=1.0, pitch=64),
+            NoteEvent(start=1.0, end=2.0, pitch=50),
+            NoteEvent(start=1.0, end=2.0, pitch=67),
+        ]
+
+        melody = extract_skyline_melody(notes)
+
+        self.assertEqual([(note.start, note.end, note.pitch) for note in melody], [(0.0, 0.5, 60), (0.5, 1.0, 64), (1.0, 2.0, 67)])
+
+    def test_reference_melody_can_select_vocal_like_channel_group(self) -> None:
+        midi = mido.MidiFile(type=0, ticks_per_beat=100)
+        track = mido.MidiTrack()
+        track.append(mido.MetaMessage("set_tempo", tempo=500_000, time=0))
+        track.append(mido.Message("program_change", program=25, time=0, channel=0))
+        for index in range(20):
+            track.append(mido.Message("note_on", note=36 + (index % 3), velocity=80, time=0 if index == 0 else 10, channel=0))
+            track.append(mido.Message("note_off", note=36 + (index % 3), velocity=0, time=10, channel=0))
+        track.append(mido.Message("program_change", program=60, time=0, channel=3))
+        for index in range(120):
+            track.append(mido.Message("note_on", note=55 + (index % 12), velocity=80, time=5, channel=3))
+            track.append(mido.Message("note_off", note=55 + (index % 12), velocity=0, time=10, channel=3))
+        midi.tracks.append(track)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            midi_path = Path(tmpdir) / "type0.mid"
+            midi.save(midi_path)
+
+            notes, extraction = extract_reference_melody_notes(midi_path, track_index=0, strategy="vocal_like_track")
+
+        self.assertEqual(len(notes), 120)
+        self.assertEqual(extraction.selected_channel, 3)
+        self.assertEqual(extraction.selected_program, 60)
+        self.assertTrue(extraction.applied)
 
     def test_alignment_diagnostics_expose_octave_shift_improvement(self) -> None:
         expected = [NoteEvent(start=float(index), end=float(index) + 0.5, pitch=72) for index in range(12)]

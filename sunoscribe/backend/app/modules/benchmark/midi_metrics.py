@@ -17,6 +17,8 @@ class NoteEvent:
     pitch: int
     velocity: int = 64
     track_index: int | None = None
+    channel: int | None = None
+    program: int | None = None
 
     @property
     def duration(self) -> float:
@@ -129,6 +131,21 @@ class MidiAlignmentDiagnostics:
         return asdict(self)
 
 
+@dataclass(frozen=True, slots=True)
+class ReferenceMelodyExtraction:
+    strategy: str
+    source_note_count: int
+    selected_note_count: int
+    selected_track_index: int | None = None
+    selected_channel: int | None = None
+    selected_program: int | None = None
+    applied: bool = False
+    details: dict[str, Any] | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
 def read_midi_track_info(path: str | Path) -> list[MidiTrackInfo]:
     midi = _load_midi(path)
     track_infos: list[MidiTrackInfo] = []
@@ -169,7 +186,13 @@ def read_midi_track_info(path: str | Path) -> list[MidiTrackInfo]:
     return track_infos
 
 
-def read_midi_notes(path: str | Path, *, track_index: int | None = None) -> list[NoteEvent]:
+def read_midi_notes(
+    path: str | Path,
+    *,
+    track_index: int | None = None,
+    channel: int | None = None,
+    program: int | None = None,
+) -> list[NoteEvent]:
     midi = _load_midi(path)
     ticks_per_beat = max(1, int(midi.ticks_per_beat))
     tempo_map = _build_tempo_map(midi)
@@ -195,7 +218,179 @@ def read_midi_notes(path: str | Path, *, track_index: int | None = None) -> list
                     tempo_map=tempo_map,
                 )
             )
-    return sorted(notes, key=lambda note: (note.start, note.pitch, note.end, note.track_index or -1))
+    if channel is not None:
+        notes = [note for note in notes if note.channel == channel]
+    if program is not None:
+        notes = [note for note in notes if note.program == program]
+    return sorted(notes, key=lambda note: (note.start, note.pitch, note.end, note.track_index or -1, note.channel or -1))
+
+
+def extract_reference_melody_notes(
+    path: str | Path,
+    *,
+    track_index: int | None = None,
+    strategy: str | None = None,
+) -> tuple[list[NoteEvent], ReferenceMelodyExtraction]:
+    normalized_strategy = str(strategy or "track").strip().lower()
+    if normalized_strategy in {"", "none", "track", "selected_track"}:
+        notes = read_midi_notes(path, track_index=track_index)
+        return notes, ReferenceMelodyExtraction(
+            strategy="track",
+            source_note_count=len(notes),
+            selected_note_count=len(notes),
+            selected_track_index=track_index,
+            applied=False,
+        )
+
+    if normalized_strategy in {"skyline", "highest_voice"}:
+        source_notes = read_midi_notes(path, track_index=track_index)
+        melody_notes = extract_skyline_melody(source_notes)
+        return melody_notes, ReferenceMelodyExtraction(
+            strategy="skyline",
+            source_note_count=len(source_notes),
+            selected_note_count=len(melody_notes),
+            selected_track_index=track_index,
+            applied=True,
+            details={
+                "min_duration_sec": 0.08,
+                "merge_gap_sec": 0.06,
+            },
+        )
+
+    if normalized_strategy in {"vocal_like_track", "vocal_like", "voice_track"}:
+        source_notes = read_midi_notes(path)
+        selected_notes, details = select_vocal_like_reference_notes(source_notes)
+        return selected_notes, ReferenceMelodyExtraction(
+            strategy="vocal_like_track",
+            source_note_count=len(source_notes),
+            selected_note_count=len(selected_notes),
+            selected_track_index=details.get("selected_track_index"),
+            selected_channel=details.get("selected_channel"),
+            selected_program=details.get("selected_program"),
+            applied=True,
+            details=details,
+        )
+
+    raise MidiReadError(f"unknown expected reference strategy: {strategy}")
+
+
+def extract_skyline_melody(
+    notes: list[NoteEvent],
+    *,
+    min_duration_sec: float = 0.08,
+    merge_gap_sec: float = 0.06,
+) -> list[NoteEvent]:
+    if not notes:
+        return []
+
+    events: list[tuple[float, int, int, NoteEvent]] = []
+    for index, note in enumerate(notes):
+        if note.end <= note.start:
+            continue
+        events.append((note.start, 1, index, note))
+        events.append((note.end, -1, index, note))
+    events.sort(key=lambda event: (event[0], -event[1], event[3].pitch, event[3].end))
+
+    active: dict[int, NoteEvent] = {}
+    last_time: float | None = None
+    slices: list[NoteEvent] = []
+    event_index = 0
+    while event_index < len(events):
+        event_time = events[event_index][0]
+        if last_time is not None and event_time > last_time and active:
+            source_note = max(active.values(), key=lambda note: (note.pitch, note.end, -note.start, note.velocity))
+            slices.append(
+                NoteEvent(
+                    start=last_time,
+                    end=event_time,
+                    pitch=source_note.pitch,
+                    velocity=source_note.velocity,
+                    track_index=source_note.track_index,
+                    channel=source_note.channel,
+                    program=source_note.program,
+                )
+            )
+        while event_index < len(events) and events[event_index][0] == event_time:
+            _, event_type, note_index, note = events[event_index]
+            if event_type == 1:
+                active[note_index] = note
+            else:
+                active.pop(note_index, None)
+            event_index += 1
+        last_time = event_time
+
+    merged: list[NoteEvent] = []
+    for note in slices:
+        if (
+            merged
+            and merged[-1].pitch == note.pitch
+            and note.start - merged[-1].end <= merge_gap_sec
+            and merged[-1].track_index == note.track_index
+            and merged[-1].channel == note.channel
+        ):
+            previous = merged[-1]
+            merged[-1] = NoteEvent(
+                start=previous.start,
+                end=max(previous.end, note.end),
+                pitch=previous.pitch,
+                velocity=max(previous.velocity, note.velocity),
+                track_index=previous.track_index,
+                channel=previous.channel,
+                program=previous.program,
+            )
+        else:
+            merged.append(note)
+
+    return [note for note in merged if note.duration >= min_duration_sec]
+
+
+def select_vocal_like_reference_notes(notes: list[NoteEvent]) -> tuple[list[NoteEvent], dict[str, Any]]:
+    candidates: list[tuple[float, tuple[int | None, int | None, int | None], list[NoteEvent], dict[str, Any]]] = []
+    for key, group_notes in _group_notes_by_source(notes).items():
+        if not group_notes:
+            continue
+        track_index, channel, program = key
+        if channel == 9:
+            continue
+        pitches = [note.pitch for note in group_notes]
+        duration = max((note.end for note in group_notes), default=0.0) - min((note.start for note in group_notes), default=0.0)
+        pitch_range = max(pitches) - min(pitches)
+        note_count = len(group_notes)
+        median_pitch = _median(pitches)
+        density_per_sec = _safe_div(note_count, duration)
+        score = _vocal_like_candidate_score(
+            note_count=note_count,
+            pitch_range=pitch_range,
+            median_pitch=median_pitch,
+            density_per_sec=density_per_sec,
+        )
+        details = {
+            "track_index": track_index,
+            "channel": channel,
+            "program": program,
+            "note_count": note_count,
+            "pitch_range": pitch_range,
+            "min_pitch": min(pitches),
+            "max_pitch": max(pitches),
+            "median_pitch": median_pitch,
+            "density_per_sec": density_per_sec,
+            "score": score,
+        }
+        candidates.append((score, key, sorted(group_notes, key=lambda note: (note.start, note.pitch, note.end)), details))
+
+    if not candidates:
+        return [], {"candidates": [], "selected_reason": "no_non_drum_candidates"}
+
+    candidates.sort(key=lambda item: (item[0], item[3]["note_count"], item[3]["median_pitch"] or 0.0), reverse=True)
+    _, selected_key, selected_notes, selected_details = candidates[0]
+    return selected_notes, {
+        "selected_track_index": selected_key[0],
+        "selected_channel": selected_key[1],
+        "selected_program": selected_key[2],
+        "selected_reason": "highest_vocal_like_score",
+        "selected_candidate": selected_details,
+        "candidates": [candidate_details for _, _, _, candidate_details in candidates],
+    }
 
 
 def find_midi_track_index_by_name(path: str | Path, track_name: str) -> int | None:
@@ -480,11 +675,17 @@ def _extract_track_notes(
     tempo_map: TempoMap,
 ) -> list[NoteEvent]:
     current_ticks = 0
-    active: dict[tuple[int | None, int], list[tuple[int, int, int]]] = {}
+    active: dict[tuple[int | None, int], list[tuple[int, int, int | None, int]]] = {}
+    programs_by_channel: dict[int, int] = {}
     notes: list[NoteEvent] = []
     order = 0
     for msg in track:
         current_ticks += int(getattr(msg, "time", 0) or 0)
+        if msg.type == "program_change":
+            channel = getattr(msg, "channel", None)
+            if channel is not None:
+                programs_by_channel[int(channel)] = int(getattr(msg, "program", 0) or 0)
+            continue
         if msg.type not in {"note_on", "note_off"}:
             continue
         note_number = getattr(msg, "note", None)
@@ -494,18 +695,29 @@ def _extract_track_notes(
         key = (channel, int(note_number))
         velocity = int(getattr(msg, "velocity", 0) or 0)
         if msg.type == "note_on" and velocity > 0:
-            active.setdefault(key, []).append((current_ticks, velocity, order))
+            program = programs_by_channel.get(int(channel)) if channel is not None else None
+            active.setdefault(key, []).append((current_ticks, velocity, program, order))
             order += 1
             continue
         starts = active.get(key) or []
         if not starts:
             continue
-        start_ticks, start_velocity, _ = starts.pop(0)
+        start_ticks, start_velocity, program, _ = starts.pop(0)
         if current_ticks <= start_ticks:
             continue
         start_sec = _ticks_to_seconds(start_ticks, ticks_per_beat=ticks_per_beat, tempo_map=tempo_map)
         end_sec = _ticks_to_seconds(current_ticks, ticks_per_beat=ticks_per_beat, tempo_map=tempo_map)
-        notes.append(NoteEvent(start=start_sec, end=end_sec, pitch=int(note_number), velocity=start_velocity, track_index=track_index))
+        notes.append(
+            NoteEvent(
+                start=start_sec,
+                end=end_sec,
+                pitch=int(note_number),
+                velocity=start_velocity,
+                track_index=track_index,
+                channel=int(channel) if channel is not None else None,
+                program=program,
+            )
+        )
     return sorted(notes, key=lambda note: (note.start, note.pitch, note.end))
 
 
@@ -582,9 +794,11 @@ def _infer_octave_normalization(
     target: str | None = None
     if expected_median is not None and predicted_median is not None:
         median_delta = predicted_median - expected_median
-        if config.auto_octave_normalize and 11.0 <= abs(median_delta) <= 13.0:
-            shift = -12 if median_delta > 0 else 12
-            target = "predicted"
+        if config.auto_octave_normalize:
+            rounded_octave_shift = round(median_delta / 12.0) * 12
+            if rounded_octave_shift in {-24, -12, 12, 24} and abs(median_delta - rounded_octave_shift) <= 1.0:
+                shift = -rounded_octave_shift
+                target = "predicted"
     return {
         "octave_shift_applied": shift,
         "octave_shift_target": target,
@@ -615,6 +829,8 @@ def _shift_notes(
             pitch=int(note.pitch) + int(pitch_shift),
             velocity=int(note.velocity),
             track_index=note.track_index,
+            channel=note.channel,
+            program=note.program,
         )
         for note in notes
     ]
@@ -819,6 +1035,50 @@ def _pitch_range(notes: list[NoteEvent]) -> list[int | None]:
         return [None, None]
     pitches = [int(note.pitch) for note in notes]
     return [min(pitches), max(pitches)]
+
+
+def _group_notes_by_source(notes: list[NoteEvent]) -> dict[tuple[int | None, int | None, int | None], list[NoteEvent]]:
+    groups: dict[tuple[int | None, int | None, int | None], list[NoteEvent]] = {}
+    for note in notes:
+        groups.setdefault((note.track_index, note.channel, note.program), []).append(note)
+    return groups
+
+
+def _vocal_like_candidate_score(
+    *,
+    note_count: int,
+    pitch_range: int,
+    median_pitch: float | None,
+    density_per_sec: float,
+) -> float:
+    score = 0.0
+    if 100 <= note_count <= 600:
+        score += 3.0
+    elif 60 <= note_count < 100 or 600 < note_count <= 900:
+        score += 1.0
+    else:
+        score -= 3.0
+
+    if 12 <= pitch_range <= 36:
+        score += 2.0
+    elif 8 <= pitch_range < 12 or 36 < pitch_range <= 48:
+        score += 0.5
+    else:
+        score -= 2.0
+
+    if median_pitch is not None:
+        if 50 <= median_pitch <= 76:
+            score += 2.0
+        elif 45 <= median_pitch < 50 or 76 < median_pitch <= 84:
+            score += 0.5
+        else:
+            score -= 1.0
+
+    if 0.2 <= density_per_sec <= 3.0:
+        score += 1.0
+    elif density_per_sec > 5.0:
+        score -= 1.0
+    return score
 
 
 def _coverage_and_longest_silence(notes: list[NoteEvent], *, duration_basis: float) -> tuple[float, float]:

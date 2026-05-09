@@ -61,6 +61,25 @@ class BenchmarkMidiMetricsTests(unittest.TestCase):
         self.assertAlmostEqual(metrics.octave_error_rate, 1 / 2)
         self.assertIsNotNone(metrics.onset_mae_ms)
 
+    def test_auto_octave_normalize_handles_two_octaves(self) -> None:
+        expected = [
+            _note(0.0, 0.5, 60),
+            _note(1.0, 1.5, 62),
+            _note(2.0, 2.5, 64),
+        ]
+        predicted = [
+            _note(0.02, 0.52, 84),
+            _note(1.02, 1.52, 86),
+            _note(2.02, 2.52, 88),
+        ]
+
+        metrics = compute_midi_metrics(expected, predicted, config=MidiMetricConfig(onset_tolerance_sec=0.12))
+
+        self.assertEqual(metrics.octave_shift_applied, -24)
+        self.assertEqual(metrics.matched_note_count, 3)
+        self.assertAlmostEqual(metrics.note_recall, 1.0)
+        self.assertAlmostEqual(metrics.pitch_accuracy, 1.0)
+
 
 def _note(start: float, end: float, pitch: int):
     from app.modules.benchmark.midi_metrics import NoteEvent
