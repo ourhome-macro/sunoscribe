@@ -148,9 +148,17 @@ class TestAudioAnalysisService(unittest.TestCase):
             root = Path(temp_dir)
             source_video = root / "input.mp4"
             source_video.write_bytes(b"video")
+            separator_out = root / "separator"
+            separator_out.mkdir(parents=True, exist_ok=True)
+            stem_files = {
+                "vocals": separator_out / "vocals.wav",
+                "accompaniment": separator_out / "accompaniment.wav",
+            }
+            for path in stem_files.values():
+                path.write_bytes(b"stem")
 
             audio_processor = _FakeNormalizingAudioProcessor()
-            separator = _FakeSeparator({})
+            separator = _FakeSeparator(stem_files)
             pitch_pipeline = _CapturePitchPipeline()
             service = AudioAnalysisService(
                 audio_processor=audio_processor,
@@ -269,15 +277,12 @@ class TestAudioAnalysisService(unittest.TestCase):
 
             canonical_audio = workspace.normalized_audio_path
             audio_processor.convert(str(source_audio), str(canonical_audio))
-            perception = asyncio.run(service._run_perception_stage(source_audio, canonical_audio, workspace, options))
+            with self.assertRaisesRegex(RuntimeError, "vocal_separation_failed"):
+                asyncio.run(service._run_perception_stage(source_audio, canonical_audio, workspace, options))
 
             self.assertEqual(separator.calls[0][0][0], str(canonical_audio))
             self.assertEqual(audio_processor.calls, [(str(source_audio), str(workspace.normalized_audio_path))])
-            self.assertEqual(perception.normalized_audio_path, workspace.normalized_audio_path)
-            self.assertEqual(pitch_pipeline.last_request.source_audio_path, str(source_audio))
-            self.assertEqual(pitch_pipeline.last_request.lead_audio_path, str(workspace.normalized_audio_path))
-            self.assertEqual(pitch_pipeline.last_request.rhythm_audio_path, str(workspace.normalized_audio_path))
-            self.assertEqual(pitch_pipeline.last_request.key_audio_path, str(workspace.normalized_audio_path))
+            self.assertIsNone(pitch_pipeline.last_request)
 
 
 if __name__ == "__main__":

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from bisect import bisect_left, bisect_right
 from dataclasses import asdict, dataclass
 import math
 from pathlib import Path
@@ -110,6 +111,25 @@ class MidiDtwDiagnostics:
 
 
 @dataclass(frozen=True, slots=True)
+class SmartOnsetAlignmentDiagnostics:
+    pred_to_exp_shift_sec: float
+    shift_corrected_recall: float
+    shift_corrected_f1: float
+    shift_corrected_matched: int
+    shift_corrected_coverage: float
+    shift_recall_gain: float
+    shift_f1_gain: float
+    shift_matched_gain: int
+    shift_peak_support: int
+    shift_peak_ratio: float | None
+    shift_candidate_count: int
+    alignment_diagnosis: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(frozen=True, slots=True)
 class MidiAlignmentDiagnostics:
     best_octave_shift_semitones: int
     best_octave_shift_note_recall: float
@@ -126,9 +146,62 @@ class MidiAlignmentDiagnostics:
     predicted_pitch_range: list[int | None]
     reference_track_suspect_reasons: list[str]
     dtw: MidiDtwDiagnostics
+    smart_onset_alignment: SmartOnsetAlignmentDiagnostics
+
+    @property
+    def pred_to_exp_shift_sec(self) -> float:
+        return self.smart_onset_alignment.pred_to_exp_shift_sec
+
+    @property
+    def shift_corrected_recall(self) -> float:
+        return self.smart_onset_alignment.shift_corrected_recall
+
+    @property
+    def shift_corrected_f1(self) -> float:
+        return self.smart_onset_alignment.shift_corrected_f1
+
+    @property
+    def shift_corrected_matched(self) -> int:
+        return self.smart_onset_alignment.shift_corrected_matched
+
+    @property
+    def shift_corrected_coverage(self) -> float:
+        return self.smart_onset_alignment.shift_corrected_coverage
+
+    @property
+    def shift_recall_gain(self) -> float:
+        return self.smart_onset_alignment.shift_recall_gain
+
+    @property
+    def shift_f1_gain(self) -> float:
+        return self.smart_onset_alignment.shift_f1_gain
+
+    @property
+    def shift_matched_gain(self) -> int:
+        return self.smart_onset_alignment.shift_matched_gain
+
+    @property
+    def shift_peak_support(self) -> int:
+        return self.smart_onset_alignment.shift_peak_support
+
+    @property
+    def shift_peak_ratio(self) -> float | None:
+        return self.smart_onset_alignment.shift_peak_ratio
+
+    @property
+    def shift_candidate_count(self) -> int:
+        return self.smart_onset_alignment.shift_candidate_count
+
+    @property
+    def alignment_diagnosis(self) -> str:
+        return self.smart_onset_alignment.alignment_diagnosis
 
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        payload = asdict(self)
+        smart = payload.get("smart_onset_alignment")
+        if isinstance(smart, dict):
+            payload.update(smart)
+        return payload
 
 
 @dataclass(frozen=True, slots=True)
@@ -541,6 +614,13 @@ def compute_midi_alignment_diagnostics(
         )
     best_time = max(time_candidates, key=lambda item: (item[0], item[1], item[2], -abs(item[3])))
     dtw = _compute_dtw_diagnostics(expected_notes, predicted_notes, config=config)
+    public_raw_metrics = compute_midi_metrics(expected_notes, predicted_notes, config=config)
+    smart_onset_alignment = _compute_smart_onset_alignment_diagnostics(
+        expected_notes,
+        predicted_notes,
+        raw_metrics=public_raw_metrics,
+        config=config,
+    )
 
     suspect_reasons = _infer_reference_track_suspect_reasons(
         base_metrics=base_metrics,
@@ -568,6 +648,7 @@ def compute_midi_alignment_diagnostics(
         predicted_pitch_range=_pitch_range(predicted_notes),
         reference_track_suspect_reasons=suspect_reasons,
         dtw=dtw,
+        smart_onset_alignment=smart_onset_alignment,
     )
 
 
@@ -630,6 +711,9 @@ def infer_midi_failure_modes(
         for reason in alignment.reference_track_suspect_reasons:
             if reason not in modes:
                 modes.append(reason)
+        smart_diagnosis = alignment.smart_onset_alignment.alignment_diagnosis
+        if smart_diagnosis == "possible_reference_time_offset" and smart_diagnosis not in modes:
+            modes.append(smart_diagnosis)
     return modes
 
 
@@ -851,6 +935,177 @@ def _candidate_time_shifts(expected_notes: list[NoteEvent], predicted_notes: lis
     for shift in (-90.0, -60.0, -45.0, -32.0, -24.0, -16.0, -12.0, -8.0, -4.0, 4.0, 8.0, 12.0, 16.0, 24.0, 32.0, 45.0, 60.0, 90.0):
         candidates.add(shift)
     return sorted(candidates)
+
+
+def _compute_smart_onset_alignment_diagnostics(
+    expected_notes: list[NoteEvent],
+    predicted_notes: list[NoteEvent],
+    *,
+    raw_metrics: MidiMetrics,
+    config: MidiMetricConfig,
+    bucket_size_sec: float = 0.5,
+    max_abs_shift_sec: float = 90.0,
+    top_k: int = 30,
+) -> SmartOnsetAlignmentDiagnostics:
+    raw_recall = float(raw_metrics.note_recall)
+    raw_f1 = float(raw_metrics.note_f1)
+    raw_matched = int(raw_metrics.matched_note_count)
+    raw_coverage = _shift_corrected_coverage(predicted_notes, expected_notes)
+    empty_result = SmartOnsetAlignmentDiagnostics(
+        pred_to_exp_shift_sec=0.0,
+        shift_corrected_recall=raw_recall,
+        shift_corrected_f1=raw_f1,
+        shift_corrected_matched=raw_matched,
+        shift_corrected_coverage=raw_coverage,
+        shift_recall_gain=0.0,
+        shift_f1_gain=0.0,
+        shift_matched_gain=0,
+        shift_peak_support=0,
+        shift_peak_ratio=None,
+        shift_candidate_count=0,
+        alignment_diagnosis="weak_alignment_signal" if expected_notes and predicted_notes else "not_shift_rescuable",
+    )
+    if not expected_notes or not predicted_notes:
+        return empty_result
+
+    candidates = _smart_onset_shift_candidates(
+        expected_notes,
+        predicted_notes,
+        bucket_size_sec=bucket_size_sec,
+        max_abs_shift_sec=max_abs_shift_sec,
+        top_k=top_k,
+    )
+    if not candidates:
+        return empty_result
+
+    strict_config = MidiMetricConfig(
+        onset_tolerance_sec=config.onset_tolerance_sec,
+        pitch_tolerance_semitones=config.pitch_tolerance_semitones,
+        octave_tolerance_semitones=config.octave_tolerance_semitones,
+        auto_octave_normalize=config.auto_octave_normalize,
+    )
+    evaluated: list[tuple[tuple[float, float, int, float, float], SmartOnsetAlignmentDiagnostics]] = []
+    for shift, support, peak_ratio in candidates:
+        shifted_notes = _shift_notes(predicted_notes, time_shift=shift)
+        shifted_metrics = compute_midi_metrics(expected_notes, shifted_notes, config=strict_config)
+        shifted_coverage = _shift_corrected_coverage(shifted_notes, expected_notes)
+        recall_gain = float(shifted_metrics.note_recall) - raw_recall
+        f1_gain = float(shifted_metrics.note_f1) - raw_f1
+        matched_gain = int(shifted_metrics.matched_note_count) - raw_matched
+        diagnosis = _diagnose_smart_onset_alignment(
+            shift=shift,
+            raw_recall=raw_recall,
+            shift_corrected_recall=float(shifted_metrics.note_recall),
+            shift_recall_gain=recall_gain,
+            shift_matched_gain=matched_gain,
+            shift_peak_support=support,
+            shift_peak_ratio=peak_ratio,
+        )
+        result = SmartOnsetAlignmentDiagnostics(
+            pred_to_exp_shift_sec=shift,
+            shift_corrected_recall=float(shifted_metrics.note_recall),
+            shift_corrected_f1=float(shifted_metrics.note_f1),
+            shift_corrected_matched=int(shifted_metrics.matched_note_count),
+            shift_corrected_coverage=shifted_coverage,
+            shift_recall_gain=recall_gain,
+            shift_f1_gain=f1_gain,
+            shift_matched_gain=matched_gain,
+            shift_peak_support=int(support),
+            shift_peak_ratio=peak_ratio,
+            shift_candidate_count=len(candidates),
+            alignment_diagnosis=diagnosis,
+        )
+        evaluated.append(((recall_gain, f1_gain, matched_gain, float(shifted_metrics.note_recall), -abs(shift)), result))
+
+    return max(evaluated, key=lambda item: item[0])[1]
+
+
+def _smart_onset_shift_candidates(
+    expected_notes: list[NoteEvent],
+    predicted_notes: list[NoteEvent],
+    *,
+    bucket_size_sec: float,
+    max_abs_shift_sec: float,
+    top_k: int,
+) -> list[tuple[float, int, float | None]]:
+    bucket_size = max(float(bucket_size_sec), 0.001)
+    max_abs_shift = abs(float(max_abs_shift_sec))
+    histogram: dict[int, int] = {}
+    shift_sums: dict[int, float] = {}
+    predicted_sorted = sorted(predicted_notes, key=lambda note: float(note.start))
+    predicted_starts = [float(note.start) for note in predicted_sorted]
+    for expected in expected_notes:
+        expected_start = float(expected.start)
+        left = bisect_left(predicted_starts, expected_start - max_abs_shift)
+        right = bisect_right(predicted_starts, expected_start + max_abs_shift)
+        for predicted in predicted_sorted[left:right]:
+            if not _smart_onset_pitch_compatible(expected.pitch, predicted.pitch):
+                continue
+            shift = expected_start - float(predicted.start)
+            bucket = int(round(shift / bucket_size))
+            histogram[bucket] = histogram.get(bucket, 0) + 1
+            shift_sums[bucket] = shift_sums.get(bucket, 0.0) + shift
+
+    if not histogram:
+        return [(0.0, 0, None)]
+
+    ranked_buckets = sorted(histogram.items(), key=lambda item: (-item[1], abs(item[0])))[: max(1, int(top_k))]
+    top_support = ranked_buckets[0][1]
+    second_support = ranked_buckets[1][1] if len(ranked_buckets) > 1 else 0
+    peak_ratio = float(top_support) / float(second_support) if second_support > 0 else None
+    candidates: list[tuple[float, int, float | None]] = []
+    seen: set[float] = set()
+    for bucket, support in ranked_buckets:
+        shift = round(shift_sums[bucket] / support, 3)
+        if abs(shift) > max_abs_shift:
+            continue
+        if shift in seen:
+            continue
+        seen.add(shift)
+        candidates.append((shift, int(support), peak_ratio if support == top_support else None))
+    if 0.0 not in seen:
+        candidates.append((0.0, histogram.get(0, 0), None))
+    return candidates
+
+
+def _smart_onset_pitch_compatible(expected_pitch: int, predicted_pitch: int) -> bool:
+    pitch_delta = int(expected_pitch) - int(predicted_pitch)
+    return pitch_delta in {-24, -12, 0, 12, 24}
+
+
+def _diagnose_smart_onset_alignment(
+    *,
+    shift: float,
+    raw_recall: float,
+    shift_corrected_recall: float,
+    shift_recall_gain: float,
+    shift_matched_gain: int,
+    shift_peak_support: int,
+    shift_peak_ratio: float | None,
+) -> str:
+    ratio_ok = shift_peak_ratio is not None and shift_peak_ratio >= 1.5
+    recall_ok = shift_recall_gain >= 0.05 or shift_corrected_recall >= raw_recall * 2.0
+    if (
+        abs(shift) >= 2.0
+        and recall_ok
+        and shift_matched_gain > 0
+        and shift_peak_support >= 5
+        and ratio_ok
+    ):
+        return "possible_reference_time_offset"
+    if abs(shift) < 2.0:
+        return "no_significant_offset"
+    if shift_peak_support < 5 or not ratio_ok:
+        return "weak_alignment_signal"
+    return "not_shift_rescuable"
+
+
+def _shift_corrected_coverage(predicted_notes: list[NoteEvent], expected_notes: list[NoteEvent]) -> float:
+    expected_duration = max((note.end for note in expected_notes), default=0.0)
+    predicted_duration = max((note.end for note in predicted_notes), default=0.0)
+    duration_basis = max(expected_duration, predicted_duration)
+    coverage_seconds, _ = _coverage_and_longest_silence(predicted_notes, duration_basis=duration_basis)
+    return _safe_div(coverage_seconds, duration_basis)
 
 
 _DTW_NOTE_PAIR_LIMIT = 5_000_000

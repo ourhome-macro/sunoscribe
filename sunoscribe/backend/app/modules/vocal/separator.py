@@ -5,6 +5,9 @@ import os
 import re
 import shutil
 import threading
+import contextlib
+import io
+import json
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable, Optional
@@ -32,6 +35,7 @@ from .model_manager import DemucsModelManager, MdxNetModelManager, ModelManagerE
 
 logger = logging.getLogger(__name__)
 STEM_NAME_PATTERN = re.compile(r"^[a-z0-9_]{1,64}$")
+AUDIO_SUFFIXES = {".wav", ".flac", ".mp3", ".m4a", ".ogg", ".aac", ".aif", ".aiff"}
 
 
 class SeparationError(RuntimeError):
@@ -53,6 +57,15 @@ class SeparationResult:
     @property
     def accompaniment_path(self) -> str | None:
         return self.stem_paths.get("accompaniment")
+
+
+@dataclass(slots=True)
+class _MdxInvocationResult:
+    value: Any
+    call_signature: str
+    attempted_signatures: list[str]
+    stdout: str = ""
+    stderr: str = ""
 
 
 _GLOBAL_CPU_LOCK = threading.Semaphore(1)
@@ -121,14 +134,23 @@ class VocalSeparator:
         output_dir: str,
         stem_prefix: str,
     ) -> SeparationResult:
-        src = Path(input_audio_path)
+        original_src = Path(input_audio_path)
+        src = original_src.resolve(strict=False)
         if not src.exists() or not src.is_file():
-            raise SeparationError(f"Input audio file does not exist: {src}")
+            raise SeparationError(f"Input audio file does not exist: {original_src}")
 
-        out_dir = Path(output_dir)
+        initial_cwd = Path.cwd().resolve(strict=False)
+        out_dir = Path(output_dir).resolve(strict=False)
         out_dir.mkdir(parents=True, exist_ok=True)
         raw_output_dir = out_dir / "_mdx_raw"
         raw_output_dir.mkdir(parents=True, exist_ok=True)
+        diagnostics_path = out_dir / "mdx_diagnostics.json"
+        scanned_directories = self._mdx_scanned_directories(
+            output_dir=out_dir,
+            raw_output_dir=raw_output_dir,
+            initial_cwd=initial_cwd,
+            src_parent=src.parent,
+        )
 
         cpu_locks: list[threading.Semaphore] = []
         if self.device.type == "cpu":
@@ -138,22 +160,51 @@ class VocalSeparator:
 
         try:
             fallback_snapshot = self._snapshot_mdx_fallback_outputs(source_stem=src.stem, raw_output_dir=raw_output_dir)
-            result = self._invoke_mdx_separator(src=src, output_dir=raw_output_dir)
-            candidates = self._collect_output_candidates(
-                result,
-                fallback=self._iter_mdx_fallback_outputs(
+            output_snapshot = self._snapshot_audio_files(out_dir)
+            invocation = self._invoke_mdx_separator(src=src, output_dir=raw_output_dir)
+            fallback_outputs = list(
+                self._iter_mdx_fallback_outputs(
                     source_stem=src.stem,
                     raw_output_dir=raw_output_dir,
                     before=fallback_snapshot,
-                ),
+                )
+            )
+            fallback_outputs.extend(self._iter_changed_audio_files(out_dir, before=output_snapshot))
+            candidates = self._collect_output_candidates(
+                invocation.value,
+                fallback=fallback_outputs,
                 base_dir=raw_output_dir,
             )
+            output_files = self._scan_mdx_output_files(out_dir)
+            diagnostics = self._build_mdx_diagnostics(
+                src=src,
+                original_src=original_src,
+                out_dir=out_dir,
+                raw_output_dir=raw_output_dir,
+                initial_cwd=initial_cwd,
+                scanned_directories=scanned_directories,
+                output_files=output_files,
+                candidates=candidates,
+                invocation=invocation,
+                status="completed",
+            )
+            self._write_mdx_diagnostics(diagnostics_path, diagnostics)
+
+            if not any(item["extension"] in AUDIO_SUFFIXES for item in output_files) and not candidates:
+                raise SeparationError(
+                    "mdx_net_produced_no_audio_files: "
+                    f"input_path={src}; output_dir={out_dir}; candidates=[]; "
+                    f"scanned_directories={self._format_paths(scanned_directories)}; "
+                    f"stdout={self._short_log(invocation.stdout)}; stderr={self._short_log(invocation.stderr)}"
+                )
+
             stem_sources = self._pick_mdx_stem_map(candidates)
 
             if stem_sources.get("vocals") is None:
                 raise SeparationError(
                     "MDX-Net output does not contain a vocals stem. "
-                    f"candidates={[p.name for p in candidates]}"
+                    f"candidates={[self._display_candidate_path(path, out_dir) for path in candidates]}; "
+                    f"scanned_directories={self._format_paths(scanned_directories)}"
                 )
 
             if stem_sources.get("accompaniment") is None:
@@ -170,7 +221,8 @@ class VocalSeparator:
             if stem_sources.get("accompaniment") is None:
                 raise SeparationError(
                     "MDX-Net output does not contain accompaniment-compatible stems. "
-                    f"candidates={[p.name for p in candidates]}"
+                    f"candidates={[self._display_candidate_path(path, out_dir) for path in candidates]}; "
+                    f"scanned_directories={self._format_paths(scanned_directories)}"
                 )
 
             persisted_stems = self._persist_named_stems(stem_sources, out_dir=out_dir, stem_prefix=stem_prefix)
@@ -182,47 +234,110 @@ class VocalSeparator:
             return SeparationResult(stem_paths={name: str(path) for name, path in persisted_stems.items()})
         except ModelManagerError:
             raise
+        except SeparationError as exc:
+            output_files = self._scan_mdx_output_files(out_dir)
+            diagnostics = self._build_mdx_diagnostics(
+                src=src,
+                original_src=original_src,
+                out_dir=out_dir,
+                raw_output_dir=raw_output_dir,
+                initial_cwd=initial_cwd,
+                scanned_directories=scanned_directories,
+                output_files=output_files,
+                candidates=locals().get("candidates", []),
+                invocation=locals().get("invocation"),
+                status="failed",
+                error=str(exc),
+            )
+            self._write_mdx_diagnostics(diagnostics_path, diagnostics)
+            raise
         except Exception as exc:
+            output_files = self._scan_mdx_output_files(out_dir)
+            diagnostics = self._build_mdx_diagnostics(
+                src=src,
+                original_src=original_src,
+                out_dir=out_dir,
+                raw_output_dir=raw_output_dir,
+                initial_cwd=initial_cwd,
+                scanned_directories=scanned_directories,
+                output_files=output_files,
+                candidates=[],
+                invocation=None,
+                status="failed",
+                error=str(exc),
+            )
+            self._write_mdx_diagnostics(diagnostics_path, diagnostics)
             raise SeparationError(f"Failed during MDX-Net separation: {exc}") from exc
         finally:
             for lock in reversed(cpu_locks):
                 lock.release()
 
-    def _invoke_mdx_separator(self, *, src: Path, output_dir: Path) -> Any:
+    def _invoke_mdx_separator(self, *, src: Path, output_dir: Path) -> _MdxInvocationResult:
         separator = self._mdx_separator
         if separator is None:
             raise SeparationError("MDX separator is not initialized")
 
-        if hasattr(separator, "output_dir"):
-            try:
-                setattr(separator, "output_dir", str(output_dir))
-            except Exception:
-                pass
+        self._set_mdx_output_dir(separator, output_dir)
 
         errors: list[str] = []
+        attempted_signatures: list[str] = []
+        src_arg = str(src.resolve(strict=False))
+        output_arg = str(output_dir.resolve(strict=False))
         call_candidates = [
-            lambda: self._invoke_mdx_separator_in_output_dir(
-                lambda: separator.separate(str(src), output_dir=str(output_dir)), output_dir
+            (
+                "separate(path, output_dir=output_dir)",
+                lambda: self._invoke_mdx_separator_in_output_dir(
+                    lambda: separator.separate(src_arg, output_dir=output_arg), output_dir
+                ),
             ),
-            lambda: self._invoke_mdx_separator_in_output_dir(
-                lambda: separator.separate(audio_file=str(src), output_dir=str(output_dir)), output_dir
+            (
+                "separate(audio_file=path, output_dir=output_dir)",
+                lambda: self._invoke_mdx_separator_in_output_dir(
+                    lambda: separator.separate(audio_file=src_arg, output_dir=output_arg), output_dir
+                ),
             ),
-            lambda: self._invoke_mdx_separator_in_output_dir(
-                lambda: separator.separate(audio_path=str(src), output_dir=str(output_dir)), output_dir
+            (
+                "separate(audio_path=path, output_dir=output_dir)",
+                lambda: self._invoke_mdx_separator_in_output_dir(
+                    lambda: separator.separate(audio_path=src_arg, output_dir=output_arg), output_dir
+                ),
             ),
-            lambda: self._invoke_mdx_separator_in_output_dir(lambda: separator.separate(str(src)), output_dir),
-            lambda: self._invoke_mdx_separator_in_output_dir(lambda: separator.separate(audio_file=str(src)), output_dir),
-            lambda: self._invoke_mdx_separator_in_output_dir(lambda: separator.separate(audio_path=str(src)), output_dir),
+            (
+                "separate(path)",
+                lambda: self._invoke_mdx_separator_in_output_dir(lambda: separator.separate(src_arg), output_dir),
+            ),
+            (
+                "separate(audio_file=path)",
+                lambda: self._invoke_mdx_separator_in_output_dir(lambda: separator.separate(audio_file=src_arg), output_dir),
+            ),
+            (
+                "separate(audio_path=path)",
+                lambda: self._invoke_mdx_separator_in_output_dir(lambda: separator.separate(audio_path=src_arg), output_dir),
+            ),
         ]
 
-        for call in call_candidates:
+        for signature, call in call_candidates:
+            attempted_signatures.append(signature)
+            stdout = io.StringIO()
+            stderr = io.StringIO()
             try:
-                return call()
+                with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+                    value = call()
+                return _MdxInvocationResult(
+                    value=value,
+                    call_signature=signature,
+                    attempted_signatures=list(attempted_signatures),
+                    stdout=stdout.getvalue(),
+                    stderr=stderr.getvalue(),
+                )
             except TypeError as exc:
-                errors.append(str(exc))
+                errors.append(f"{signature}: {exc}")
                 continue
             except Exception as exc:
-                raise SeparationError(f"MDX separator runtime failed: {exc}") from exc
+                raise SeparationError(
+                    f"MDX separator runtime failed with {signature}: {exc}; "
+                    f"stdout={self._short_log(stdout.getvalue())}; stderr={self._short_log(stderr.getvalue())}"
+                ) from exc
 
         raise SeparationError(
             "Unable to call MDX separator with known signatures: " + " | ".join(errors[-2:])
@@ -238,12 +353,24 @@ class VocalSeparator:
         finally:
             os.chdir(previous_cwd)
 
+    @staticmethod
+    def _set_mdx_output_dir(separator: Any, output_dir: Path) -> None:
+        output_arg = str(output_dir.resolve(strict=False))
+        for target in (separator, getattr(separator, "model_instance", None)):
+            if target is None or not hasattr(target, "output_dir"):
+                continue
+            try:
+                setattr(target, "output_dir", output_arg)
+            except Exception:
+                pass
+
     def _collect_output_candidates(
         self,
         result: Any,
         *,
         fallback: Iterable[Path],
         base_dir: Path,
+        scan_dirs: Iterable[Path] | None = None,
     ) -> list[Path]:
         candidates: list[Path] = []
 
@@ -273,9 +400,12 @@ class VocalSeparator:
         for p in fallback:
             append_path(p)
 
+        for directory in scan_dirs or []:
+            for path in self._iter_audio_files_recursive(directory):
+                append_path(path)
+
         normalized: list[Path] = []
         seen: set[str] = set()
-        allowed_suffixes = {".wav", ".flac", ".mp3", ".m4a", ".ogg"}
 
         for path in candidates:
             try:
@@ -291,7 +421,7 @@ class VocalSeparator:
             seen.add(key)
             if not resolved.exists() or not resolved.is_file():
                 continue
-            if resolved.suffix.lower() not in allowed_suffixes:
+            if resolved.suffix.lower() not in AUDIO_SUFFIXES:
                 continue
             normalized.append(resolved)
 
@@ -329,8 +459,30 @@ class VocalSeparator:
                 yield path
 
     @staticmethod
+    def _snapshot_audio_files(directory: Path) -> dict[str, tuple[int, int]]:
+        snapshot: dict[str, tuple[int, int]] = {}
+        for path in VocalSeparator._iter_audio_files_recursive(directory):
+            try:
+                stat = path.stat()
+            except OSError:
+                continue
+            snapshot[str(path.resolve(strict=False))] = (int(stat.st_mtime_ns), int(stat.st_size))
+        return snapshot
+
+    @staticmethod
+    def _iter_changed_audio_files(directory: Path, *, before: dict[str, tuple[int, int]]) -> Iterable[Path]:
+        for path in VocalSeparator._iter_audio_files_recursive(directory):
+            key = str(path.resolve(strict=False))
+            try:
+                stat = path.stat()
+            except OSError:
+                continue
+            current = (int(stat.st_mtime_ns), int(stat.st_size))
+            if before.get(key) != current:
+                yield path
+
+    @staticmethod
     def _iter_mdx_candidate_locations(*, source_stem: str, raw_output_dir: Path) -> Iterable[Path]:
-        allowed_suffixes = {".wav", ".flac", ".mp3", ".m4a", ".ogg"}
         candidate_dirs = [raw_output_dir, Path.cwd()]
         seen_dirs: set[str] = set()
         safe_source_stem = str(source_stem or "").strip()
@@ -343,39 +495,159 @@ class VocalSeparator:
             seen_dirs.add(key)
             for pattern in patterns:
                 for path in directory.glob(pattern):
-                    if path.is_file() and path.suffix.lower() in allowed_suffixes:
+                    if path.is_file() and path.suffix.lower() in AUDIO_SUFFIXES:
                         yield path
+
+    @staticmethod
+    def _iter_audio_files_recursive(directory: Path) -> Iterable[Path]:
+        try:
+            if not directory.exists() or not directory.is_dir():
+                return
+            for path in directory.rglob("*"):
+                if path.is_file() and path.suffix.lower() in AUDIO_SUFFIXES:
+                    yield path.resolve(strict=False)
+        except OSError:
+            return
+
+    @staticmethod
+    def _mdx_scanned_directories(
+        *,
+        output_dir: Path,
+        raw_output_dir: Path,
+        initial_cwd: Path,
+        src_parent: Path,
+    ) -> list[Path]:
+        paths: list[Path] = []
+        seen: set[str] = set()
+        for raw_path in (output_dir, raw_output_dir, initial_cwd, src_parent):
+            path = raw_path.resolve(strict=False)
+            key = str(path)
+            if key not in seen:
+                paths.append(path)
+                seen.add(key)
+        return paths
+
+    @staticmethod
+    def _scan_mdx_output_files(output_dir: Path) -> list[dict[str, Any]]:
+        files: list[dict[str, Any]] = []
+        if not output_dir.exists() or not output_dir.is_dir():
+            return files
+        for path in sorted(output_dir.rglob("*"), key=lambda item: str(item).lower()):
+            if not path.is_file():
+                continue
+            try:
+                relative_path = path.relative_to(output_dir).as_posix()
+            except ValueError:
+                relative_path = path.name
+            try:
+                size_bytes = path.stat().st_size
+            except OSError:
+                size_bytes = None
+            files.append(
+                {
+                    "relative_path": relative_path,
+                    "size_bytes": size_bytes,
+                    "extension": path.suffix.lower(),
+                }
+            )
+        return files
+
+    def _build_mdx_diagnostics(
+        self,
+        *,
+        src: Path,
+        original_src: Path,
+        out_dir: Path,
+        raw_output_dir: Path,
+        initial_cwd: Path,
+        scanned_directories: list[Path],
+        output_files: list[dict[str, Any]],
+        candidates: list[Path],
+        invocation: _MdxInvocationResult | None,
+        status: str,
+        error: str | None = None,
+    ) -> dict[str, Any]:
+        return {
+            "status": status,
+            "error": error,
+            "mdx_input_path": str(src),
+            "mdx_input_path_original": str(original_src),
+            "mdx_output_dir": str(raw_output_dir),
+            "separation_output_dir": str(out_dir),
+            "current_working_directory": str(initial_cwd),
+            "backend_config": self._mdx_backend_config(invocation),
+            "scanned_directories": [str(path) for path in scanned_directories],
+            "output_files": output_files,
+            "candidates": [self._display_candidate_path(path, out_dir) for path in candidates],
+        }
+
+    def _mdx_backend_config(self, invocation: _MdxInvocationResult | None) -> dict[str, Any]:
+        separator = self._mdx_separator
+        manager = self.model_manager
+        attrs: dict[str, Any] = {}
+        if separator is not None:
+            for name in ("output_dir", "model_file_dir", "output_format", "model_filename", "model_name"):
+                if hasattr(separator, name):
+                    try:
+                        attrs[name] = str(getattr(separator, name))
+                    except Exception:
+                        attrs[name] = "<unavailable>"
+        payload: dict[str, Any] = {
+            "backend": self.backend,
+            "device": str(self.device),
+            "separator_class": separator.__class__.__name__ if separator is not None else None,
+            "separator_attrs": attrs,
+            "model_name": str(getattr(manager, "model_name", "")),
+            "cache_root": str(getattr(manager, "cache_root", "")),
+            "mdx_cache_dir": str(getattr(manager, "mdx_cache_dir", "")),
+            "prefer_cuda": bool(getattr(manager, "prefer_cuda", False)),
+        }
+        if invocation is not None:
+            payload.update(
+                {
+                    "call_signature": invocation.call_signature,
+                    "attempted_signatures": invocation.attempted_signatures,
+                    "stdout": invocation.stdout[-4000:],
+                    "stderr": invocation.stderr[-4000:],
+                }
+            )
+        return payload
+
+    @staticmethod
+    def _write_mdx_diagnostics(path: Path, diagnostics: dict[str, Any]) -> None:
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(diagnostics, ensure_ascii=False, indent=2), encoding="utf-8")
+        except Exception as exc:
+            logger.warning("Failed to write MDX diagnostics to %s: %s", path, exc)
+
+    @staticmethod
+    def _display_candidate_path(path: Path, base_dir: Path) -> str:
+        try:
+            return path.resolve(strict=False).relative_to(base_dir.resolve(strict=False)).as_posix()
+        except ValueError:
+            return str(path)
+
+    @staticmethod
+    def _format_paths(paths: Iterable[Path]) -> list[str]:
+        return [str(path) for path in paths]
+
+    @staticmethod
+    def _short_log(text: str, limit: int = 1200) -> str:
+        value = str(text or "").strip()
+        if len(value) <= limit:
+            return value
+        return value[-limit:]
 
     def _pick_mdx_stem_map(self, candidates: list[Path]) -> dict[str, Path]:
         if not candidates:
             return {}
 
-        keyword_map = {
-            "vocals": ("vocal", "vocals", "voice", "acapella"),
-            "drums": ("drum", "drums", "percussion"),
-            "bass": ("bass",),
-            "other": ("other", "others"),
-            "accompaniment": ("instrumental", "inst", "accompaniment", "karaoke", "no_vocals", "music"),
-        }
-
         stem_map: dict[str, Path] = {}
         for path in candidates:
-            name = path.name.lower()
-            for stem_name, keywords in keyword_map.items():
-                if stem_name in stem_map:
-                    continue
-                if any(keyword in name for keyword in keywords):
-                    stem_map[stem_name] = path
-                    break
-
-        if len(candidates) == 2 and "vocals" not in stem_map:
-            first, second = candidates
-            if first.stat().st_size >= second.stat().st_size:
-                stem_map["vocals"] = second
-                stem_map.setdefault("accompaniment", first)
-            else:
-                stem_map["vocals"] = first
-                stem_map.setdefault("accompaniment", second)
+            stem_name = self._classify_mdx_stem(path)
+            if stem_name and stem_name not in stem_map:
+                stem_map[stem_name] = path
 
         if len(candidates) == 2 and "vocals" in stem_map and "accompaniment" not in stem_map:
             remaining = [path for path in candidates if path != stem_map["vocals"]]
@@ -383,6 +655,29 @@ class VocalSeparator:
                 stem_map["accompaniment"] = remaining[0]
 
         return stem_map
+
+    @staticmethod
+    def _classify_mdx_stem(path: Path) -> str | None:
+        name = path.stem.lower()
+        normalized = re.sub(r"[^a-z0-9]+", "_", name).strip("_")
+        tokens = [token for token in normalized.split("_") if token]
+        token_set = set(tokens)
+        has_no_vocal = any(
+            token in {"no", "non", "without"} and index + 1 < len(tokens) and tokens[index + 1] in {"vocal", "vocals"}
+            for index, token in enumerate(tokens)
+        ) or "no_vocals" in normalized or "no_vocal" in normalized
+
+        if has_no_vocal or token_set.intersection({"instrumental", "accompaniment", "karaoke", "music", "inst"}):
+            return "accompaniment"
+        if token_set.intersection({"vocals", "vocal", "voice", "acapella", "acappella"}):
+            return "vocals"
+        if token_set.intersection({"drum", "drums", "percussion"}):
+            return "drums"
+        if "bass" in token_set:
+            return "bass"
+        if token_set.intersection({"other", "others"}):
+            return "other"
+        return None
 
     def _separate_with_demucs(
         self,

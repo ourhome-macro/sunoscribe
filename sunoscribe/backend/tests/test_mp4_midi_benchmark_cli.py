@@ -435,6 +435,7 @@ class Mp4MidiBenchmarkCliTests(unittest.TestCase):
 
             run_root = output_root / "quality_run"
             summary = json.loads((run_root / "summary.json").read_text(encoding="utf-8"))
+            summary_markdown = (run_root / "summary.md").read_text(encoding="utf-8")
             stage_status = json.loads((run_root / "song" / "stage_status.json").read_text(encoding="utf-8"))
             quality_gate = json.loads((run_root / "song" / "quality_gate.json").read_text(encoding="utf-8"))
             quality_diagnostics = json.loads((run_root / "quality_diagnostics.json").read_text(encoding="utf-8"))
@@ -444,6 +445,15 @@ class Mp4MidiBenchmarkCliTests(unittest.TestCase):
             self.assertEqual(summary["results"][0]["status"], "quality_failed")
             self.assertIn("alignment", summary["results"][0])
             self.assertIn("dtw", summary["results"][0]["alignment"])
+            self.assertIn("pred_to_exp_shift_sec", summary["results"][0]["alignment"])
+            self.assertIn("shift_corrected_recall", summary["results"][0]["alignment"])
+            self.assertIn("shift_corrected_f1", summary["results"][0]["alignment"])
+            self.assertIn("shift_corrected_matched", summary["results"][0]["alignment"])
+            self.assertIn("shift_corrected_coverage", summary["results"][0]["alignment"])
+            self.assertIn("alignment_diagnosis", summary["results"][0]["alignment"])
+            self.assertIn("Raw F1", summary_markdown)
+            self.assertIn("Shift Recall", summary_markdown)
+            self.assertIn("Shift Diagnosis", summary_markdown)
             self.assertIn("reference_status", summary["results"][0])
             self.assertIn("reference_suspect_reasons", summary["results"][0])
             self.assertIn("reference_review", summary)

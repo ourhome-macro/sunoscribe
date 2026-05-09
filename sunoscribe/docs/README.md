@@ -6,10 +6,11 @@
 
 1. `backend-audio-pipeline.md`：后端音频流水线、typed data lineage、服务边界与 required stage 契约。
 2. `production-runtime-policy.md`：生产/诊断/benchmark profile、RMVPE fallback policy、artifact lineage 与失败策略。
-3. `mvp-trial-runbook.md`：初步 MVP 试验步骤、runtime doctor、单曲 smoke 与 19 首 observe-only benchmark。
-4. `mp4-midi-benchmark.md`：26 首 MP4 -> MIDI 本地 benchmark 设计、指标、manifest 与回归门禁。
-5. `audio_processor.md`、`vocal_separator.md`、`pitch _detection.md`：早期模块级实现说明，可作为历史/实现参考。
-6. `lyrics_processor.md`：歌词处理说明。
+3. `sunoscribe-mir-practical-guide.md`：面向当前项目状态的 MIR 实践指南，聚焦主链路、benchmark、artifact、revision 与错误分析。
+4. `mvp-trial-runbook.md`：初步 MVP 试验步骤、runtime doctor、单曲 smoke 与 19 首 observe-only benchmark。
+5. `mp4-midi-benchmark.md`：26 首 MP4 -> MIDI 本地 benchmark 设计、指标、manifest 与回归门禁。
+6. `audio_processor.md`、`vocal_separator.md`、`pitch _detection.md`：早期模块级实现说明，可作为历史/实现参考。
+7. `lyrics_processor.md`：歌词处理说明。
 
 ## 当前后端重点
 

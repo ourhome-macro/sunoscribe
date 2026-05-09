@@ -271,8 +271,12 @@ class AudioAnalysisService:
                 vocals_path = stem_result.vocals_path
                 accompaniment_path = stem_result.accompaniment_path
                 warnings.extend(stem_result.warnings)
+                if vocals_path is None:
+                    raise RuntimeError("required vocal separation did not produce a vocals stem")
             except Exception as exc:
-                warnings.append(f"vocal_separation_failed:{self._short_exception(exc)}")
+                message = f"vocal_separation_failed:{self._short_exception(exc)}"
+                warnings.append(message)
+                raise RuntimeError(message) from exc
 
         lyrics_audio_path = vocals_path or fallback_audio_path
         lyrics_segments: list[dict] = []

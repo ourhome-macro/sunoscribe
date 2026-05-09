@@ -627,6 +627,7 @@ def _reference_review_sample(row: dict[str, Any]) -> dict[str, Any]:
         reasons.append("octave_reference_suspect")
     first_delay = audibility.get("first_note_delay_sec")
     best_time_recall = alignment.get("best_time_shift_note_recall")
+    alignment_diagnosis = alignment.get("alignment_diagnosis")
     if (
         first_delay is not None
         and abs(float(first_delay)) > float(REFERENCE_REVIEW_THRESHOLDS["time_origin_delay_sec_min"])
@@ -635,6 +636,8 @@ def _reference_review_sample(row: dict[str, Any]) -> dict[str, Any]:
         and float(best_time_recall) > float(note_recall)
     ):
         reasons.append("time_origin_suspect")
+    if alignment_diagnosis == "possible_reference_time_offset":
+        reasons.append("smart_onset_time_offset")
     if (
         dtw_recall_lift is not None
         and dtw_recall_lift >= float(REFERENCE_REVIEW_THRESHOLDS["dtw_recall_lift_min"])
@@ -666,6 +669,15 @@ def _reference_review_sample(row: dict[str, Any]) -> dict[str, Any]:
         "dtw_recall_lift": dtw_recall_lift,
         "best_dtw_octave_shift_semitones": dtw.get("best_dtw_octave_shift_semitones"),
         "best_time_shift_note_recall": best_time_recall,
+        "pred_to_exp_shift_sec": alignment.get("pred_to_exp_shift_sec"),
+        "shift_corrected_recall": alignment.get("shift_corrected_recall"),
+        "shift_corrected_f1": alignment.get("shift_corrected_f1"),
+        "shift_corrected_matched": alignment.get("shift_corrected_matched"),
+        "shift_corrected_coverage": alignment.get("shift_corrected_coverage"),
+        "shift_recall_gain": alignment.get("shift_recall_gain"),
+        "shift_f1_gain": alignment.get("shift_f1_gain"),
+        "shift_matched_gain": alignment.get("shift_matched_gain"),
+        "alignment_diagnosis": alignment_diagnosis,
         "first_note_delay_sec": first_delay,
         "quality_status": row.get("status"),
         "quality_failed_checks": [check.get("name") for check in ((row.get("quality_gate") or {}).get("failed_checks") or [])],
@@ -697,8 +709,8 @@ def _summary_markdown(summary: dict[str, Any]) -> str:
         f"- Likely comparable: `{reference_counts.get('likely_comparable', 0)}`",
         f"- Needs manual review: `{reference_counts.get('needs_manual_review', 0)}`",
         "",
-        "| Sample | Status | Reference Status | Reference Reasons | Note F1 | Recall | Matched | Coverage | First Delay s | Best Oct Rec | Best Time Rec | DTW Rec | Pitch Acc | Failure Modes | Error |",
-        "| --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- | --- |",
+        "| Sample | Status | Reference Status | Reference Reasons | Raw F1 | Raw Recall | Raw Matched | Raw Coverage | Shift s | Shift Recall | Shift F1 | Shift Matched | Shift Coverage | Shift Diagnosis | First Delay s | Best Oct Rec | Best Time Rec | DTW Rec | Pitch Acc | Failure Modes | Error |",
+        "| --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- | ---: | ---: | ---: | ---: | ---: | --- | --- |",
     ]
     for result in results:
         metrics = result.get("metrics") or {}
@@ -706,7 +718,7 @@ def _summary_markdown(summary: dict[str, Any]) -> str:
         alignment = result.get("alignment") or {}
         error = result.get("error") or {}
         lines.append(
-            "| {sample} | {status} | {reference_status} | {reference_reasons} | {f1} | {recall} | {matched} | {coverage} | {delay} | {best_oct} | {best_time} | {dtw_rec} | {pitch} | {modes} | {error} |".format(
+            "| {sample} | {status} | {reference_status} | {reference_reasons} | {f1} | {recall} | {matched} | {coverage} | {shift} | {shift_recall} | {shift_f1} | {shift_matched} | {shift_coverage} | {shift_diagnosis} | {delay} | {best_oct} | {best_time} | {dtw_rec} | {pitch} | {modes} | {error} |".format(
                 sample=result.get("sample_id"),
                 status=result.get("status"),
                 reference_status=result.get("reference_status") or "",
@@ -715,6 +727,12 @@ def _summary_markdown(summary: dict[str, Any]) -> str:
                 recall=_fmt_metric(metrics.get("note_recall")),
                 matched=metrics.get("matched_note_count") if metrics else "",
                 coverage=_fmt_metric(audibility.get("midi_coverage_ratio")),
+                shift=_fmt_metric(alignment.get("pred_to_exp_shift_sec")),
+                shift_recall=_fmt_metric(alignment.get("shift_corrected_recall")),
+                shift_f1=_fmt_metric(alignment.get("shift_corrected_f1")),
+                shift_matched=alignment.get("shift_corrected_matched") if alignment else "",
+                shift_coverage=_fmt_metric(alignment.get("shift_corrected_coverage")),
+                shift_diagnosis=alignment.get("alignment_diagnosis") or "",
                 delay=_fmt_metric(audibility.get("first_note_delay_sec")),
                 best_oct=_fmt_metric(alignment.get("best_octave_shift_note_recall")),
                 best_time=_fmt_metric(alignment.get("best_time_shift_note_recall")),
@@ -931,8 +949,8 @@ def _quality_diagnostics_markdown(payload: dict[str, Any]) -> str:
         "",
         "## Worst By Note F1",
         "",
-        "| Sample | Status | Reference Status | Reference Reasons | F1 | Recall | Matched | Coverage | First Delay s | Best Oct Rec | Best Time Rec | DTW Rec | Failure Modes |",
-        "| --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |",
+        "| Sample | Status | Reference Status | Reference Reasons | Raw F1 | Raw Recall | Raw Matched | Raw Coverage | Shift s | Shift Recall | Shift F1 | Shift Diagnosis | First Delay s | Best Oct Rec | Best Time Rec | DTW Rec | Failure Modes |",
+        "| --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- | ---: | ---: | ---: | ---: | --- |",
     ]
     for sample in sorted(metric_samples, key=lambda item: _sort_float((item.get("metrics") or {}).get("note_f1")))[:20]:
         lines.append(_quality_table_row(sample))
@@ -941,8 +959,8 @@ def _quality_diagnostics_markdown(payload: dict[str, Any]) -> str:
             "",
             "## Worst By MIDI Coverage",
             "",
-            "| Sample | Status | Reference Status | Reference Reasons | F1 | Recall | Matched | Coverage | First Delay s | Best Oct Rec | Best Time Rec | DTW Rec | Failure Modes |",
-            "| --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |",
+            "| Sample | Status | Reference Status | Reference Reasons | Raw F1 | Raw Recall | Raw Matched | Raw Coverage | Shift s | Shift Recall | Shift F1 | Shift Diagnosis | First Delay s | Best Oct Rec | Best Time Rec | DTW Rec | Failure Modes |",
+            "| --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- | ---: | ---: | ---: | ---: | --- |",
         ]
     )
     for sample in sorted(metric_samples, key=lambda item: _sort_float((item.get("audibility") or {}).get("midi_coverage_ratio")))[:20]:
@@ -952,8 +970,8 @@ def _quality_diagnostics_markdown(payload: dict[str, Any]) -> str:
             "",
             "## Worst By First-Note Delay",
             "",
-            "| Sample | Status | Reference Status | Reference Reasons | F1 | Recall | Matched | Coverage | First Delay s | Best Oct Rec | Best Time Rec | DTW Rec | Failure Modes |",
-            "| --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |",
+            "| Sample | Status | Reference Status | Reference Reasons | Raw F1 | Raw Recall | Raw Matched | Raw Coverage | Shift s | Shift Recall | Shift F1 | Shift Diagnosis | First Delay s | Best Oct Rec | Best Time Rec | DTW Rec | Failure Modes |",
+            "| --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- | ---: | ---: | ---: | ---: | --- |",
         ]
     )
     for sample in sorted(
@@ -974,7 +992,7 @@ def _quality_table_row(sample: dict[str, Any]) -> str:
     metrics = sample.get("metrics") or {}
     audibility = sample.get("audibility") or {}
     alignment = sample.get("alignment") or {}
-    return "| {sample_id} | {status} | {reference_status} | {reference_reasons} | {f1} | {recall} | {matched} | {coverage} | {delay} | {best_oct} | {best_time} | {dtw_rec} | {modes} |".format(
+    return "| {sample_id} | {status} | {reference_status} | {reference_reasons} | {f1} | {recall} | {matched} | {coverage} | {shift} | {shift_recall} | {shift_f1} | {shift_diagnosis} | {delay} | {best_oct} | {best_time} | {dtw_rec} | {modes} |".format(
         sample_id=sample.get("sample_id"),
         status=sample.get("status"),
         reference_status=sample.get("reference_status") or "",
@@ -983,6 +1001,10 @@ def _quality_table_row(sample: dict[str, Any]) -> str:
         recall=_fmt_metric(metrics.get("note_recall")),
         matched=metrics.get("matched_note_count"),
         coverage=_fmt_metric(audibility.get("midi_coverage_ratio")),
+        shift=_fmt_metric(alignment.get("pred_to_exp_shift_sec")),
+        shift_recall=_fmt_metric(alignment.get("shift_corrected_recall")),
+        shift_f1=_fmt_metric(alignment.get("shift_corrected_f1")),
+        shift_diagnosis=alignment.get("alignment_diagnosis") or "",
         delay=_fmt_metric(audibility.get("first_note_delay_sec")),
         best_oct=_fmt_metric(alignment.get("best_octave_shift_note_recall")),
         best_time=_fmt_metric(alignment.get("best_time_shift_note_recall")),

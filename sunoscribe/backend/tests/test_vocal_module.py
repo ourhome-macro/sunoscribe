@@ -9,7 +9,7 @@ from types import SimpleNamespace
 import torch
 
 from app.modules.vocal.model_manager import DemucsModelManager
-from app.modules.vocal.separator import VocalSeparator
+from app.modules.vocal.separator import SeparationError, VocalSeparator
 
 
 class _FakeModel:
@@ -166,6 +166,93 @@ class TestVocalModule(unittest.TestCase):
             self.assertTrue(Path(result.vocal_path).exists())
             self.assertTrue(Path(result.accompaniment_path).exists())
             self.assertEqual(Path(result.vocal_path).read_bytes(), b"fresh vocals")
+
+    def test_mdx_stem_discovery_identifies_top_level_vocals(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            output_dir = root / "out"
+            output_dir.mkdir()
+            vocals = output_dir / "vocals.wav"
+            vocals.write_bytes(b"vocals")
+
+            candidates = VocalSeparator._collect_output_candidates(
+                VocalSeparator.__new__(VocalSeparator),
+                None,
+                fallback=[],
+                base_dir=output_dir,
+                scan_dirs=[output_dir],
+            )
+            stem_map = VocalSeparator._pick_mdx_stem_map(VocalSeparator.__new__(VocalSeparator), candidates)
+
+            self.assertEqual(stem_map.get("vocals"), vocals.resolve(strict=False))
+
+    def test_mdx_stem_discovery_recurses_for_capitalized_vocals(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            output_dir = root / "out"
+            nested = output_dir / "song"
+            nested.mkdir(parents=True)
+            vocals = nested / "Vocals.wav"
+            vocals.write_bytes(b"vocals")
+
+            candidates = VocalSeparator._collect_output_candidates(
+                VocalSeparator.__new__(VocalSeparator),
+                None,
+                fallback=[],
+                base_dir=output_dir,
+                scan_dirs=[output_dir],
+            )
+            stem_map = VocalSeparator._pick_mdx_stem_map(VocalSeparator.__new__(VocalSeparator), candidates)
+
+            self.assertEqual(stem_map.get("vocals"), vocals.resolve(strict=False))
+
+    def test_mdx_stem_discovery_does_not_treat_no_vocals_as_vocals(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            output_dir = root / "out"
+            output_dir.mkdir()
+            no_vocals = output_dir / "no_vocals.wav"
+            no_vocals.write_bytes(b"instrumental")
+
+            candidates = VocalSeparator._collect_output_candidates(
+                VocalSeparator.__new__(VocalSeparator),
+                None,
+                fallback=[],
+                base_dir=output_dir,
+                scan_dirs=[output_dir],
+            )
+            stem_map = VocalSeparator._pick_mdx_stem_map(VocalSeparator.__new__(VocalSeparator), candidates)
+
+            self.assertNotIn("vocals", stem_map)
+            self.assertEqual(stem_map.get("accompaniment"), no_vocals.resolve(strict=False))
+
+    def test_mdx_empty_output_error_includes_scanned_directories_and_candidates(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            input_wav = root / "source.wav"
+            out_dir = root / "out"
+            input_wav.write_bytes(b"dummy")
+
+            class _EmptySeparator:
+                def separate(self, audio_path, output_dir=None):
+                    return []
+
+            class _Manager:
+                selected_device = torch.device("cpu")
+
+                def load_separator(self):
+                    return _EmptySeparator()
+
+            separator = VocalSeparator(model_manager=_Manager(), backend="mdx-net")
+            with self.assertRaises(SeparationError) as raised:
+                separator.separate(str(input_wav), str(out_dir), stem_prefix="x")
+
+            message = str(raised.exception)
+            self.assertIn("mdx_net_produced_no_audio_files", message)
+            self.assertIn("candidates=[]", message)
+            self.assertIn(str(out_dir.resolve(strict=False)), message)
+            diagnostics = out_dir / "mdx_diagnostics.json"
+            self.assertTrue(diagnostics.exists())
 
     def test_prepare_waveform_for_save_limited_to_target_peak(self) -> None:
         waveform = torch.tensor([[2.0, -2.0, 0.5], [1.5, -1.5, 0.25]], dtype=torch.float32)
