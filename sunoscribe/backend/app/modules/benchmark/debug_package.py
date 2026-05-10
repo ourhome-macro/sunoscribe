@@ -431,7 +431,13 @@ def build_derived_diagnostics(
     note_candidates = _derive_note_candidate_diagnostics(note_candidates_path, predicted_note_count=len(predicted_notes))
     selected_melody = _derive_selected_melody_diagnostics(selected_melody_path)
     quantized_notes = _derive_quantized_note_diagnostics(quantized_notes_path)
-    short_note_diagnostics = _derive_short_note_diagnostics(expected_notes, predicted_notes)
+    short_note_diagnostics = _derive_short_note_diagnostics(
+        expected_notes,
+        predicted_notes,
+        note_candidates_path=note_candidates_path,
+        selected_melody_path=selected_melody_path,
+        quantized_notes_path=quantized_notes_path,
+    )
     pitch_distribution = _derive_pitch_distribution_diagnostics(
         expected_notes=expected_notes,
         predicted_notes=predicted_notes,
@@ -1223,13 +1229,26 @@ def _derive_quantized_note_diagnostics(quantized_notes_path: Path | None) -> dic
     if not isinstance(payload, dict):
         return _unavailable("quantized notes unavailable")
     summary = payload.get("summary") if isinstance(payload.get("summary"), dict) else {}
+    diagnostics = payload.get("diagnostics") if isinstance(payload.get("diagnostics"), dict) else {}
+    fragmentation = summary.get("fragmentation") if isinstance(summary.get("fragmentation"), dict) else {}
+    if not fragmentation:
+        fragmentation = diagnostics.get("fragmentation") if isinstance(diagnostics.get("fragmentation"), dict) else {}
+    overmerge = summary.get("overmerge") if isinstance(summary.get("overmerge"), dict) else {}
+    if not overmerge:
+        overmerge = diagnostics.get("overmerge") if isinstance(diagnostics.get("overmerge"), dict) else {}
     return {
         "available": True,
         "quantizer_backend": payload.get("quantizer_backend"),
+        "requested_quantizer_backend": payload.get("requested_quantizer_backend"),
+        "fallback_used": bool(payload.get("fallback_used") or summary.get("fallback_used")),
+        "fallback_reason": payload.get("fallback_reason") or summary.get("fallback_reason"),
         "note_count": summary.get("note_count", 0),
         "mean_quantize_error_sec": summary.get("mean_quantize_error_sec"),
+        "p95_quantize_error_sec": summary.get("p95_quantize_error_sec"),
         "max_quantize_error_sec": summary.get("max_quantize_error_sec"),
         "uncertain_count": summary.get("uncertain_count", 0),
+        "fragmentation": fragmentation,
+        "overmerge": overmerge,
     }
 
 
@@ -1238,12 +1257,23 @@ def _derive_short_note_diagnostics(
     predicted_notes: list[NoteEvent],
     *,
     duration_threshold_sec: float = 0.25,
+    note_candidates_path: Path | None = None,
+    selected_melody_path: Path | None = None,
+    quantized_notes_path: Path | None = None,
 ) -> dict[str, Any]:
     if not expected_notes:
         return _unavailable("reference notes unavailable")
     expected_short = [note for note in expected_notes if note.duration < duration_threshold_sec]
     predicted_short = [note for note in predicted_notes if note.duration < duration_threshold_sec]
     matched_expected, matched_predicted = _match_short_note_sets(expected_short, predicted_short)
+    missed_expected = [note for index, note in enumerate(expected_short) if index not in matched_expected]
+    loss_attribution = _attribute_short_note_loss(
+        missed_expected,
+        note_candidates_path=note_candidates_path,
+        selected_melody_path=selected_melody_path,
+        quantized_notes_path=quantized_notes_path,
+        duration_threshold_sec=duration_threshold_sec,
+    )
     return {
         "available": True,
         "duration_threshold_sec": duration_threshold_sec,
@@ -1254,6 +1284,69 @@ def _derive_short_note_diagnostics(
         "false_positive_short_note_count": max(0, len(predicted_short) - len(matched_predicted)),
         "short_note_recall": _safe_divide(len(matched_expected), len(expected_short)),
         "short_note_precision": _safe_divide(len(matched_predicted), len(predicted_short)),
+        "loss_attribution": loss_attribution,
+    }
+
+
+def _attribute_short_note_loss(
+    missed_expected_short_notes: list[NoteEvent],
+    *,
+    note_candidates_path: Path | None,
+    selected_melody_path: Path | None,
+    quantized_notes_path: Path | None,
+    duration_threshold_sec: float,
+) -> dict[str, Any]:
+    stage_counts = {"candidate": 0, "selector": 0, "quantizer": 0, "export": 0, "unknown": 0}
+    if not missed_expected_short_notes:
+        return {
+            "available": True,
+            "likely_loss_stage": "none",
+            "stage_counts": stage_counts,
+            "examples": [],
+        }
+
+    candidate_events = _load_artifact_note_events(note_candidates_path, kind="note_candidates")
+    selected_events = _load_artifact_note_events(selected_melody_path, kind="selected_melody")
+    quantized_events = _load_artifact_note_events(quantized_notes_path, kind="quantized_notes")
+    examples: list[dict[str, Any]] = []
+    for note in missed_expected_short_notes:
+        if candidate_events is None:
+            stage = "unknown"
+        elif not _has_matching_artifact_event(note, candidate_events, duration_threshold_sec=duration_threshold_sec):
+            stage = "candidate"
+        elif selected_events is None:
+            stage = "unknown"
+        elif not _has_matching_artifact_event(note, selected_events, duration_threshold_sec=duration_threshold_sec):
+            stage = "selector"
+        elif quantized_events is None:
+            stage = "unknown"
+        elif not _has_matching_artifact_event(note, quantized_events, duration_threshold_sec=duration_threshold_sec):
+            stage = "quantizer"
+        else:
+            stage = "export"
+        stage_counts[stage] += 1
+        if len(examples) < 20:
+            examples.append(
+                {
+                    "start_sec": _round_float(note.start),
+                    "duration_sec": _round_float(note.duration),
+                    "pitch": int(note.pitch),
+                    "likely_loss_stage": stage,
+                }
+            )
+    likely_stage = max(stage_counts, key=lambda key: stage_counts[key])
+    if stage_counts[likely_stage] == 0:
+        likely_stage = "none"
+    return {
+        "available": True,
+        "likely_loss_stage": likely_stage,
+        "stage_counts": stage_counts,
+        "artifact_availability": {
+            "note_candidates": candidate_events is not None,
+            "selected_melody": selected_events is not None,
+            "quantized_notes": quantized_events is not None,
+        },
+        "examples": examples,
     }
 
 
@@ -1274,6 +1367,81 @@ def _match_short_note_sets(expected: list[NoteEvent], predicted: list[NoteEvent]
             matched_expected.add(expected_index)
             matched_predicted.add(best_index)
     return matched_expected, matched_predicted
+
+
+def _load_artifact_note_events(path: Path | None, *, kind: str) -> list[NoteEvent] | None:
+    if path is None or not path.exists():
+        return None
+    payload = _read_json(path)
+    if payload is None:
+        return None
+    if kind == "selected_melody" and isinstance(payload, dict):
+        items = payload.get("selected_notes") if isinstance(payload.get("selected_notes"), list) else []
+    elif kind == "quantized_notes" and isinstance(payload, dict):
+        items = payload.get("notes") if isinstance(payload.get("notes"), list) else []
+    else:
+        items = _walk_note_like_items(_preferred_candidate_note_payload(payload))
+    events: list[NoteEvent] = []
+    for item in items or []:
+        if not isinstance(item, dict):
+            continue
+        event = _artifact_item_to_note_event(item)
+        if event is not None:
+            events.append(event)
+    return events
+
+
+def _artifact_item_to_note_event(item: dict[str, Any]) -> NoteEvent | None:
+    start = _as_float(
+        _first_present(
+            item,
+            "quantized_start_time_sec",
+            "start_time_sec",
+            "start_time",
+            "onset_sec",
+            "start_sec",
+            "start",
+            "time_sec",
+        )
+    )
+    end = _as_float(
+        _first_present(item, "quantized_end_time_sec", "end_time_sec", "end_time", "offset_sec", "end_sec", "end")
+    )
+    duration = _as_float(_first_present(item, "quantized_duration_sec", "duration_sec", "duration"))
+    if duration is None:
+        duration_beats = _as_float(item.get("duration_beats"))
+        tempo_bpm = _as_float(item.get("tempo_bpm"))
+        if duration_beats is not None and tempo_bpm is not None and tempo_bpm > 0:
+            duration = duration_beats * (60.0 / tempo_bpm)
+    if end is None and start is not None and duration is not None:
+        end = start + duration
+    if duration is None and start is not None and end is not None:
+        duration = max(0.0, end - start)
+    pitch = _candidate_pitch_midi(item)
+    if start is None or pitch is None:
+        return None
+    if end is None:
+        end = start + max(0.0, duration or 0.0)
+    return NoteEvent(start=float(start), end=float(end), pitch=int(round(pitch)))
+
+
+def _has_matching_artifact_event(
+    expected: NoteEvent,
+    events: list[NoteEvent],
+    *,
+    duration_threshold_sec: float,
+) -> bool:
+    for event in events:
+        if int(event.pitch) != int(expected.pitch):
+            continue
+        onset_delta = abs(float(event.start) - float(expected.start))
+        if onset_delta > 0.10:
+            continue
+        if expected.duration < duration_threshold_sec and event.duration <= duration_threshold_sec * 1.5:
+            return True
+        if _duration_iou(expected, event) >= 0.35:
+            return True
+    return False
 
 
 def _derive_pitch_distribution_diagnostics(
@@ -2340,13 +2508,16 @@ def _walk_note_like_items(payload: Any) -> list[dict[str, Any]]:
 
 
 def _dict_looks_like_note(payload: dict[str, Any]) -> bool:
-    has_time = any(key in payload for key in ["start_time", "onset_sec", "start_sec", "start", "time_sec"])
-    has_pitch = any(key in payload for key in ["pitch", "midi_pitch", "pitch_midi", "frequency_hz", "f0_hz"])
+    has_time = any(key in payload for key in ["start_time", "start_time_sec", "onset_sec", "start_sec", "start", "time_sec"])
+    has_pitch = any(
+        key in payload
+        for key in ["pitch", "midi_pitch", "pitch_midi", "pitch_midi_float", "pitch_center_midi", "midi_float", "frequency_hz", "f0_hz"]
+    )
     return has_time and has_pitch
 
 
 def _candidate_pitch_midi(payload: dict[str, Any]) -> float | None:
-    direct = _as_float(_first_present(payload, "midi_pitch", "pitch_midi"))
+    direct = _as_float(_first_present(payload, "midi_pitch", "pitch_midi", "pitch_midi_float", "pitch_center_midi", "midi_float"))
     if direct is not None:
         return direct
     pitch_value = _first_present(payload, "pitch", "note")
@@ -2451,6 +2622,9 @@ def _derived_diagnostics_markdown_lines(derived_diagnostics: dict[str, Any] | No
     selected_melody = derived_diagnostics.get("selected_melody") if isinstance(derived_diagnostics.get("selected_melody"), dict) else {}
     quantized_notes = derived_diagnostics.get("quantized_notes") if isinstance(derived_diagnostics.get("quantized_notes"), dict) else {}
     short_note_diagnostics = derived_diagnostics.get("short_note_diagnostics") if isinstance(derived_diagnostics.get("short_note_diagnostics"), dict) else {}
+    quant_fragmentation = quantized_notes.get("fragmentation") if isinstance(quantized_notes.get("fragmentation"), dict) else {}
+    quant_overmerge = quantized_notes.get("overmerge") if isinstance(quantized_notes.get("overmerge"), dict) else {}
+    short_loss_attribution = short_note_diagnostics.get("loss_attribution") if isinstance(short_note_diagnostics.get("loss_attribution"), dict) else {}
     match = derived_diagnostics.get("match") if isinstance(derived_diagnostics.get("match"), dict) else {}
     pitch_distribution = derived_diagnostics.get("pitch_distribution") if isinstance(derived_diagnostics.get("pitch_distribution"), dict) else {}
     pairwise = pitch_distribution.get("pairwise") if isinstance(pitch_distribution.get("pairwise"), dict) else {}
@@ -2526,10 +2700,19 @@ def _derived_diagnostics_markdown_lines(derived_diagnostics: dict[str, Any] | No
         "### Quantization Diagnostics",
         f"- available: {str(bool(quantized_notes.get('available'))).lower()}",
         f"- quantizer_backend: {_fmt(quantized_notes.get('quantizer_backend'))}",
+        f"- requested_quantizer_backend: {_fmt(quantized_notes.get('requested_quantizer_backend'))}",
+        f"- fallback_used: {str(bool(quantized_notes.get('fallback_used'))).lower()}",
+        f"- fallback_reason: {_fmt(quantized_notes.get('fallback_reason'))}",
         f"- note_count: {_fmt(quantized_notes.get('note_count'))}",
         f"- mean_quantize_error_sec: {_fmt(quantized_notes.get('mean_quantize_error_sec'))}",
+        f"- p95_quantize_error_sec: {_fmt(quantized_notes.get('p95_quantize_error_sec'))}",
         f"- max_quantize_error_sec: {_fmt(quantized_notes.get('max_quantize_error_sec'))}",
         f"- uncertain_count: {_fmt(quantized_notes.get('uncertain_count'))}",
+        f"- possible_fragment_pair_count: {_fmt(quant_fragmentation.get('possible_fragment_pair_count'))}",
+        f"- fragmentation_risk_score: {_fmt(quant_fragmentation.get('risk_score'))}",
+        f"- possible_overmerge_note_count: {_fmt(quant_overmerge.get('possible_overmerge_note_count'))}",
+        f"- overmerge_overlap_pair_count: {_fmt(quant_overmerge.get('overlap_pair_count'))}",
+        f"- overmerge_risk_score: {_fmt(quant_overmerge.get('risk_score'))}",
         f"- unavailable_reason: {_fmt(quantized_notes.get('unavailable_reason')) if not quantized_notes.get('available') else 'none'}",
         "### Short Note Diagnostics",
         f"- available: {str(bool(short_note_diagnostics.get('available'))).lower()}",
@@ -2540,6 +2723,8 @@ def _derived_diagnostics_markdown_lines(derived_diagnostics: dict[str, Any] | No
         f"- false_positive_short_note_count: {_fmt(short_note_diagnostics.get('false_positive_short_note_count'))}",
         f"- short_note_recall: {_fmt(short_note_diagnostics.get('short_note_recall'))}",
         f"- short_note_precision: {_fmt(short_note_diagnostics.get('short_note_precision'))}",
+        f"- likely_loss_stage: {_fmt(short_loss_attribution.get('likely_loss_stage'))}",
+        f"- loss_stage_counts: {_fmt(short_loss_attribution.get('stage_counts'))}",
         f"- unavailable_reason: {_fmt(short_note_diagnostics.get('unavailable_reason')) if not short_note_diagnostics.get('available') else 'none'}",
         "### Match Diagnostics",
         f"- raw_matched_count: {_fmt(match.get('raw_matched_count'))}",

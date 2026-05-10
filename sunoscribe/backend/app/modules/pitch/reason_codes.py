@@ -15,13 +15,16 @@ SILENCE_OR_BREATH_REGION = "silence_or_breath_region"
 UNCERTAIN = "uncertain"
 SUSPECTED_VIBRATO = "suspected_vibrato"
 SUSPECTED_GLIDE = "suspected_glide"
-HIGH_QUANTIZE_ERROR = "high_quantize_error"
+LARGE_QUANTIZE_ERROR = "large_quantize_error"
+HIGH_QUANTIZE_ERROR = LARGE_QUANTIZE_ERROR
 DP_FALLBACK = "dp_fallback"
 RHYTHM_GRID_UNAVAILABLE = "rhythm_grid_unavailable"
 DP_NO_CANDIDATE_PATH = "dp_no_candidate_path"
 QUANTIZER_BACKEND_UNSUPPORTED = "quantizer_backend_unsupported"
-FRAGMENTATION_RISK = "fragmentation_risk"
-OVERMERGE_RISK = "overmerge_risk"
+POSSIBLE_FRAGMENTATION = "possible_fragmentation"
+POSSIBLE_OVERMERGE = "possible_overmerge"
+FRAGMENTATION_RISK = POSSIBLE_FRAGMENTATION
+OVERMERGE_RISK = POSSIBLE_OVERMERGE
 
 REJECTION_REASON_CODES = {
     LOW_CONFIDENCE,

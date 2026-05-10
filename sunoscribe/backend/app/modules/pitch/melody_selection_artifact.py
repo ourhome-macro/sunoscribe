@@ -200,6 +200,8 @@ def selected_notes_to_pitch_notes(selected_melody: dict[str, Any] | None) -> lis
             {
                 "id": item.get("candidate_id"),
                 "pitch": midi_to_note(pitch_center),
+                "pitch_midi_float": pitch_center,
+                "pitch_center_midi": pitch_center,
                 "start_time": item.get("start_time_sec"),
                 "end_time": item.get("end_time_sec"),
                 "confidence": item.get("confidence", 0.0),
