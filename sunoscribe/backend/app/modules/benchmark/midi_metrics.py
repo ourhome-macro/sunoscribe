@@ -1093,6 +1093,8 @@ def _diagnose_smart_onset_alignment(
         and ratio_ok
     ):
         return "possible_reference_time_offset"
+    if abs(shift) < 2.0 and shift_recall_gain >= 0.10 and shift_matched_gain >= 20:
+        return "minor_onset_alignment_gain"
     if abs(shift) < 2.0:
         return "no_significant_offset"
     if shift_peak_support < 5 or not ratio_ok:

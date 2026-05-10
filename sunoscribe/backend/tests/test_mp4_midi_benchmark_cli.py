@@ -9,7 +9,15 @@ from unittest.mock import patch
 
 from app.modules.benchmark.dataset import BenchmarkSample
 from app.modules.benchmark.midi_metrics import MidiMetricConfig
-from app.scripts.mp4_midi_benchmark import _aggregate_metrics_for_reference_status, _compute_metrics_stage, _quality_gate_stage, _reference_review_sample, main
+from app.scripts.mp4_midi_benchmark import (
+    SampleRunResult,
+    _aggregate_metrics_for_reference_status,
+    _compute_metrics_stage,
+    _quality_gate_stage,
+    _reference_review_sample,
+    _write_summary_files,
+    main,
+)
 
 
 def _write_midi(path: Path) -> None:
@@ -583,6 +591,68 @@ class Mp4MidiBenchmarkCliTests(unittest.TestCase):
             summary = json.loads((output_root / "success_run" / "summary.json").read_text(encoding="utf-8"))
             self.assertEqual(exit_code, 0)
             self.assertEqual(summary["results"][0]["status"], "success")
+
+    def test_summary_metrics_include_quality_gate_audibility_fields(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            run_root = root / "run"
+            run_root.mkdir()
+            manifest = _write_manifest_fixture(root)
+            from app.modules.benchmark.dataset import load_manifest
+
+            loaded_manifest = load_manifest(manifest)
+            dataset_report = {
+                "mp4_count": 1,
+                "midi_count": 1,
+                "paired_count": 1,
+                "enabled_count": 1,
+                "mp4_only": [],
+                "midi_only": [],
+            }
+            result = SampleRunResult(
+                sample_id="song",
+                status="quality_failed",
+                run_dir=run_root / "song",
+                produced_midi_path=run_root / "song" / "produced.mid",
+                metrics={
+                    "metrics": {
+                        "note_f1": 0.25,
+                        "note_recall": 0.125,
+                        "matched_note_count": 5,
+                        "pitch_accuracy": 0.75,
+                    },
+                    "audibility": {
+                        "midi_coverage_ratio": 0.36379859079787524,
+                        "first_note_delay_sec": 31.54450561818182,
+                    },
+                    "alignment": {},
+                    "suspected_failure_modes": [],
+                },
+                stage_records=[],
+                quality_gate={
+                    "status": "quality_failed",
+                    "failed_checks": [
+                        {"name": "midi_coverage_ratio", "actual": 0.36379859079787524},
+                        {"name": "first_note_delay_sec", "actual": 31.54450561818182},
+                    ],
+                },
+            )
+
+            _write_summary_files(
+                run_root=run_root,
+                manifest=loaded_manifest,
+                results=[result],
+                dataset_report=dataset_report,
+            )
+
+            summary = json.loads((run_root / "summary.json").read_text(encoding="utf-8"))
+            markdown = (run_root / "summary.md").read_text(encoding="utf-8")
+            metrics = summary["results"][0]["metrics"]
+
+            self.assertEqual(metrics["midi_coverage_ratio"], 0.36379859079787524)
+            self.assertEqual(metrics["first_note_delay_sec"], 31.54450561818182)
+            self.assertIn("0.3638", markdown)
+            self.assertIn("31.5445", markdown)
 
 
 if __name__ == "__main__":

@@ -548,22 +548,37 @@ def _write_summary_files(
 
 
 def _summary_result_row(result: SampleRunResult) -> dict[str, Any]:
+    metric_payload = result.metrics or {}
+    metrics = _summary_metrics_with_quality_fields(metric_payload)
     return {
         "sample_id": result.sample_id,
         "status": result.status,
         "run_dir": str(result.run_dir),
         "produced_midi_path": str(result.produced_midi_path) if result.produced_midi_path else None,
-        "metrics": result.metrics.get("metrics") if result.metrics else None,
-        "audibility": result.metrics.get("audibility") if result.metrics else None,
-        "alignment": result.metrics.get("alignment") if result.metrics else None,
-        "diagnostics": result.metrics.get("diagnostics") if result.metrics else None,
-        "suspected_failure_modes": result.metrics.get("suspected_failure_modes") if result.metrics else [],
+        "metrics": metrics,
+        "audibility": metric_payload.get("audibility") if result.metrics else None,
+        "alignment": metric_payload.get("alignment") if result.metrics else None,
+        "diagnostics": metric_payload.get("diagnostics") if result.metrics else None,
+        "suspected_failure_modes": metric_payload.get("suspected_failure_modes") if result.metrics else [],
         "quality_gate": result.quality_gate,
         "logs": result.logs,
         "workspace_path": str(result.workspace_path) if result.workspace_path else None,
         "error": result.error,
         "warnings": result.warnings,
     }
+
+
+def _summary_metrics_with_quality_fields(metrics_payload: dict[str, Any]) -> dict[str, Any] | None:
+    raw_metrics = metrics_payload.get("metrics")
+    if not isinstance(raw_metrics, dict):
+        return None
+    metrics = dict(raw_metrics)
+    audibility = metrics_payload.get("audibility") or {}
+    if isinstance(audibility, dict):
+        for key in ("midi_coverage_ratio", "first_note_delay_sec"):
+            if metrics.get(key) is None and audibility.get(key) is not None:
+                metrics[key] = audibility.get(key)
+    return metrics
 
 
 def _build_reference_review(*, run_root: Path, result_rows: list[dict[str, Any]]) -> dict[str, Any]:
@@ -714,7 +729,6 @@ def _summary_markdown(summary: dict[str, Any]) -> str:
     ]
     for result in results:
         metrics = result.get("metrics") or {}
-        audibility = result.get("audibility") or {}
         alignment = result.get("alignment") or {}
         error = result.get("error") or {}
         lines.append(
@@ -726,14 +740,14 @@ def _summary_markdown(summary: dict[str, Any]) -> str:
                 f1=_fmt_metric(metrics.get("note_f1")),
                 recall=_fmt_metric(metrics.get("note_recall")),
                 matched=metrics.get("matched_note_count") if metrics else "",
-                coverage=_fmt_metric(audibility.get("midi_coverage_ratio")),
+                coverage=_fmt_metric(metrics.get("midi_coverage_ratio")),
                 shift=_fmt_metric(alignment.get("pred_to_exp_shift_sec")),
                 shift_recall=_fmt_metric(alignment.get("shift_corrected_recall")),
                 shift_f1=_fmt_metric(alignment.get("shift_corrected_f1")),
                 shift_matched=alignment.get("shift_corrected_matched") if alignment else "",
                 shift_coverage=_fmt_metric(alignment.get("shift_corrected_coverage")),
                 shift_diagnosis=alignment.get("alignment_diagnosis") or "",
-                delay=_fmt_metric(audibility.get("first_note_delay_sec")),
+                delay=_fmt_metric(metrics.get("first_note_delay_sec")),
                 best_oct=_fmt_metric(alignment.get("best_octave_shift_note_recall")),
                 best_time=_fmt_metric(alignment.get("best_time_shift_note_recall")),
                 dtw_rec=_fmt_metric((alignment.get("dtw") or {}).get("dtw_pitch_match_recall_proxy")),
@@ -780,7 +794,7 @@ def _aggregate_metrics(metrics_values: list[dict[str, Any]], *, metric_payloads:
     aggregate["overall_f1"] = aggregate.get("note_f1_mean")
     onset_values = [float(metrics["onset_mae_ms"]) for metrics in metrics_values if metrics.get("onset_mae_ms") is not None]
     aggregate["onset_mae_ms_mean"] = (sum(onset_values) / len(onset_values)) if onset_values else None
-    audibility_values = [payload.get("audibility") or {} for payload in metric_payloads or []]
+    audibility_values = [payload.get("audibility") or payload.get("metrics") or {} for payload in metric_payloads or []]
     for key in ["midi_coverage_ratio", "first_note_delay_sec", "duration_ratio", "longest_silence_sec"]:
         values = [float(item[key]) for item in audibility_values if item.get(key) is not None]
         aggregate[f"{key}_mean"] = (sum(values) / len(values)) if values else None
@@ -792,7 +806,7 @@ def _aggregate_metrics_for_reference_status(result_rows: list[dict[str, Any]], *
     filtered_rows = [row for row in metric_rows if reference_status is None or row.get("reference_status") == reference_status]
     aggregate = _aggregate_metrics(
         [row["metrics"] for row in filtered_rows],
-        metric_payloads=[{"audibility": row.get("audibility") or {}} for row in filtered_rows],
+        metric_payloads=[{"metrics": row.get("metrics") or {}} for row in filtered_rows],
     )
     aggregate["reference_status_filter"] = reference_status
     aggregate["excluded_metric_sample_count"] = len(metric_rows) - len(filtered_rows)
@@ -963,7 +977,7 @@ def _quality_diagnostics_markdown(payload: dict[str, Any]) -> str:
             "| --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- | ---: | ---: | ---: | ---: | --- |",
         ]
     )
-    for sample in sorted(metric_samples, key=lambda item: _sort_float((item.get("audibility") or {}).get("midi_coverage_ratio")))[:20]:
+    for sample in sorted(metric_samples, key=lambda item: _sort_float((item.get("metrics") or {}).get("midi_coverage_ratio")))[:20]:
         lines.append(_quality_table_row(sample))
     lines.extend(
         [
@@ -976,7 +990,7 @@ def _quality_diagnostics_markdown(payload: dict[str, Any]) -> str:
     )
     for sample in sorted(
         metric_samples,
-        key=lambda item: _sort_float((item.get("audibility") or {}).get("first_note_delay_sec")),
+        key=lambda item: _sort_float((item.get("metrics") or {}).get("first_note_delay_sec")),
         reverse=True,
     )[:20]:
         lines.append(_quality_table_row(sample))
@@ -990,7 +1004,6 @@ def _quality_diagnostics_markdown(payload: dict[str, Any]) -> str:
 
 def _quality_table_row(sample: dict[str, Any]) -> str:
     metrics = sample.get("metrics") or {}
-    audibility = sample.get("audibility") or {}
     alignment = sample.get("alignment") or {}
     return "| {sample_id} | {status} | {reference_status} | {reference_reasons} | {f1} | {recall} | {matched} | {coverage} | {shift} | {shift_recall} | {shift_f1} | {shift_diagnosis} | {delay} | {best_oct} | {best_time} | {dtw_rec} | {modes} |".format(
         sample_id=sample.get("sample_id"),
@@ -1000,12 +1013,12 @@ def _quality_table_row(sample: dict[str, Any]) -> str:
         f1=_fmt_metric(metrics.get("note_f1")),
         recall=_fmt_metric(metrics.get("note_recall")),
         matched=metrics.get("matched_note_count"),
-        coverage=_fmt_metric(audibility.get("midi_coverage_ratio")),
+        coverage=_fmt_metric(metrics.get("midi_coverage_ratio")),
         shift=_fmt_metric(alignment.get("pred_to_exp_shift_sec")),
         shift_recall=_fmt_metric(alignment.get("shift_corrected_recall")),
         shift_f1=_fmt_metric(alignment.get("shift_corrected_f1")),
         shift_diagnosis=alignment.get("alignment_diagnosis") or "",
-        delay=_fmt_metric(audibility.get("first_note_delay_sec")),
+        delay=_fmt_metric(metrics.get("first_note_delay_sec")),
         best_oct=_fmt_metric(alignment.get("best_octave_shift_note_recall")),
         best_time=_fmt_metric(alignment.get("best_time_shift_note_recall")),
         dtw_rec=_fmt_metric((alignment.get("dtw") or {}).get("dtw_pitch_match_recall_proxy")),

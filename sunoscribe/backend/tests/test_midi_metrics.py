@@ -199,6 +199,39 @@ class MidiMetricsTests(unittest.TestCase):
         self.assertEqual(alignment.shift_corrected_recall, 1.0)
         self.assertEqual(alignment.shift_corrected_matched, 12)
 
+    def test_smart_onset_alignment_flags_minor_onset_alignment_gain(self) -> None:
+        expected = [NoteEvent(start=float(index), end=float(index) + 0.4, pitch=60 + (index % 5)) for index in range(40)]
+        predicted = [NoteEvent(start=float(index) + 0.8, end=float(index) + 1.2, pitch=60 + (index % 5)) for index in range(40)]
+
+        alignment = compute_midi_alignment_diagnostics(expected, predicted, config=MidiMetricConfig(onset_tolerance_sec=0.12))
+
+        self.assertAlmostEqual(alignment.pred_to_exp_shift_sec, -0.8, places=3)
+        self.assertEqual(alignment.alignment_diagnosis, "minor_onset_alignment_gain")
+        self.assertGreaterEqual(alignment.shift_recall_gain, 0.10)
+        self.assertGreaterEqual(alignment.shift_matched_gain, 20)
+
+    def test_smart_onset_alignment_keeps_weak_minor_shift_as_no_significant_offset(self) -> None:
+        expected = [NoteEvent(start=float(index), end=float(index) + 0.4, pitch=60 + (index % 5)) for index in range(40)]
+        predicted = [
+            NoteEvent(start=float(index) + 0.8, end=float(index) + 1.2, pitch=72 + (index % 5))
+            for index in range(6)
+        ]
+
+        alignment = compute_midi_alignment_diagnostics(expected, predicted, config=MidiMetricConfig(onset_tolerance_sec=0.12))
+
+        self.assertLess(abs(alignment.pred_to_exp_shift_sec), 2.0)
+        self.assertLess(alignment.shift_matched_gain, 20)
+        self.assertEqual(alignment.alignment_diagnosis, "no_significant_offset")
+
+    def test_smart_onset_alignment_keeps_large_shift_as_reference_time_offset(self) -> None:
+        expected = [NoteEvent(start=float(index), end=float(index) + 0.4, pitch=62 + (index % 5)) for index in range(12)]
+        predicted = [NoteEvent(start=float(index) + 10.0, end=float(index) + 10.4, pitch=62 + (index % 5)) for index in range(12)]
+
+        alignment = compute_midi_alignment_diagnostics(expected, predicted, config=MidiMetricConfig(onset_tolerance_sec=0.12))
+
+        self.assertGreaterEqual(abs(alignment.pred_to_exp_shift_sec), 2.0)
+        self.assertEqual(alignment.alignment_diagnosis, "possible_reference_time_offset")
+
     def test_smart_onset_alignment_preserves_octave_normalization(self) -> None:
         expected = [NoteEvent(start=float(index), end=float(index) + 0.4, pitch=60 + (index % 5)) for index in range(12)]
         predicted = [NoteEvent(start=float(index) + 10.0, end=float(index) + 10.4, pitch=84 + (index % 5)) for index in range(12)]
