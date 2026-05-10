@@ -28,6 +28,7 @@ class AgentPatchValidationResult:
     score_ir: dict[str, Any]
     score_data: dict[str, Any]
     patch_data: dict[str, Any]
+    diff_summary: dict[str, Any]
 
 
 @dataclass(slots=True)
@@ -59,6 +60,7 @@ class AgentScorePatchValidator:
         score_patch = proposal if isinstance(proposal, AgentScorePatch) else AgentScorePatch.model_validate(proposal)
         self._validate_only(context=context, proposal=score_patch)
 
+        original_score_ir = deepcopy(context.score_ir)
         working_score_ir = deepcopy(context.score_ir)
         if not isinstance(working_score_ir, dict):
             raise ValidationAppError("context score_ir is missing")
@@ -103,6 +105,7 @@ class AgentScorePatchValidator:
             score_ir=working_score_ir,
             score_data=rebuilt_score_data,
             patch_data=score_patch.model_dump(),
+            diff_summary=self._build_diff_summary(original_score_ir, working_score_ir, score_patch),
         )
 
     def _validate_only(self, *, context: AgentRevisionContext, proposal: AgentScorePatch) -> None:
@@ -288,11 +291,40 @@ class AgentScorePatchValidator:
 
     def _mark_uncertain(self, note_by_id: dict[str, dict[str, Any]], operation: MarkUncertainOperation) -> None:
         note = self._patch_validator._require_note(note_by_id, operation.note_id)
+        note["uncertain"] = True
+        reason_codes = list(note.get("reason_codes") or [])
+        if "uncertain" not in reason_codes:
+            reason_codes.append("uncertain")
+        note["reason_codes"] = reason_codes
         metadata = dict(note.get("agent_metadata") or {})
         metadata["uncertain"] = True
         if operation.reason:
             metadata["reason"] = operation.reason
         note["agent_metadata"] = metadata
+
+    def _build_diff_summary(
+        self,
+        before_score_ir: dict[str, Any],
+        after_score_ir: dict[str, Any],
+        score_patch: AgentScorePatch,
+    ) -> dict[str, Any]:
+        before_notes = self._patch_validator._note_index(before_score_ir)
+        after_notes = self._patch_validator._note_index(after_score_ir)
+        before_ids = set(before_notes)
+        after_ids = set(after_notes)
+        changed_note_ids: list[str] = []
+        for note_id in sorted(before_ids & after_ids):
+            if before_notes[note_id] != after_notes[note_id]:
+                changed_note_ids.append(note_id)
+        return {
+            "operation_count": len(score_patch.operations),
+            "operations": [operation.op for operation in score_patch.operations],
+            "changed_note_ids": changed_note_ids,
+            "added_note_ids": sorted(after_ids - before_ids),
+            "deleted_note_ids": sorted(before_ids - after_ids),
+            "note_count_before": len(before_ids),
+            "note_count_after": len(after_ids),
+        }
 
     def _next_split_id(self, score_ir: dict[str, Any], base_note_id: str) -> str:
         existing = {

@@ -82,10 +82,23 @@ class DiagnosisAction(_AgentModel):
     rationale: str
 
 
+class UncertainNoteDiagnosis(_AgentModel):
+    note_id: str
+    pitch: str
+    measure: int | None = None
+    beat: float | None = None
+    onset_tick: int | None = None
+    duration_tick: int | None = None
+    confidence: float | None = None
+    reason_codes: list[str] = Field(default_factory=list)
+    suggested_patch_types: list[str] = Field(default_factory=list)
+
+
 class TranscriptionDiagnosis(_AgentModel):
     summary: str
     section_findings: list[DiagnosisSectionFinding] = Field(default_factory=list)
     suspected_issues: list[DiagnosisIssue] = Field(default_factory=list)
+    uncertain_notes: list[UncertainNoteDiagnosis] = Field(default_factory=list)
     recommended_actions: list[DiagnosisAction] = Field(default_factory=list)
 
 

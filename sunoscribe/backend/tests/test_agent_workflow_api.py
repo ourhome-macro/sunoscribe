@@ -16,6 +16,7 @@ from app.modules.agents.types import (
     DiagnosisAction,
     DiagnosisIssue,
     DiagnosisSectionFinding,
+    UncertainNoteDiagnosis,
 )
 from app.utils.dependencies import get_current_user
 
@@ -57,6 +58,19 @@ class TestAgentWorkflowApi(unittest.TestCase):
                     evidence={"cents": 1200},
                 )
             ],
+            uncertain_notes=[
+                UncertainNoteDiagnosis(
+                    note_id="n1",
+                    pitch="C4",
+                    measure=1,
+                    beat=1.0,
+                    onset_tick=0,
+                    duration_tick=480,
+                    confidence=0.42,
+                    reason_codes=["low_confidence", "uncertain"],
+                    suggested_patch_types=["mark_uncertain", "replace_pitch"],
+                )
+            ],
             recommended_actions=[
                 DiagnosisAction(action="propose score patch", rationale="correct n1 before export")
             ],
@@ -71,6 +85,8 @@ class TestAgentWorkflowApi(unittest.TestCase):
         self.assertEqual(payload["data"]["summary"], "one octave jump looks suspicious")
         self.assertEqual(payload["data"]["section_findings"][0]["label"], "verse")
         self.assertEqual(payload["data"]["suspected_issues"][0]["note_ids"], ["n1"])
+        self.assertEqual(payload["data"]["uncertain_notes"][0]["note_id"], "n1")
+        self.assertEqual(payload["data"]["uncertain_notes"][0]["reason_codes"], ["low_confidence", "uncertain"])
         service.diagnose_transcription.assert_called_once_with(
             self.db,
             user=self.user,
@@ -118,9 +134,32 @@ class TestAgentWorkflowApi(unittest.TestCase):
             score_type="staff",
             key="C Major",
             artifacts=[],
+            score_ir={
+                "notes": [
+                    {
+                        "id": "n1",
+                        "pitch": "E4",
+                        "pitch_midi": 64,
+                        "start_tick": 0,
+                        "duration_tick": 480,
+                        "measure_num": 1,
+                        "beat_position": 1.0,
+                        "confidence": 0.4,
+                        "uncertain": True,
+                        "reason_codes": ["low_confidence", "uncertain"],
+                        "source_candidate_id": "cand1",
+                        "quantized_note_id": "qn1",
+                    }
+                ]
+            },
             created_at=None,
             updated_at=None,
-            revision_metadata={"agent_workflow": {"operation_count": 1}},
+            revision_metadata={
+                "agent_workflow": {
+                    "operation_count": 1,
+                    "diff_summary": {"changed_note_ids": ["n1"], "operation_count": 1},
+                }
+            },
         )
         patch = {
             "base_revision_id": REVISION_ID,
@@ -140,6 +179,11 @@ class TestAgentWorkflowApi(unittest.TestCase):
         self.assertEqual(payload["data"]["revision_number"], 3)
         self.assertEqual(payload["data"]["revision_type"], "user")
         self.assertNotIn("revision_metadata", payload["data"])
+        self.assertEqual(payload["data"]["client_summary"]["uncertain_note_count"], 1)
+        self.assertEqual(payload["data"]["client_summary"]["low_confidence_note_count"], 1)
+        self.assertEqual(payload["data"]["client_summary"]["score_notes"][0]["reason_codes"], ["low_confidence", "uncertain"])
+        self.assertEqual(payload["data"]["diff_summary"]["changed_note_ids"], ["n1"])
+        self.assertNotIn("storage_path", str(payload["data"]))
         called_proposal = service.apply_score_patch.call_args.kwargs["proposal"]
         self.assertEqual(called_proposal.base_revision_id, REVISION_ID)
         self.assertEqual(called_proposal.operations[0].op, "replace_pitch")

@@ -13,6 +13,7 @@ from .types import (
     DiagnosisSectionFinding,
     RvcJobSpec,
     TranscriptionDiagnosis,
+    UncertainNoteDiagnosis,
 )
 from .validators import (
     AgentPatchValidationResult,
@@ -43,6 +44,7 @@ __all__ = [
     "ScorePatchAgent",
     "SkillRegistry",
     "TranscriptionDiagnosis",
+    "UncertainNoteDiagnosis",
     "validate_rvc_spec",
     "validate_score_patch",
 ]

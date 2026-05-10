@@ -45,6 +45,10 @@ def _sample_score_ir() -> dict:
                 "beat_position": 2.0,
                 "confidence": 0.58,
                 "lyric": None,
+                "uncertain": True,
+                "reason_codes": ["large_quantize_error"],
+                "source_candidate_id": "cand2",
+                "quantized_note_id": "qn2",
             },
             {
                 "id": "n3",
@@ -58,6 +62,7 @@ def _sample_score_ir() -> dict:
                 "beat_position": 1.0,
                 "confidence": 0.48,
                 "lyric": None,
+                "reason_codes": ["octave_outlier"],
             },
         ],
         "measures": [
@@ -104,6 +109,10 @@ class TestDiagnosisAgent(unittest.TestCase):
         self.assertIn("3 notes", diagnosis.summary)
         self.assertTrue(any(issue.code == "low_downbeat_confidence" for issue in diagnosis.suspected_issues))
         self.assertTrue(any(action.action.startswith("treat measure boundaries") for action in diagnosis.recommended_actions))
+        self.assertEqual([note.note_id for note in diagnosis.uncertain_notes], ["n2", "n3"])
+        self.assertEqual(diagnosis.uncertain_notes[0].reason_codes, ["large_quantize_error", "uncertain"])
+        self.assertEqual(diagnosis.uncertain_notes[0].suggested_patch_types, ["move_note_to_grid", "adjust_duration"])
+        self.assertEqual(diagnosis.uncertain_notes[1].suggested_patch_types, ["shift_octave", "replace_pitch", "mark_uncertain"])
 
 
 class TestScorePatchAgent(unittest.TestCase):
@@ -113,6 +122,14 @@ class TestScorePatchAgent(unittest.TestCase):
         self.assertEqual(proposal.base_revision_id, "revision-001")
         self.assertEqual(proposal.operations[0].op, "shift_octave")
         self.assertEqual(proposal.operations[0].note_id, "n1")
+
+    def test_propose_patch_can_target_first_uncertain_note(self) -> None:
+        proposal = ScorePatchAgent().propose(_sample_context(), "replace uncertain note pitch 64")
+
+        self.assertEqual(proposal.base_revision_id, "revision-001")
+        self.assertEqual(proposal.operations[0].op, "replace_pitch")
+        self.assertEqual(proposal.operations[0].note_id, "n2")
+        self.assertEqual(proposal.operations[0].pitch_midi, 64)
 
 
 class TestAgentScorePatchValidator(unittest.TestCase):
@@ -133,7 +150,11 @@ class TestAgentScorePatchValidator(unittest.TestCase):
 
         self.assertEqual(note_by_id["n1"]["pitch_midi"], 72)
         self.assertIn("n2__split1", note_by_id)
+        self.assertTrue(note_by_id["n3"]["uncertain"])
+        self.assertIn("uncertain", note_by_id["n3"]["reason_codes"])
         self.assertTrue(note_by_id["n3"]["agent_metadata"]["uncertain"])
+        self.assertEqual(result.diff_summary["operation_count"], 3)
+        self.assertIn("n3", result.diff_summary["changed_note_ids"])
 
     def test_move_note_to_grid_requires_rhythm_grid(self) -> None:
         context = _sample_context().model_copy(update={"rhythm_grid": None})

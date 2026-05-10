@@ -15,6 +15,7 @@ from app.models.enums import ScoreRevisionType
 from app.models.score import Score
 from app.models.score_revision import ScoreRevision
 from app.models.user import User
+from app.modules.score_ir.client_summary import build_score_revision_client_summary
 from app.modules.agents import (
     AgentRevisionContext,
     AgentScorePatch,
@@ -215,6 +216,7 @@ class AgentWorkflowService:
                     "rationale": score_patch.rationale,
                     "confidence": score_patch.confidence,
                     "operation_count": len(score_patch.operations),
+                    "diff_summary": validation_result.diff_summary,
                 },
             },
         )
@@ -369,6 +371,9 @@ class AgentWorkflowService:
             if text and text not in deduped:
                 deduped.append(text)
         return deduped
+
+    def build_revision_client_summary(self, revision: ScoreRevision) -> dict[str, Any]:
+        return build_score_revision_client_summary(revision=revision)
 
     @staticmethod
     def _try_make_score_patch_llm_client() -> ScorePatchLLMClient | None:

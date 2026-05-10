@@ -16,6 +16,7 @@ from app.models.lyrics import Lyrics
 from app.models.project import Project
 from app.models.score import Score
 from app.models.user import User
+from app.modules.score_ir.client_summary import build_score_revision_client_summary
 from app.schemas.score_patch import ScorePatch
 from app.services.audio_analysis_service import AudioAnalysisOptions, AudioAnalysisResult, AudioAnalysisService
 from app.services.score_revision_service import (
@@ -201,6 +202,7 @@ def _serialize_revision(revision: Any) -> dict[str, Any]:
         "revision_type": str(revision.revision_type),
         "score_type": str(revision.score_type),
         "key": str(revision.key),
+        "client_summary": build_score_revision_client_summary(revision=revision),
         "created_by_user_id": str(revision.created_by_user_id) if revision.created_by_user_id else None,
         "created_at": revision.created_at.isoformat() if revision.created_at else None,
         "updated_at": revision.updated_at.isoformat() if revision.updated_at else None,

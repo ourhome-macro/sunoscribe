@@ -9,6 +9,7 @@ from app.database import get_db
 from app.models.artifact import Artifact
 from app.models.score_revision import ScoreRevision
 from app.modules.agents import AgentScorePatch
+from app.modules.score_ir.client_summary import build_score_revision_client_summary
 from app.schemas.agent_workflow import (
     AgentDiagnoseResponse,
     AgentScorePatchProposalResponse,
@@ -145,9 +146,18 @@ def _revision_summary(revision: ScoreRevision) -> ScoreRevisionSummaryResponse:
         score_type=str(revision.score_type),
         key=str(revision.key),
         artifact_ids=artifact_ids,
+        client_summary=build_score_revision_client_summary(revision=revision),
+        diff_summary=_revision_diff_summary(revision),
         created_at=revision.created_at,
         updated_at=revision.updated_at,
     )
+
+
+def _revision_diff_summary(revision: ScoreRevision) -> dict[str, object]:
+    metadata = revision.revision_metadata if isinstance(revision.revision_metadata, dict) else {}
+    agent_workflow = metadata.get("agent_workflow") if isinstance(metadata.get("agent_workflow"), dict) else {}
+    diff_summary = agent_workflow.get("diff_summary") if isinstance(agent_workflow.get("diff_summary"), dict) else {}
+    return dict(diff_summary)
 
 
 def _public_artifact(artifact: Artifact) -> PublicArtifactResponse:

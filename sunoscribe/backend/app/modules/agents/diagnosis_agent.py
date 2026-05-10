@@ -2,13 +2,26 @@ from __future__ import annotations
 
 from typing import Any
 
+from app.modules.pitch.reason_codes import LOW_CONFIDENCE
+from app.modules.score_ir.client_summary import build_score_note_client_summaries
+
 from .types import (
     AgentRevisionContext,
     DiagnosisAction,
     DiagnosisIssue,
     DiagnosisSectionFinding,
     TranscriptionDiagnosis,
+    UncertainNoteDiagnosis,
 )
+
+
+_REASON_TO_PATCH_TYPES = {
+    "octave_outlier": ["shift_octave", "replace_pitch"],
+    "large_quantize_error": ["move_note_to_grid", "adjust_duration"],
+    "possible_fragmentation": ["merge_notes", "delete_note"],
+    "possible_overmerge": ["split_note", "adjust_duration"],
+    LOW_CONFIDENCE: ["mark_uncertain", "replace_pitch"],
+}
 
 
 class DiagnosisAgent:
@@ -25,6 +38,17 @@ class DiagnosisAgent:
         issues.extend(self._issues_from_score_ir(context))
         issues.extend(self._issues_from_artifacts(context))
         issues.extend(self._issues_from_note_shape(notes))
+        uncertain_notes = self._uncertain_notes(context)
+        if uncertain_notes:
+            issues.append(
+                DiagnosisIssue(
+                    code="uncertain_score_notes",
+                    severity="medium",
+                    summary=f"{len(uncertain_notes)} notes are marked uncertain or low-confidence in ScoreIR.",
+                    note_ids=[note.note_id for note in uncertain_notes[:24]],
+                    evidence={"uncertain_note_count": len(uncertain_notes)},
+                )
+            )
         issues = self._dedupe_issues(issues)
 
         if measures:
@@ -72,8 +96,41 @@ class DiagnosisAgent:
             summary=summary,
             section_findings=section_findings,
             suspected_issues=issues,
+            uncertain_notes=uncertain_notes,
             recommended_actions=actions,
         )
+
+    def _uncertain_notes(self, context: AgentRevisionContext) -> list[UncertainNoteDiagnosis]:
+        summaries = build_score_note_client_summaries(context.score_ir)
+        result: list[UncertainNoteDiagnosis] = []
+        for note in summaries:
+            if not bool(note.get("uncertain")):
+                continue
+            reason_codes = list(note.get("reason_codes") or [])
+            result.append(
+                UncertainNoteDiagnosis(
+                    note_id=str(note.get("note_id") or ""),
+                    pitch=str(note.get("pitch") or ""),
+                    measure=note.get("measure"),
+                    beat=note.get("beat"),
+                    onset_tick=note.get("onset_tick"),
+                    duration_tick=note.get("duration_tick"),
+                    confidence=note.get("confidence"),
+                    reason_codes=reason_codes,
+                    suggested_patch_types=self._suggested_patch_types(reason_codes),
+                )
+            )
+        return result
+
+    def _suggested_patch_types(self, reason_codes: list[str]) -> list[str]:
+        suggested: list[str] = []
+        for code in reason_codes:
+            for patch_type in _REASON_TO_PATCH_TYPES.get(code, []):
+                if patch_type not in suggested:
+                    suggested.append(patch_type)
+        if not suggested:
+            suggested.append("mark_uncertain")
+        return suggested
 
     def _issues_from_score_ir(self, context: AgentRevisionContext) -> list[DiagnosisIssue]:
         issues: list[DiagnosisIssue] = []

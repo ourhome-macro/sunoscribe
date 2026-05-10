@@ -7,6 +7,8 @@ import unittest
 
 from app.modules.benchmark.debug_package import (
     _derive_pitch_distribution_diagnostics,
+    _derive_quantized_note_diagnostics,
+    _derive_short_note_diagnostics,
     build_pitch_debug_markdown,
     export_benchmark_debug_package,
 )
@@ -126,6 +128,23 @@ class BenchmarkDebugPackageTests(unittest.TestCase):
                 ),
                 encoding="utf-8",
             )
+            (workspace / "pitch" / "pitch_contours.json").write_text(
+                json.dumps(
+                    {
+                        "contours": [
+                            {
+                                "id": "pc_00001",
+                                "duration_sec": 0.5,
+                                "mean_confidence": 0.8,
+                                "has_vibrato": True,
+                                "has_glide": False,
+                                "reason_codes": ["suspected_vibrato"],
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
             (workspace / "pitch" / "vocal_activity.json").write_text(
                 json.dumps(
                     {
@@ -148,6 +167,42 @@ class BenchmarkDebugPackageTests(unittest.TestCase):
                                 {"start_time": 1.5, "end_time": 1.7, "frequency_hz": 349.23},
                             ]
                         }
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (workspace / "pitch" / "rhythm_grid.json").write_text(
+                json.dumps({"bpm": 120.0, "beat_times": [0.0, 0.5, 1.0], "downbeat_times": [0.0]}),
+                encoding="utf-8",
+            )
+            (workspace / "pitch" / "selected_melody.json").write_text(
+                json.dumps(
+                    {
+                        "selected_notes": [{"candidate_id": "c1", "confidence": 0.9}],
+                        "rejected_candidates": [{"candidate_id": "c2", "confidence": 0.2, "reason_codes": ["low_confidence"]}],
+                        "summary": {
+                            "input_candidate_count": 2,
+                            "selected_count": 1,
+                            "rejected_count": 1,
+                            "rejection_reason_counts": {"low_confidence": 1},
+                            "mean_selected_confidence": 0.9,
+                            "mean_rejected_confidence": 0.2,
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (workspace / "pitch" / "quantized_notes.json").write_text(
+                json.dumps(
+                    {
+                        "quantizer_backend": "local_snap",
+                        "notes": [{"id": "qn_00001", "quantize_error_sec": 0.01, "uncertain": False}],
+                        "summary": {
+                            "note_count": 1,
+                            "mean_quantize_error_sec": 0.01,
+                            "max_quantize_error_sec": 0.01,
+                            "uncertain_count": 0,
+                        },
                     }
                 ),
                 encoding="utf-8",
@@ -262,9 +317,18 @@ class BenchmarkDebugPackageTests(unittest.TestCase):
             self.assertIn("sample_id: song", summary)
             self.assertIn("f0_track.json", summary)
             self.assertIn("vocal_activity.json", summary)
+            self.assertIn("rhythm_grid.json", summary)
+            self.assertIn("Pitch Contour Diagnostics", summary)
+            self.assertIn("Selected Melody Diagnostics", summary)
+            self.assertIn("Quantization Diagnostics", summary)
+            self.assertIn("Short Note Diagnostics", summary)
             self.assertIn("## Derived Diagnostics", summary)
             self.assertIn("preliminary_failure_stage_v2", summary)
             self.assertNotIn("f0_track.json", result.missing_files)
+            self.assertNotIn("rhythm_grid.json", result.missing_files)
+            self.assertNotIn("pitch_contours.json", result.missing_files)
+            self.assertNotIn("selected_melody.json", result.missing_files)
+            self.assertNotIn("quantized_notes.json", result.missing_files)
             self.assertIn("timeline_debug.png", result.found_files)
 
     def test_export_debug_package_marks_optional_diagnostics_unavailable_when_missing(self) -> None:
@@ -309,6 +373,10 @@ class BenchmarkDebugPackageTests(unittest.TestCase):
             self.assertIn("f0_track.json", result.missing_files)
             self.assertIn("vocal_activity.json", result.missing_files)
             self.assertIn("note_candidates.json", result.missing_files)
+            self.assertIn("rhythm_grid.json", result.missing_files)
+            self.assertIn("pitch_contours.json", result.missing_files)
+            self.assertIn("selected_melody.json", result.missing_files)
+            self.assertIn("quantized_notes.json", result.missing_files)
             self.assertTrue((debug_dir / "timeline_debug.png").exists())
 
     def test_pitch_distribution_histograms_cover_all_sources(self) -> None:
@@ -462,6 +530,68 @@ class BenchmarkDebugPackageTests(unittest.TestCase):
         self.assertFalse(diagnostics["f0_frames"]["available"])
         self.assertFalse(diagnostics["note_candidates_all"]["available"])
         self.assertIn("f0_track.json missing", diagnostics["warnings"])
+
+    def test_quantized_note_diagnostics_include_dp_fields(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "quantized_notes.json"
+            path.write_text(
+                json.dumps(
+                    {
+                        "quantizer_backend": "dp_v1",
+                        "requested_quantizer_backend": "dp_v1",
+                        "fallback_used": False,
+                        "fallback_reason": None,
+                        "summary": {
+                            "note_count": 2,
+                            "mean_quantize_error_sec": 0.01,
+                            "p95_quantize_error_sec": 0.02,
+                            "max_quantize_error_sec": 0.03,
+                            "uncertain_count": 1,
+                            "fragmentation": {"possible_fragment_pair_count": 1, "risk_score": 1.0},
+                            "overmerge": {"possible_overmerge_note_count": 1, "overlap_pair_count": 0, "risk_score": 0.5},
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            diagnostics = _derive_quantized_note_diagnostics(path)
+
+            self.assertEqual(diagnostics["quantizer_backend"], "dp_v1")
+            self.assertFalse(diagnostics["fallback_used"])
+            self.assertEqual(diagnostics["p95_quantize_error_sec"], 0.02)
+            self.assertEqual(diagnostics["fragmentation"]["possible_fragment_pair_count"], 1)
+            self.assertEqual(diagnostics["overmerge"]["possible_overmerge_note_count"], 1)
+
+    def test_short_note_loss_attribution_reports_quantizer_stage(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            candidates_path = root / "note_candidates.json"
+            selected_path = root / "selected_melody.json"
+            quantized_path = root / "quantized_notes.json"
+            candidates_path.write_text(
+                json.dumps({"melody_candidates": {"notes": [{"start_time": 0.0, "duration_sec": 0.12, "midi_pitch": 60}]}}),
+                encoding="utf-8",
+            )
+            selected_path.write_text(
+                json.dumps({"selected_notes": [{"start_time_sec": 0.0, "end_time_sec": 0.12, "pitch_center_midi": 60}]}),
+                encoding="utf-8",
+            )
+            quantized_path.write_text(
+                json.dumps({"notes": []}),
+                encoding="utf-8",
+            )
+
+            diagnostics = _derive_short_note_diagnostics(
+                [NoteEvent(start=0.0, end=0.12, pitch=60)],
+                [],
+                note_candidates_path=candidates_path,
+                selected_melody_path=selected_path,
+                quantized_notes_path=quantized_path,
+            )
+
+            self.assertEqual(diagnostics["loss_attribution"]["likely_loss_stage"], "quantizer")
+            self.assertEqual(diagnostics["loss_attribution"]["stage_counts"]["quantizer"], 1)
 
 
 if __name__ == "__main__":

@@ -6,7 +6,8 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 from app.modules.pitch.types import F0Frame, F0Track, MetaInfo, PitchAnalysisResult, PitchPipelineRequest, RhythmGrid, SemanticAudioResult, VocalActivitySegment
-from app.modules.score_ir import ScoreIR, ScoreMeta
+from app.modules.score_ir import ScoreIR, ScoreIRSerializer, ScoreMeasure, ScoreMeta, ScoreNote
+from app.modules.pitch import MidiExporter
 from app.services.audio_analysis_service import AudioAnalysisOptions, AudioAnalysisService
 from app.services.media_ingest_service import MediaIngestService
 from app.services.workspace import ProjectWorkspace
@@ -67,7 +68,11 @@ class _CapturePitchPipeline:
                 source_stem="vocals",
                 input_audio_path=str(request.lead_audio_path),
                 backend="rmvpe",
-                frames=[F0Frame(time_sec=0.1, frequency_hz=220.0, confidence=0.9, voiced=True, pitch_midi=57.0)],
+                frames=[
+                    F0Frame(time_sec=0.1, frequency_hz=220.0, confidence=0.9, voiced=True, pitch_midi=57.0),
+                    F0Frame(time_sec=0.2, frequency_hz=220.0, confidence=0.9, voiced=True, pitch_midi=57.0),
+                    F0Frame(time_sec=0.3, frequency_hz=220.0, confidence=0.9, voiced=True, pitch_midi=57.0),
+                ],
                 vocal_activity=[
                     VocalActivitySegment(
                         start_time=0.0,
@@ -106,7 +111,28 @@ class _FakeScoreIRBuilder:
                 rhythm_type="stable",
                 total_measures=0,
                 has_anacrusis=False,
-            )
+            ),
+            notes=[
+                ScoreNote(
+                    id="n1",
+                    pitch="C4",
+                    pitch_midi=60,
+                    start_time=0.0,
+                    end_time=0.5,
+                    duration_sec=0.5,
+                    duration_beats=1.0,
+                    note_type="quarter",
+                    measure_num=1,
+                    beat_position=1.0,
+                    confidence=0.9,
+                    lyric=None,
+                    is_raw=False,
+                    is_candidate_ornament=False,
+                    tie_candidate=False,
+                    source="test",
+                )
+            ],
+            measures=[ScoreMeasure(measure_num=1, start_time=0.0, end_time=2.0, duration_sec=2.0, is_anacrusis=False, note_ids=["n1"])],
         )
 
 
@@ -239,8 +265,18 @@ class TestAudioAnalysisService(unittest.TestCase):
             self.assertEqual(perception.semantic_audio_dict["source_stems"]["bass"], str(workspace.stem_path("bass")))
             self.assertIsNotNone(perception.f0_track_dict)
             self.assertEqual(perception.f0_track_dict["backend"], "rmvpe")
+            frame = perception.f0_track_dict["frames"][0]
+            self.assertEqual(set(["time_sec", "f0_hz", "midi_float", "voiced", "confidence"]) - set(frame), set())
+            self.assertEqual(frame["f0_hz"], 220.0)
+            self.assertEqual(frame["midi_float"], 57.0)
             self.assertIsNotNone(perception.note_candidates_dict)
             self.assertIn("melody_candidates", perception.note_candidates_dict)
+            self.assertIsNotNone(perception.pitch_contours_dict)
+            self.assertGreaterEqual(perception.pitch_contours_dict["summary"]["contour_count"], 1)
+            self.assertIsNotNone(perception.selected_melody_dict)
+            self.assertIn("summary", perception.selected_melody_dict)
+            self.assertIsNotNone(perception.quantized_notes_dict)
+            self.assertEqual(perception.quantized_notes_dict["quantizer_backend"], "local_snap")
             self.assertIsNotNone(perception.rhythm_grid_dict)
             self.assertEqual(perception.vocal_activity_dict["segments"][0]["state"], "vocal")
 
@@ -248,7 +284,10 @@ class TestAudioAnalysisService(unittest.TestCase):
             persist_warnings = service._persist_artifacts(workspace, perception, alignment)
             self.assertEqual(persist_warnings, [])
             self.assertTrue(workspace.f0_track_path.exists())
+            self.assertTrue(workspace.pitch_contours_path.exists())
             self.assertTrue(workspace.note_candidates_path.exists())
+            self.assertTrue(workspace.selected_melody_path.exists())
+            self.assertTrue(workspace.quantized_notes_path.exists())
             self.assertTrue(workspace.rhythm_grid_path.exists())
             self.assertTrue(workspace.vocal_activity_path.exists())
 
@@ -283,6 +322,37 @@ class TestAudioAnalysisService(unittest.TestCase):
             self.assertEqual(separator.calls[0][0][0], str(canonical_audio))
             self.assertEqual(audio_processor.calls, [(str(source_audio), str(workspace.normalized_audio_path))])
             self.assertIsNone(pitch_pipeline.last_request)
+
+    def test_export_stage_does_not_copy_raw_pitch_midi(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            workspace = ProjectWorkspace(project_id="raw_bypass_001", projects_root=root / "projects")
+            workspace.ensure_structure()
+            workspace.raw_pitch_midi_path.write_bytes(b"raw-midi-bypass")
+            service = AudioAnalysisService(
+                audio_processor=_PassthroughAudioProcessor(),
+                vocal_separator=None,
+                lyrics_recognizer=None,
+                pitch_pipeline=None,
+                analysis_inferencer=None,
+                midi_exporter=MidiExporter(),
+                projects_root=root / "projects",
+            )
+            score_ir = _FakeScoreIRBuilder().build()
+            perception = type(
+                "Perception",
+                (),
+                {
+                    "score_data_dict": ScoreIRSerializer.to_score_data(score_ir),
+                    "raw_pitch_midi_path": workspace.raw_pitch_midi_path,
+                },
+            )()
+
+            midi_path, warnings = asyncio.run(service._run_export_stage(perception, None, workspace))
+
+            self.assertEqual(midi_path, workspace.final_midi_path)
+            self.assertEqual(warnings, [])
+            self.assertNotEqual(workspace.final_midi_path.read_bytes(), b"raw-midi-bypass")
 
 
 if __name__ == "__main__":

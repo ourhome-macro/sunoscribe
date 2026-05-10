@@ -16,6 +16,7 @@ from app.models.enums import ArtifactStatus, ArtifactStorageBackend, ArtifactTyp
 from app.models.score import Score
 from app.models.score_revision import ScoreRevision
 from app.modules.pitch import MidiExporter
+from app.modules.score_ir.client_summary import build_score_revision_client_summary
 from app.services.workspace import ProjectWorkspace
 from app.utils.errors import ValidationAppError
 
@@ -196,7 +197,12 @@ class RenderExportService:
             return ArtifactType.MUSICXML.value, "score.musicxml", "application/vnd.recordare.musicxml+xml", payload
 
         if format_key == ArtifactType.SCORE_VIEW.value:
-            payload = json.dumps(score_data, ensure_ascii=False, indent=2).encode("utf-8")
+            view_data = dict(score_data)
+            view_data["client_summary"] = build_score_revision_client_summary(
+                revision=revision,
+                export_status=ArtifactStatus.AVAILABLE.value,
+            )
+            payload = json.dumps(view_data, ensure_ascii=False, indent=2).encode("utf-8")
             return ArtifactType.SCORE_VIEW.value, "score_view.json", "application/json", payload
 
         if format_key == ArtifactType.PDF.value:

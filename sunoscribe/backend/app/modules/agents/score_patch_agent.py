@@ -34,6 +34,7 @@ class ScorePatchAgent:
         text = str(instruction or "").strip()
         if not text:
             raise ValidationAppError("score patch instruction cannot be empty")
+        lower_text = text.lower()
 
         if text.startswith("{") and text.endswith("}"):
             try:
@@ -42,7 +43,24 @@ class ScorePatchAgent:
                 raise ValidationAppError("invalid structured score patch instruction") from exc
 
         note_ids = self._extract_note_ids(context, text)
-        if "合并" in text or "merge" in text.lower():
+        has_uncertain_target = "uncertain" in lower_text
+        has_pitch_intent = any(keyword in lower_text for keyword in ("replace", "pitch")) or any(
+            keyword in text
+            for keyword in (
+                "\u6539\u6210",
+                "\u6539\u4e3a",
+                "\u97f3\u9ad8",
+                "\u93c0\u89c4\u57da",
+                "\u93c0\u9036\u8d1f",
+                "\u95ca\u62bd\u73ee",
+            )
+        )
+        if not note_ids and has_uncertain_target:
+            uncertain_note_id = self._first_uncertain_note_id(context)
+            if uncertain_note_id:
+                note_ids = [uncertain_note_id]
+
+        if self._contains_any(text, lower_text, text_keywords=("\u5408\u5e76", "\u935a\u581d\u82df"), lower_keywords=("merge",)):
             if len(note_ids) < 2:
                 raise ValidationAppError("merge instruction must reference at least two note ids")
             return AgentScorePatch(
@@ -52,7 +70,7 @@ class ScorePatchAgent:
                 confidence=0.86,
             )
 
-        if "删除" in text or "delete" in text.lower() or "remove" in text.lower():
+        if self._contains_any(text, lower_text, text_keywords=("\u5220\u9664", "\u9352\u72b5\u6ae7"), lower_keywords=("delete", "remove")):
             note_id = self._require_single_note_id(note_ids, "delete")
             return AgentScorePatch(
                 base_revision_id=context.revision_id,
@@ -61,7 +79,12 @@ class ScorePatchAgent:
                 confidence=0.9,
             )
 
-        if "不确定" in text or "uncertain" in text.lower() or "标记" in text:
+        if self._contains_any(
+            text,
+            lower_text,
+            text_keywords=("\u4e0d\u786e\u5b9a", "\u6807\u8bb0", "\u97f3\u9ce9\u5354", "\u708e\u829d"),
+            lower_keywords=("uncertain",),
+        ) and not has_pitch_intent:
             note_id = self._require_single_note_id(note_ids, "mark_uncertain")
             return AgentScorePatch(
                 base_revision_id=context.revision_id,
@@ -70,7 +93,7 @@ class ScorePatchAgent:
                 confidence=0.82,
             )
 
-        if "升八度" in text or "octave up" in text.lower():
+        if self._contains_any(text, lower_text, text_keywords=("\u5347\u516b\u5ea6", "\u5e45\u4f0a\u696d"), lower_keywords=("octave up",)):
             note_id = self._require_single_note_id(note_ids, "shift_octave")
             return AgentScorePatch(
                 base_revision_id=context.revision_id,
@@ -79,7 +102,7 @@ class ScorePatchAgent:
                 confidence=0.88,
             )
 
-        if "降八度" in text or "octave down" in text.lower():
+        if self._contains_any(text, lower_text, text_keywords=("\u964d\u516b\u5ea6", "\u9031\u4f0a\u696d"), lower_keywords=("octave down",)):
             note_id = self._require_single_note_id(note_ids, "shift_octave")
             return AgentScorePatch(
                 base_revision_id=context.revision_id,
@@ -88,7 +111,7 @@ class ScorePatchAgent:
                 confidence=0.88,
             )
 
-        if "拆分" in text or "split" in text.lower():
+        if self._contains_any(text, lower_text, text_keywords=("\u62c6\u5206", "\u9398\u55d7\u579d"), lower_keywords=("split",)):
             note_id = self._require_single_note_id(note_ids, "split_note")
             split_time = self._parse_time_value(text)
             split_ratio = self._parse_ratio_value(text)
@@ -108,7 +131,19 @@ class ScorePatchAgent:
                 confidence=0.78,
             )
 
-        if ("时值" in text or "duration" in text.lower()) and ("拍" in text or "beat" in text.lower() or "秒" in text):
+        has_duration_intent = self._contains_any(
+            text,
+            lower_text,
+            text_keywords=("\u65f6\u503c", "\u65f6\u957f", "\u93c3\u8dfa\u20ac"),
+            lower_keywords=("duration",),
+        )
+        has_duration_unit = self._contains_any(
+            text,
+            lower_text,
+            text_keywords=("\u62cd", "\u79d2", "\u93b7", "\u7ec9"),
+            lower_keywords=("beat", "sec", "second"),
+        )
+        if has_duration_intent and has_duration_unit:
             note_id = self._require_single_note_id(note_ids, "adjust_duration")
             duration_beats = self._parse_beats_value(text)
             duration_sec = self._parse_time_value(text)
@@ -126,7 +161,12 @@ class ScorePatchAgent:
                 confidence=0.8,
             )
 
-        if "移到" in text or "移动到" in text or "move" in text.lower():
+        if self._contains_any(
+            text,
+            lower_text,
+            text_keywords=("\u79fb\u52a8\u5230", "\u79fb\u5230", "\u7ec9\u8bfb\u57cc", "\u7ec9\u8bfb\u59e9\u9352"),
+            lower_keywords=("move",),
+        ):
             note_id = self._require_single_note_id(note_ids, "move_note_to_grid")
             beat_position = self._parse_beats_value(text)
             if beat_position is None:
@@ -146,7 +186,7 @@ class ScorePatchAgent:
                 confidence=0.77,
             )
 
-        if any(keyword in text for keyword in ("改成", "改为", "pitch", "音高")):
+        if has_pitch_intent:
             note_id = self._require_single_note_id(note_ids, "replace_pitch")
             pitch_midi = self._parse_int_value(text)
             if pitch_midi is None:
@@ -169,6 +209,17 @@ class ScorePatchAgent:
         found = [note_id for note_id in note_ids if note_id in instruction]
         return sorted(found, key=lambda item: instruction.index(item))
 
+    def _first_uncertain_note_id(self, context: AgentRevisionContext) -> str | None:
+        for note in context.score_ir.get("notes") or []:
+            if not isinstance(note, dict):
+                continue
+            reason_codes = list(note.get("reason_codes") or [])
+            if bool(note.get("uncertain")) or "uncertain" in reason_codes or "low_confidence" in reason_codes:
+                note_id = str(note.get("id") or "").strip()
+                if note_id:
+                    return note_id
+        return None
+
     def _require_single_note_id(self, note_ids: list[str], op_name: str) -> str:
         if len(note_ids) != 1:
             raise ValidationAppError(f"{op_name} instruction must reference exactly one note id")
@@ -184,7 +235,7 @@ class ScorePatchAgent:
             return None
 
     def _parse_time_value(self, text: str) -> float | None:
-        match = re.search(r"(\d+(?:\.\d+)?)\s*(?:秒|sec|seconds?)", text, re.IGNORECASE)
+        match = re.search(r"(\d+(?:\.\d+)?)\s*(?:\u79d2|\u7ec9|sec|seconds?)", text, re.IGNORECASE)
         if match is None:
             return None
         try:
@@ -202,7 +253,7 @@ class ScorePatchAgent:
             return None
 
     def _parse_beats_value(self, text: str) -> float | None:
-        match = re.search(r"(\d+(?:\.\d+)?)\s*(?:拍|beats?)", text, re.IGNORECASE)
+        match = re.search(r"(\d+(?:\.\d+)?)\s*(?:\u62cd|\u93b7|beats?)", text, re.IGNORECASE)
         if match is None:
             return None
         try:
@@ -211,7 +262,7 @@ class ScorePatchAgent:
             return None
 
     def _parse_measure_num(self, text: str) -> int | None:
-        match = re.search(r"第\s*(\d+)\s*小节", text)
+        match = re.search(r"\u7b2c\s*(\d+)\s*\u5c0f\u8282", text)
         if match is None:
             match = re.search(r"measure\s*(\d+)", text, re.IGNORECASE)
         if match is None:
@@ -220,3 +271,13 @@ class ScorePatchAgent:
             return int(match.group(1))
         except (TypeError, ValueError):
             return None
+
+    def _contains_any(
+        self,
+        text: str,
+        lower_text: str,
+        *,
+        text_keywords: tuple[str, ...] = (),
+        lower_keywords: tuple[str, ...] = (),
+    ) -> bool:
+        return any(keyword in text for keyword in text_keywords) or any(keyword in lower_text for keyword in lower_keywords)

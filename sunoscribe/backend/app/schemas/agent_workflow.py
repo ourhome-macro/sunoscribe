@@ -11,6 +11,7 @@ from app.modules.agents.types import (
     DiagnosisAction,
     DiagnosisIssue,
     DiagnosisSectionFinding,
+    UncertainNoteDiagnosis,
 )
 
 
@@ -22,6 +23,7 @@ class AgentDiagnoseResponse(_AgentWorkflowSchema):
     summary: str
     section_findings: list[DiagnosisSectionFinding] = Field(default_factory=list)
     suspected_issues: list[DiagnosisIssue] = Field(default_factory=list)
+    uncertain_notes: list[UncertainNoteDiagnosis] = Field(default_factory=list)
     recommended_actions: list[DiagnosisAction] = Field(default_factory=list)
 
 
@@ -32,6 +34,31 @@ class ProposeAgentScorePatchRequest(_AgentWorkflowSchema):
 class PatchValidationStatus(_AgentWorkflowSchema):
     accepted: bool
     errors: list[Any] = Field(default_factory=list)
+
+
+class ScoreNoteClientSummary(_AgentWorkflowSchema):
+    note_id: str
+    pitch: str
+    onset_tick: int | None = None
+    duration_tick: int | None = None
+    measure: int | None = None
+    beat: float | None = None
+    confidence: float | None = None
+    uncertain: bool = False
+    reason_codes: list[str] = Field(default_factory=list)
+    source_candidate_id: str | None = None
+    quantized_note_id: str | None = None
+
+
+class ScoreRevisionClientSummary(_AgentWorkflowSchema):
+    revision_id: uuid.UUID
+    parent_revision_id: uuid.UUID | None = None
+    note_count: int
+    uncertain_note_count: int
+    low_confidence_note_count: int
+    low_confidence_regions: list[dict[str, Any]] = Field(default_factory=list)
+    export_status: str
+    score_notes: list[ScoreNoteClientSummary] = Field(default_factory=list)
 
 
 class AgentScorePatchProposalResponse(_AgentWorkflowSchema):
@@ -65,6 +92,8 @@ class ScoreRevisionSummaryResponse(_AgentWorkflowSchema):
     score_type: str
     key: str
     artifact_ids: dict[str, uuid.UUID] = Field(default_factory=dict)
+    client_summary: ScoreRevisionClientSummary | None = None
+    diff_summary: dict[str, Any] = Field(default_factory=dict)
     created_at: datetime | None = None
     updated_at: datetime | None = None
 
