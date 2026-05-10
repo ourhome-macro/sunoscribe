@@ -74,6 +74,7 @@ class MelodyTranscriptionService:
             result.f0_track_dict = (
                 f0_track_serialized if isinstance(f0_track_serialized, dict) else {"value": f0_track_serialized}
             )
+            result.f0_track_dict = self._normalize_f0_track_payload(result.f0_track_dict)
             raw_vocal_activity = result.f0_track_dict.get("vocal_activity")
             if raw_vocal_activity is not None:
                 if isinstance(raw_vocal_activity, list):
@@ -106,4 +107,32 @@ class MelodyTranscriptionService:
         if not any(isinstance(value, dict) for value in payload.values()):
             return None
         payload["source_stems"] = semantic_audio_dict.get("source_stems", {})
+        return payload
+
+    @staticmethod
+    def _normalize_f0_track_payload(f0_track_dict: dict) -> dict:
+        payload = dict(f0_track_dict)
+        frames = payload.get("frames")
+        if not isinstance(frames, list):
+            return payload
+
+        normalized_frames = []
+        for frame in frames:
+            if not isinstance(frame, dict):
+                normalized_frames.append(frame)
+                continue
+            normalized = dict(frame)
+            if "time_sec" not in normalized and "time" in normalized:
+                normalized["time_sec"] = normalized.get("time")
+            if "f0_hz" not in normalized:
+                normalized["f0_hz"] = normalized.get("frequency_hz")
+            if "midi_float" not in normalized:
+                normalized["midi_float"] = normalized.get("pitch_midi")
+            if "voiced" not in normalized:
+                normalized["voiced"] = None
+            if "confidence" not in normalized:
+                normalized["confidence"] = None
+                normalized["confidence_status"] = "unavailable"
+            normalized_frames.append(normalized)
+        payload["frames"] = normalized_frames
         return payload

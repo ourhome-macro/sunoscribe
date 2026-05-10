@@ -182,7 +182,7 @@ class RenderExportService:
         return target_path.read_bytes(), str(artifact.mime_type), str(artifact.filename)
 
     def _build_export_payload(self, *, revision: ScoreRevision, format_key: str) -> tuple[str, str, str, bytes]:
-        score_data = revision.score_data if isinstance(revision.score_data, dict) else {}
+        score_data = _revision_score_data_for_export(revision)
         if format_key == ArtifactType.MIDI.value:
             payload = build_midi_bytes_from_score_data(score_data)
             if payload is None:
@@ -257,6 +257,17 @@ def build_midi_bytes_from_score_data(score_data: dict[str, Any] | None) -> bytes
         return exporter.export_from_score_data(score_data=score_data, bpm=bpm)
     except Exception as exc:
         raise ValidationAppError("failed to export MIDI from score revision") from exc
+
+
+def _revision_score_data_for_export(revision: ScoreRevision) -> dict[str, Any]:
+    score_data = revision.score_data if isinstance(revision.score_data, dict) else {}
+    score_ir = revision.score_ir if isinstance(revision.score_ir, dict) else {}
+    embedded_score_ir = score_data.get("score_ir") if isinstance(score_data.get("score_ir"), dict) else None
+    if not score_ir:
+        raise ValidationAppError("selected score revision is missing score_ir")
+    if embedded_score_ir != score_ir or score_data.get("source_of_truth") != "score_ir":
+        raise ValidationAppError("selected score revision export data is not derived from score_ir")
+    return score_data
 
 
 def build_musicxml_bytes_from_score_data(score_data: dict[str, Any] | None) -> bytes | None:

@@ -9,6 +9,58 @@ class ScoreIRSerializer:
     """Flatten ScoreIR into score_data-compatible payloads."""
 
     @staticmethod
+    def to_score_data_dict(score_ir: Dict[str, Any]) -> Dict[str, Any]:
+        if not isinstance(score_ir, dict):
+            raise TypeError("score_ir must be a dictionary")
+
+        meta = score_ir.get("meta") if isinstance(score_ir.get("meta"), dict) else {}
+        note_by_id = {
+            str(note.get("id")): note
+            for note in (score_ir.get("notes") or [])
+            if isinstance(note, dict) and note.get("id") is not None
+        }
+
+        measures = []
+        for idx, measure in enumerate(score_ir.get("measures") or [], start=1):
+            if not isinstance(measure, dict):
+                continue
+            packed_notes = []
+            for note in _measure_notes_from_dict(measure, note_by_id):
+                packed_notes.append(_pack_score_note_dict(note))
+            measures.append(
+                {
+                    "measure_num": measure.get("measure_num") or idx,
+                    "start_time": measure.get("start_time"),
+                    "end_time": measure.get("end_time"),
+                    "is_anacrusis": bool(measure.get("is_anacrusis", False)),
+                    "notes": packed_notes,
+                }
+            )
+
+        return {
+            "meta": dict(meta),
+            "bpm": meta.get("bpm"),
+            "key": meta.get("key"),
+            "time_signature": meta.get("time_signature"),
+            "measures": measures,
+            "instrumental_melody_notes": [
+                _pack_score_note_dict(note)
+                for note in (score_ir.get("instrumental_melody_notes") or [])
+                if isinstance(note, dict)
+            ],
+            "bassline_notes": [
+                _pack_score_note_dict(note)
+                for note in (score_ir.get("bassline_notes") or [])
+                if isinstance(note, dict)
+            ],
+            "chord_timeline": list(score_ir.get("chord_timeline") or []),
+            "form_sections": list(score_ir.get("form_sections") or []),
+            "lyrics_segments": list(score_ir.get("lyrics_segments") or []),
+            "analysis_hints": dict(score_ir.get("analysis_hints") or {}),
+            "warnings": list(score_ir.get("warnings") or []),
+        }
+
+    @staticmethod
     def to_score_data(score_ir: ScoreIR) -> Dict[str, Any]:
         note_by_id = {note.id: note for note in (score_ir.notes or [])}
 
@@ -119,3 +171,33 @@ class ScoreIRSerializer:
             "analysis_hints": score_ir.to_dict().get("analysis_hints", {}),
             "warnings": list(score_ir.warnings or []),
         }
+
+
+def _measure_notes_from_dict(measure: Dict[str, Any], note_by_id: Dict[str, Dict[str, Any]]) -> list[Dict[str, Any]]:
+    inline_notes = measure.get("notes")
+    if isinstance(inline_notes, list):
+        return [note for note in inline_notes if isinstance(note, dict)]
+
+    notes: list[Dict[str, Any]] = []
+    for note_id in measure.get("note_ids") or []:
+        note = note_by_id.get(str(note_id))
+        if note is not None:
+            notes.append(note)
+    return notes
+
+
+def _pack_score_note_dict(note: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "id": note.get("id"),
+        "pitch": note.get("pitch"),
+        "pitch_midi": note.get("pitch_midi"),
+        "start_time": note.get("start_time"),
+        "end_time": note.get("end_time"),
+        "duration_beats": note.get("duration_beats"),
+        "note_type": note.get("note_type"),
+        "measure_num": note.get("measure_num"),
+        "beat_position": note.get("beat_position"),
+        "lyric": note.get("lyric"),
+        "confidence": note.get("confidence"),
+        "source": note.get("source"),
+    }

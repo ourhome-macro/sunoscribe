@@ -6,7 +6,6 @@ import inspect
 import json
 import logging
 from pathlib import Path
-import shutil
 from typing import Any
 
 from app.modules.alignment import (
@@ -523,29 +522,22 @@ class AudioAnalysisService:
         workspace: ProjectWorkspace,
     ) -> tuple[Path | None, list[str]]:
         warnings: list[str] = []
-
-        if self.midi_exporter is not None and perception.pitch_result_obj is not None:
+        score_data = perception.score_data_dict if isinstance(perception.score_data_dict, dict) else None
+        measures = score_data.get("measures") if isinstance(score_data, dict) else None
+        if self.midi_exporter is not None and isinstance(measures, list) and measures:
             try:
-                # TODO: 鎸夌湡瀹炴帴鍙ｈ皟鏁达紙鐩墠鐢?pitch 缁撴灉瀵煎嚭锛屽悗缁彲绾冲叆 alignment锛?
-                measures = getattr(perception.pitch_result_obj, "measures", None)
-                bpm = getattr(getattr(perception.pitch_result_obj, "meta", None), "bpm", None)
-                if measures is not None and bpm is not None:
-                    await asyncio.to_thread(
-                        self.midi_exporter.export_from_measures,
-                        measures,
-                        float(bpm),
-                        str(workspace.final_midi_path),
-                    )
-                    return workspace.final_midi_path, warnings
-            except Exception as exc:
-                warnings.append(f"final_midi_export_failed:{self._short_exception(exc)}")
-
-        if perception.raw_pitch_midi_path and perception.raw_pitch_midi_path.exists():
-            try:
-                shutil.copyfile(perception.raw_pitch_midi_path, workspace.final_midi_path)
+                bpm = score_data.get("bpm")
+                if bpm is None and isinstance(score_data.get("meta"), dict):
+                    bpm = score_data["meta"].get("bpm")
+                await asyncio.to_thread(
+                    self.midi_exporter.export_from_score_data,
+                    score_data,
+                    float(bpm),
+                    str(workspace.final_midi_path),
+                )
                 return workspace.final_midi_path, warnings
             except Exception as exc:
-                warnings.append(f"final_midi_copy_failed:{self._short_exception(exc)}")
+                warnings.append(f"score_ir_midi_export_failed:{self._short_exception(exc)}")
 
         warnings.append("midi_not_generated")
         return None, warnings

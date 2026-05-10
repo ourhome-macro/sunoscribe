@@ -30,6 +30,7 @@ DEBUG_PACKAGE_FILES = [
     "f0_track.json",
     "vocal_activity.json",
     "note_candidates.json",
+    "rhythm_grid.json",
     "quantized_notes.json",
     "score_ir.json",
     "match_debug.json",
@@ -863,6 +864,12 @@ def _copy_artifact_candidates(
         "note_candidates.json": [
             sample_run_dir / "note_candidates.json",
             workspace_path / "pitch" / "note_candidates.json" if workspace_path else None,
+        ],
+        "rhythm_grid.json": [
+            sample_run_dir / "rhythm_grid.json",
+            workspace_path / "pitch" / "rhythm_grid.json" if workspace_path else None,
+            workspace_path / "rhythm" / "rhythm_grid.json" if workspace_path else None,
+            workspace_path / "quantization" / "rhythm_grid.json" if workspace_path else None,
         ],
         "quantized_notes.json": [
             sample_run_dir / "quantized_notes.json",

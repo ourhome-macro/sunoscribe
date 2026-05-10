@@ -14,6 +14,7 @@ from app.models.project import Project
 from app.models.score import Score
 from app.models.score_revision import ScoreRevision
 from app.models.user import User
+from app.modules.score_ir import ScoreIRSerializer
 from app.schemas.score_patch import ScorePatch
 from app.services.patch_validator import PatchValidator
 from app.services.render_export_service import RenderExportService
@@ -120,6 +121,8 @@ def apply_score_patch(
         score_data=base_revision.score_data,
         patch=patch_obj,
     )
+    revision_score_ir = validation_result.score_ir
+    revision_score_data = _with_score_ir_source_of_truth(validation_result.score_data, revision_score_ir)
 
     revision = ScoreRevision(
         project_id=base_revision.project_id,
@@ -135,8 +138,8 @@ def apply_score_patch(
             recommended_voice if recommended_voice is not None else base_revision.recommended_voice
         ),
         emotion=emotion if emotion is not None else base_revision.emotion,
-        score_ir=validation_result.score_ir,
-        score_data=validation_result.score_data,
+        score_ir=revision_score_ir,
+        score_data=revision_score_data,
         patch_data=patch_obj.model_dump(),
         revision_metadata={
             **(base_revision.revision_metadata if isinstance(base_revision.revision_metadata, dict) else {}),
@@ -280,14 +283,32 @@ def _resolve_score_data(
     score_data: dict[str, Any] | None,
     score_ir: dict[str, Any],
 ) -> dict[str, Any]:
-    if isinstance(score_data, dict):
-        resolved = dict(score_data)
+    nested = getattr(analysis_result, "score_data", None)
+    source = score_data if isinstance(score_data, dict) else nested
+    if isinstance(source, dict) and _score_data_matches_score_ir(source, score_ir):
+        resolved = dict(source)
     else:
-        nested = getattr(analysis_result, "score_data", None)
-        resolved = dict(nested) if isinstance(nested, dict) else {}
+        resolved = _score_data_from_score_ir_dict(score_ir)
 
-    if "score_ir" not in resolved:
-        resolved["score_ir"] = score_ir
+    return _with_score_ir_source_of_truth(resolved, score_ir)
+
+
+def _score_data_matches_score_ir(score_data: dict[str, Any], score_ir: dict[str, Any]) -> bool:
+    embedded = score_data.get("score_ir")
+    return isinstance(embedded, dict) and embedded == score_ir
+
+
+def _score_data_from_score_ir_dict(score_ir: dict[str, Any]) -> dict[str, Any]:
+    try:
+        return ScoreIRSerializer.to_score_data_dict(score_ir)
+    except Exception as exc:
+        raise ValidationAppError("machine revision score_data must be derived from score_ir") from exc
+
+
+def _with_score_ir_source_of_truth(score_data: dict[str, Any], score_ir: dict[str, Any]) -> dict[str, Any]:
+    resolved = dict(score_data or {})
+    resolved["score_ir"] = score_ir
+    resolved["source_of_truth"] = "score_ir"
     return resolved
 
 
