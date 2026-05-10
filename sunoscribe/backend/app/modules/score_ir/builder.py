@@ -299,6 +299,11 @@ class ScoreIRBuilder:
                     is_candidate_ornament=self._is_candidate_ornament(None, confidence),
                     tie_candidate=False,
                     source=source,
+                    source_candidate_id=self._safe_optional_str(getattr(note, "source_candidate_id", None))
+                    or self._safe_optional_str(getattr(note, "id", None)),
+                    quantized_note_id=self._safe_optional_str(getattr(note, "quantized_note_id", None)),
+                    uncertain=bool(getattr(note, "uncertain", False)),
+                    reason_codes=list(getattr(note, "reason_codes", []) or []),
                 )
             )
         return built

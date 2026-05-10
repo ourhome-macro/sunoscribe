@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 import json
@@ -28,9 +28,11 @@ DEBUG_PACKAGE_FILES = [
     "expected_notes.json",
     "predicted_notes.json",
     "f0_track.json",
+    "pitch_contours.json",
     "vocal_activity.json",
     "note_candidates.json",
     "rhythm_grid.json",
+    "selected_melody.json",
     "quantized_notes.json",
     "score_ir.json",
     "match_debug.json",
@@ -220,6 +222,9 @@ def export_benchmark_debug_package(
         f0_track_path=debug_dir / "f0_track.json" if (debug_dir / "f0_track.json").exists() else None,
         vocal_activity_path=debug_dir / "vocal_activity.json" if (debug_dir / "vocal_activity.json").exists() else None,
         note_candidates_path=debug_dir / "note_candidates.json" if (debug_dir / "note_candidates.json").exists() else None,
+        pitch_contours_path=debug_dir / "pitch_contours.json" if (debug_dir / "pitch_contours.json").exists() else None,
+        selected_melody_path=debug_dir / "selected_melody.json" if (debug_dir / "selected_melody.json").exists() else None,
+        quantized_notes_path=debug_dir / "quantized_notes.json" if (debug_dir / "quantized_notes.json").exists() else None,
         match_debug=match_debug,
         alignment_debug=alignment_debug,
         metrics_payload=metrics_payload,
@@ -415,11 +420,18 @@ def build_derived_diagnostics(
     match_debug: dict[str, Any] | None,
     alignment_debug: dict[str, Any] | None,
     metrics_payload: dict[str, Any],
+    pitch_contours_path: Path | None = None,
+    selected_melody_path: Path | None = None,
+    quantized_notes_path: Path | None = None,
 ) -> dict[str, Any]:
     notes = _derive_note_diagnostics(expected_notes, predicted_notes)
     f0 = _derive_f0_diagnostics(f0_track_path)
+    pitch_contours = _derive_pitch_contour_diagnostics(pitch_contours_path)
     vocal_activity = _derive_vocal_activity_diagnostics(vocal_activity_path)
     note_candidates = _derive_note_candidate_diagnostics(note_candidates_path, predicted_note_count=len(predicted_notes))
+    selected_melody = _derive_selected_melody_diagnostics(selected_melody_path)
+    quantized_notes = _derive_quantized_note_diagnostics(quantized_notes_path)
+    short_note_diagnostics = _derive_short_note_diagnostics(expected_notes, predicted_notes)
     pitch_distribution = _derive_pitch_distribution_diagnostics(
         expected_notes=expected_notes,
         predicted_notes=predicted_notes,
@@ -447,8 +459,12 @@ def build_derived_diagnostics(
     return {
         "notes": notes,
         "f0": f0,
+        "pitch_contours": pitch_contours,
         "vocal_activity": vocal_activity,
         "note_candidates": note_candidates,
+        "selected_melody": selected_melody,
+        "quantized_notes": quantized_notes,
+        "short_note_diagnostics": short_note_diagnostics,
         "pitch_distribution": pitch_distribution,
         "match": match,
         "coverage": {
@@ -857,6 +873,10 @@ def _copy_artifact_candidates(
             sample_run_dir / "f0_track.json",
             workspace_path / "pitch" / "f0_track.json" if workspace_path else None,
         ],
+        "pitch_contours.json": [
+            sample_run_dir / "pitch_contours.json",
+            workspace_path / "pitch" / "pitch_contours.json" if workspace_path else None,
+        ],
         "vocal_activity.json": [
             sample_run_dir / "vocal_activity.json",
             workspace_path / "pitch" / "vocal_activity.json" if workspace_path else None,
@@ -870,6 +890,10 @@ def _copy_artifact_candidates(
             workspace_path / "pitch" / "rhythm_grid.json" if workspace_path else None,
             workspace_path / "rhythm" / "rhythm_grid.json" if workspace_path else None,
             workspace_path / "quantization" / "rhythm_grid.json" if workspace_path else None,
+        ],
+        "selected_melody.json": [
+            sample_run_dir / "selected_melody.json",
+            workspace_path / "pitch" / "selected_melody.json" if workspace_path else None,
         ],
         "quantized_notes.json": [
             sample_run_dir / "quantized_notes.json",
@@ -1153,6 +1177,103 @@ def _derive_note_candidate_diagnostics(note_candidates_path: Path | None, *, pre
         "candidate_short_note_ratio": _safe_divide(sum(1 for duration in durations if duration < 0.25), len(durations)),
         "candidate_pitch_range": [min(pitches), max(pitches)] if pitches else None,
     }
+
+
+def _derive_pitch_contour_diagnostics(pitch_contours_path: Path | None) -> dict[str, Any]:
+    if pitch_contours_path is None or not pitch_contours_path.exists():
+        return _unavailable("pitch_contours.json missing")
+    payload = _read_json(pitch_contours_path)
+    contours = payload.get("contours") if isinstance(payload, dict) else None
+    if not isinstance(contours, list):
+        return _unavailable("pitch contours unavailable")
+    durations = [_as_float(item.get("duration_sec")) for item in contours if isinstance(item, dict)]
+    durations = [value for value in durations if value is not None]
+    return {
+        "available": True,
+        "contour_count": len(contours),
+        "low_confidence_contour_count": sum(1 for item in contours if isinstance(item, dict) and "low_confidence" in (item.get("reason_codes") or [])),
+        "median_contour_duration_sec": _median(durations),
+        "suspected_vibrato_contour_count": sum(1 for item in contours if isinstance(item, dict) and item.get("has_vibrato")),
+        "suspected_glide_contour_count": sum(1 for item in contours if isinstance(item, dict) and item.get("has_glide")),
+    }
+
+
+def _derive_selected_melody_diagnostics(selected_melody_path: Path | None) -> dict[str, Any]:
+    if selected_melody_path is None or not selected_melody_path.exists():
+        return _unavailable("selected_melody.json missing")
+    payload = _read_json(selected_melody_path)
+    if not isinstance(payload, dict):
+        return _unavailable("selected melody unavailable")
+    summary = payload.get("summary") if isinstance(payload.get("summary"), dict) else {}
+    return {
+        "available": True,
+        "input_candidate_count": summary.get("input_candidate_count", 0),
+        "selected_count": summary.get("selected_count", 0),
+        "rejected_count": summary.get("rejected_count", 0),
+        "rejection_reason_counts": summary.get("rejection_reason_counts") if isinstance(summary.get("rejection_reason_counts"), dict) else {},
+        "mean_selected_confidence": summary.get("mean_selected_confidence"),
+        "mean_rejected_confidence": summary.get("mean_rejected_confidence"),
+    }
+
+
+def _derive_quantized_note_diagnostics(quantized_notes_path: Path | None) -> dict[str, Any]:
+    if quantized_notes_path is None or not quantized_notes_path.exists():
+        return _unavailable("quantized_notes.json missing")
+    payload = _read_json(quantized_notes_path)
+    if not isinstance(payload, dict):
+        return _unavailable("quantized notes unavailable")
+    summary = payload.get("summary") if isinstance(payload.get("summary"), dict) else {}
+    return {
+        "available": True,
+        "quantizer_backend": payload.get("quantizer_backend"),
+        "note_count": summary.get("note_count", 0),
+        "mean_quantize_error_sec": summary.get("mean_quantize_error_sec"),
+        "max_quantize_error_sec": summary.get("max_quantize_error_sec"),
+        "uncertain_count": summary.get("uncertain_count", 0),
+    }
+
+
+def _derive_short_note_diagnostics(
+    expected_notes: list[NoteEvent],
+    predicted_notes: list[NoteEvent],
+    *,
+    duration_threshold_sec: float = 0.25,
+) -> dict[str, Any]:
+    if not expected_notes:
+        return _unavailable("reference notes unavailable")
+    expected_short = [note for note in expected_notes if note.duration < duration_threshold_sec]
+    predicted_short = [note for note in predicted_notes if note.duration < duration_threshold_sec]
+    matched_expected, matched_predicted = _match_short_note_sets(expected_short, predicted_short)
+    return {
+        "available": True,
+        "duration_threshold_sec": duration_threshold_sec,
+        "expected_short_note_count": len(expected_short),
+        "predicted_short_note_count": len(predicted_short),
+        "matched_short_note_count": len(matched_expected),
+        "missed_short_note_count": max(0, len(expected_short) - len(matched_expected)),
+        "false_positive_short_note_count": max(0, len(predicted_short) - len(matched_predicted)),
+        "short_note_recall": _safe_divide(len(matched_expected), len(expected_short)),
+        "short_note_precision": _safe_divide(len(matched_predicted), len(predicted_short)),
+    }
+
+
+def _match_short_note_sets(expected: list[NoteEvent], predicted: list[NoteEvent]) -> tuple[set[int], set[int]]:
+    matched_expected: set[int] = set()
+    matched_predicted: set[int] = set()
+    for expected_index, expected_note in enumerate(expected):
+        best_index: int | None = None
+        best_delta: float | None = None
+        for predicted_index, predicted_note in enumerate(predicted):
+            if predicted_index in matched_predicted or int(predicted_note.pitch) != int(expected_note.pitch):
+                continue
+            delta = abs(float(predicted_note.start) - float(expected_note.start))
+            if delta <= 0.08 and (best_delta is None or delta < best_delta):
+                best_delta = delta
+                best_index = predicted_index
+        if best_index is not None:
+            matched_expected.add(expected_index)
+            matched_predicted.add(best_index)
+    return matched_expected, matched_predicted
 
 
 def _derive_pitch_distribution_diagnostics(
@@ -2324,8 +2445,12 @@ def _derived_diagnostics_markdown_lines(derived_diagnostics: dict[str, Any] | No
         return ["", "## Derived Diagnostics", "- available: false"]
     notes = derived_diagnostics.get("notes") if isinstance(derived_diagnostics.get("notes"), dict) else {}
     f0 = derived_diagnostics.get("f0") if isinstance(derived_diagnostics.get("f0"), dict) else {}
+    pitch_contours = derived_diagnostics.get("pitch_contours") if isinstance(derived_diagnostics.get("pitch_contours"), dict) else {}
     vocal_activity = derived_diagnostics.get("vocal_activity") if isinstance(derived_diagnostics.get("vocal_activity"), dict) else {}
     note_candidates = derived_diagnostics.get("note_candidates") if isinstance(derived_diagnostics.get("note_candidates"), dict) else {}
+    selected_melody = derived_diagnostics.get("selected_melody") if isinstance(derived_diagnostics.get("selected_melody"), dict) else {}
+    quantized_notes = derived_diagnostics.get("quantized_notes") if isinstance(derived_diagnostics.get("quantized_notes"), dict) else {}
+    short_note_diagnostics = derived_diagnostics.get("short_note_diagnostics") if isinstance(derived_diagnostics.get("short_note_diagnostics"), dict) else {}
     match = derived_diagnostics.get("match") if isinstance(derived_diagnostics.get("match"), dict) else {}
     pitch_distribution = derived_diagnostics.get("pitch_distribution") if isinstance(derived_diagnostics.get("pitch_distribution"), dict) else {}
     pairwise = pitch_distribution.get("pairwise") if isinstance(pitch_distribution.get("pairwise"), dict) else {}
@@ -2366,6 +2491,14 @@ def _derived_diagnostics_markdown_lines(derived_diagnostics: dict[str, Any] | No
         f"- f0_pitch_range: {_fmt(f0.get('f0_pitch_range'))}",
         f"- f0_time_span_sec: {_fmt(f0.get('f0_time_span_sec'))}",
         f"- unavailable_reason: {_fmt(f0.get('unavailable_reason')) if not f0.get('available') else 'none'}",
+        "### Pitch Contour Diagnostics",
+        f"- available: {str(bool(pitch_contours.get('available'))).lower()}",
+        f"- contour_count: {_fmt(pitch_contours.get('contour_count'))}",
+        f"- low_confidence_contour_count: {_fmt(pitch_contours.get('low_confidence_contour_count'))}",
+        f"- median_contour_duration_sec: {_fmt(pitch_contours.get('median_contour_duration_sec'))}",
+        f"- suspected_vibrato_contour_count: {_fmt(pitch_contours.get('suspected_vibrato_contour_count'))}",
+        f"- suspected_glide_contour_count: {_fmt(pitch_contours.get('suspected_glide_contour_count'))}",
+        f"- unavailable_reason: {_fmt(pitch_contours.get('unavailable_reason')) if not pitch_contours.get('available') else 'none'}",
         "### Vocal Activity Diagnostics",
         f"- available: {str(bool(vocal_activity.get('available'))).lower()}",
         f"- vocal_activity_active_ratio: {_fmt(vocal_activity.get('vocal_activity_active_ratio'))}",
@@ -2381,6 +2514,33 @@ def _derived_diagnostics_markdown_lines(derived_diagnostics: dict[str, Any] | No
         f"- candidate_short_note_ratio: {_fmt(note_candidates.get('candidate_short_note_ratio'))}",
         f"- candidate_pitch_range: {_fmt(note_candidates.get('candidate_pitch_range'))}",
         f"- unavailable_reason: {_fmt(note_candidates.get('unavailable_reason')) if not note_candidates.get('available') else 'none'}",
+        "### Selected Melody Diagnostics",
+        f"- available: {str(bool(selected_melody.get('available'))).lower()}",
+        f"- input_candidate_count: {_fmt(selected_melody.get('input_candidate_count'))}",
+        f"- selected_count: {_fmt(selected_melody.get('selected_count'))}",
+        f"- rejected_count: {_fmt(selected_melody.get('rejected_count'))}",
+        f"- rejection_reason_counts: {_fmt(selected_melody.get('rejection_reason_counts'))}",
+        f"- mean_selected_confidence: {_fmt(selected_melody.get('mean_selected_confidence'))}",
+        f"- mean_rejected_confidence: {_fmt(selected_melody.get('mean_rejected_confidence'))}",
+        f"- unavailable_reason: {_fmt(selected_melody.get('unavailable_reason')) if not selected_melody.get('available') else 'none'}",
+        "### Quantization Diagnostics",
+        f"- available: {str(bool(quantized_notes.get('available'))).lower()}",
+        f"- quantizer_backend: {_fmt(quantized_notes.get('quantizer_backend'))}",
+        f"- note_count: {_fmt(quantized_notes.get('note_count'))}",
+        f"- mean_quantize_error_sec: {_fmt(quantized_notes.get('mean_quantize_error_sec'))}",
+        f"- max_quantize_error_sec: {_fmt(quantized_notes.get('max_quantize_error_sec'))}",
+        f"- uncertain_count: {_fmt(quantized_notes.get('uncertain_count'))}",
+        f"- unavailable_reason: {_fmt(quantized_notes.get('unavailable_reason')) if not quantized_notes.get('available') else 'none'}",
+        "### Short Note Diagnostics",
+        f"- available: {str(bool(short_note_diagnostics.get('available'))).lower()}",
+        f"- expected_short_note_count: {_fmt(short_note_diagnostics.get('expected_short_note_count'))}",
+        f"- predicted_short_note_count: {_fmt(short_note_diagnostics.get('predicted_short_note_count'))}",
+        f"- matched_short_note_count: {_fmt(short_note_diagnostics.get('matched_short_note_count'))}",
+        f"- missed_short_note_count: {_fmt(short_note_diagnostics.get('missed_short_note_count'))}",
+        f"- false_positive_short_note_count: {_fmt(short_note_diagnostics.get('false_positive_short_note_count'))}",
+        f"- short_note_recall: {_fmt(short_note_diagnostics.get('short_note_recall'))}",
+        f"- short_note_precision: {_fmt(short_note_diagnostics.get('short_note_precision'))}",
+        f"- unavailable_reason: {_fmt(short_note_diagnostics.get('unavailable_reason')) if not short_note_diagnostics.get('available') else 'none'}",
         "### Match Diagnostics",
         f"- raw_matched_count: {_fmt(match.get('raw_matched_count'))}",
         f"- shift_matched_count: {_fmt(match.get('shift_matched_count'))}",
@@ -2537,3 +2697,4 @@ def _first_present(payload: dict[str, Any], *keys: str) -> Any:
         if key in payload and payload[key] is not None:
             return payload[key]
     return None
+

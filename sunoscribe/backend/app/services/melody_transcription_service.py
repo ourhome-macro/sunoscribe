@@ -4,6 +4,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
+from app.modules.pitch.melody_selection_artifact import RuleBasedMelodySelector
+from app.modules.pitch.pitch_contours import PitchContourBuilder
+from app.modules.pitch.quantized_notes_artifact import QuantizedNotesArtifactBuilder, score_ir_note_annotations
 from app.services.workspace import ProjectWorkspace
 
 
@@ -13,8 +16,11 @@ class MelodyTranscriptionResult:
     pitch_result_dict: dict | None = None
     semantic_audio_dict: dict | None = None
     f0_track_dict: dict | None = None
+    pitch_contours_dict: dict | None = None
     vocal_activity_dict: dict | None = None
     note_candidates_dict: dict | None = None
+    selected_melody_dict: dict | None = None
+    quantized_notes_dict: dict | None = None
     raw_pitch_midi_path: Path | None = None
     warnings: list[str] = field(default_factory=list)
 
@@ -29,11 +35,17 @@ class MelodyTranscriptionService:
         serializer: Callable[[Any], Any],
         pitch_request_builder: Callable[..., Any],
         short_exception: Callable[[Exception], str],
+        pitch_contour_builder: PitchContourBuilder | None = None,
+        melody_selector: RuleBasedMelodySelector | None = None,
+        quantized_notes_builder: QuantizedNotesArtifactBuilder | None = None,
     ) -> None:
         self.pitch_pipeline = pitch_pipeline
         self.serializer = serializer
         self.pitch_request_builder = pitch_request_builder
         self.short_exception = short_exception
+        self.pitch_contour_builder = pitch_contour_builder or PitchContourBuilder()
+        self.melody_selector = melody_selector or RuleBasedMelodySelector()
+        self.quantized_notes_builder = quantized_notes_builder or QuantizedNotesArtifactBuilder()
 
     def transcribe(
         self,
@@ -85,6 +97,16 @@ class MelodyTranscriptionService:
                     result.vocal_activity_dict = {"value": raw_vocal_activity}
 
         result.note_candidates_dict = self._build_note_candidates_payload(result.semantic_audio_dict)
+        result.pitch_contours_dict = self.pitch_contour_builder.build(result.f0_track_dict)
+        result.selected_melody_dict = self.melody_selector.select(
+            note_candidates=result.note_candidates_dict,
+            pitch_contours=result.pitch_contours_dict,
+        )
+        rhythm_grid_dict = self._build_rhythm_grid_payload(result.semantic_audio_dict)
+        result.quantized_notes_dict = self.quantized_notes_builder.build(
+            selected_melody=result.selected_melody_dict,
+            rhythm_grid=rhythm_grid_dict,
+        )
 
         if hasattr(self.pitch_pipeline, "export_midi"):
             try:
@@ -108,6 +130,13 @@ class MelodyTranscriptionService:
             return None
         payload["source_stems"] = semantic_audio_dict.get("source_stems", {})
         return payload
+
+    @staticmethod
+    def _build_rhythm_grid_payload(semantic_audio_dict: dict | None) -> dict | None:
+        if not isinstance(semantic_audio_dict, dict):
+            return None
+        rhythm_grid = semantic_audio_dict.get("rhythm_grid")
+        return dict(rhythm_grid) if isinstance(rhythm_grid, dict) else None
 
     @staticmethod
     def _normalize_f0_track_payload(f0_track_dict: dict) -> dict:

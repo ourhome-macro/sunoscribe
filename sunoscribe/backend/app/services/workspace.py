@@ -111,8 +111,20 @@ class ProjectWorkspace:
         return self.pitch_dir / "f0_track.json"
 
     @property
+    def pitch_contours_path(self) -> Path:
+        return self.pitch_dir / "pitch_contours.json"
+
+    @property
     def note_candidates_path(self) -> Path:
         return self.pitch_dir / "note_candidates.json"
+
+    @property
+    def selected_melody_path(self) -> Path:
+        return self.pitch_dir / "selected_melody.json"
+
+    @property
+    def quantized_notes_path(self) -> Path:
+        return self.pitch_dir / "quantized_notes.json"
 
     @property
     def rhythm_grid_path(self) -> Path:

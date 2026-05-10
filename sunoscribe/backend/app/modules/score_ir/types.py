@@ -37,6 +37,10 @@ class ScoreNote:
     is_candidate_ornament: bool
     tie_candidate: bool
     source: str
+    source_candidate_id: Optional[str] = None
+    quantized_note_id: Optional[str] = None
+    uncertain: bool = False
+    reason_codes: List[str] = field(default_factory=list)
 
 
 @dataclass

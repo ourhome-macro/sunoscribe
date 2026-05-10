@@ -67,7 +67,10 @@ class AudioAnalysisResult:
     midi_path: str | None
     stem_paths: dict[str, str] = field(default_factory=dict)
     f0_track: dict | None = None
+    pitch_contours: dict | None = None
     note_candidates: dict | None = None
+    selected_melody: dict | None = None
+    quantized_notes: dict | None = None
     rhythm_grid: dict | None = None
     vocal_activity: dict | None = None
     semantic_audio: dict | None = None
@@ -95,7 +98,10 @@ class _PerceptionStageResult:
     raw_pitch_midi_path: Path | None
     stem_paths: dict[str, Path] = field(default_factory=dict)
     f0_track_dict: dict | None = None
+    pitch_contours_dict: dict | None = None
     note_candidates_dict: dict | None = None
+    selected_melody_dict: dict | None = None
+    quantized_notes_dict: dict | None = None
     rhythm_grid_dict: dict | None = None
     vocal_activity_dict: dict | None = None
     semantic_audio_dict: dict | None = None
@@ -225,7 +231,10 @@ class AudioAnalysisService:
             midi_path=str(final_midi_path) if final_midi_path else None,
             stem_paths={name: str(path) for name, path in perception.stem_paths.items()},
             f0_track=perception.f0_track_dict,
+            pitch_contours=perception.pitch_contours_dict,
             note_candidates=perception.note_candidates_dict,
+            selected_melody=perception.selected_melody_dict,
+            quantized_notes=perception.quantized_notes_dict,
             rhythm_grid=perception.rhythm_grid_dict,
             vocal_activity=perception.vocal_activity_dict,
             warnings=all_warnings,
@@ -256,7 +265,10 @@ class AudioAnalysisService:
         raw_pitch_midi_path: Path | None = None
         stem_paths: dict[str, Path] = {}
         f0_track_dict: dict | None = None
+        pitch_contours_dict: dict | None = None
         note_candidates_dict: dict | None = None
+        selected_melody_dict: dict | None = None
+        quantized_notes_dict: dict | None = None
         rhythm_grid_dict: dict | None = None
         vocal_activity_dict: dict | None = None
         semantic_audio_dict: dict | None = None
@@ -319,8 +331,11 @@ class AudioAnalysisService:
             pitch_result_dict = transcription.pitch_result_dict
             semantic_audio_dict = transcription.semantic_audio_dict
             f0_track_dict = transcription.f0_track_dict
+            pitch_contours_dict = transcription.pitch_contours_dict
             vocal_activity_dict = transcription.vocal_activity_dict
             note_candidates_dict = transcription.note_candidates_dict
+            selected_melody_dict = transcription.selected_melody_dict
+            quantized_notes_dict = transcription.quantized_notes_dict
             raw_pitch_midi_path = transcription.raw_pitch_midi_path
             warnings.extend(transcription.warnings)
             rhythm_grid_dict = self.rhythm_quantization_service.build_rhythm_grid_payload(semantic_audio_dict)
@@ -370,6 +385,17 @@ class AudioAnalysisService:
 
         score_ir_serialized = self._serialize(perception_obj=score_ir_obj)
         score_ir_dict = score_ir_serialized if isinstance(score_ir_serialized, dict) else {"value": score_ir_serialized}
+        score_ir_dict = self._annotate_score_ir_notes(
+            score_ir_dict,
+            quantized_notes_dict=quantized_notes_dict,
+        )
+        if score_data_dict is not None:
+            try:
+                from app.modules.score_ir import ScoreIRSerializer
+
+                score_data_dict = ScoreIRSerializer.to_score_data_dict(score_ir_dict)
+            except Exception as exc:
+                warnings.append(f"score_data_trace_annotation_failed:{self._short_exception(exc)}")
 
         return _PerceptionStageResult(
             source_audio_path=source_audio_path,
@@ -389,11 +415,44 @@ class AudioAnalysisService:
             raw_pitch_midi_path=raw_pitch_midi_path,
             stem_paths=stem_paths,
             f0_track_dict=f0_track_dict,
+            pitch_contours_dict=pitch_contours_dict,
             note_candidates_dict=note_candidates_dict,
+            selected_melody_dict=selected_melody_dict,
+            quantized_notes_dict=quantized_notes_dict,
             rhythm_grid_dict=rhythm_grid_dict,
             vocal_activity_dict=vocal_activity_dict,
             warnings=warnings,
         )
+
+    def _annotate_score_ir_notes(self, score_ir_dict: dict, *, quantized_notes_dict: dict | None) -> dict:
+        if not isinstance(score_ir_dict, dict) or not isinstance(quantized_notes_dict, dict):
+            return score_ir_dict
+        try:
+            from app.modules.pitch.quantized_notes_artifact import score_ir_note_annotations
+
+            annotations = score_ir_note_annotations(quantized_notes_dict)
+        except Exception:
+            return score_ir_dict
+        if not annotations:
+            return score_ir_dict
+        annotated = dict(score_ir_dict)
+        notes = []
+        for idx, note in enumerate(score_ir_dict.get("notes") or [], start=1):
+            if not isinstance(note, dict):
+                notes.append(note)
+                continue
+            updated = dict(note)
+            candidates = [
+                str(note.get("source_candidate_id") or ""),
+                str(note.get("id") or ""),
+                f"cand_{idx:05d}",
+            ]
+            annotation = next((annotations.get(candidate) for candidate in candidates if candidate in annotations), None)
+            if annotation:
+                updated.update({key: value for key, value in annotation.items() if value is not None})
+            notes.append(updated)
+        annotated["notes"] = notes
+        return annotated
 
     def _build_pitch_pipeline_request(
         self,
@@ -562,8 +621,14 @@ class AudioAnalysisService:
             self._write_json(workspace.pitch_result_path, perception.pitch_result_dict)
             if perception.f0_track_dict is not None:
                 self._write_json(workspace.f0_track_path, perception.f0_track_dict)
+            if perception.pitch_contours_dict is not None:
+                self._write_json(workspace.pitch_contours_path, perception.pitch_contours_dict)
             if perception.note_candidates_dict is not None:
                 self._write_json(workspace.note_candidates_path, perception.note_candidates_dict)
+            if perception.selected_melody_dict is not None:
+                self._write_json(workspace.selected_melody_path, perception.selected_melody_dict)
+            if perception.quantized_notes_dict is not None:
+                self._write_json(workspace.quantized_notes_path, perception.quantized_notes_dict)
             if perception.rhythm_grid_dict is not None:
                 self._write_json(workspace.rhythm_grid_path, perception.rhythm_grid_dict)
             if perception.vocal_activity_dict is not None:

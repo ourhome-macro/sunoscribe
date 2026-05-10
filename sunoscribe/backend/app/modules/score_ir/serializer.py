@@ -81,6 +81,10 @@ class ScoreIRSerializer:
                         "beat_position": note.beat_position,
                         "lyric": note.lyric,
                         "confidence": note.confidence,
+                        "source_candidate_id": note.source_candidate_id,
+                        "quantized_note_id": note.quantized_note_id,
+                        "uncertain": note.uncertain,
+                        "reason_codes": list(note.reason_codes or []),
                     }
                 )
 
@@ -124,6 +128,10 @@ class ScoreIRSerializer:
                     "measure_num": note.measure_num,
                     "beat_position": note.beat_position,
                     "source": note.source,
+                    "source_candidate_id": note.source_candidate_id,
+                    "quantized_note_id": note.quantized_note_id,
+                    "uncertain": note.uncertain,
+                    "reason_codes": list(note.reason_codes or []),
                 }
                 for note in (score_ir.instrumental_melody_notes or [])
             ],
@@ -136,6 +144,10 @@ class ScoreIRSerializer:
                     "measure_num": note.measure_num,
                     "confidence": note.confidence,
                     "source": note.source,
+                    "source_candidate_id": note.source_candidate_id,
+                    "quantized_note_id": note.quantized_note_id,
+                    "uncertain": note.uncertain,
+                    "reason_codes": list(note.reason_codes or []),
                 }
                 for note in (score_ir.bassline_notes or [])
             ],
@@ -200,4 +212,8 @@ def _pack_score_note_dict(note: Dict[str, Any]) -> Dict[str, Any]:
         "lyric": note.get("lyric"),
         "confidence": note.get("confidence"),
         "source": note.get("source"),
+        "source_candidate_id": note.get("source_candidate_id"),
+        "quantized_note_id": note.get("quantized_note_id"),
+        "uncertain": bool(note.get("uncertain", False)),
+        "reason_codes": list(note.get("reason_codes") or []),
     }
