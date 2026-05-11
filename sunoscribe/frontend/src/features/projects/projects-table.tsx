@@ -11,12 +11,12 @@ export function ProjectsTable({ projects }: { projects: ProjectSummary[] }) {
     <Table>
       <TableHeader>
         <TableRow>
-          <TableHead>project_id</TableHead>
-          <TableHead>name</TableHead>
-          <TableHead>status</TableHead>
-          <TableHead>created_at</TableHead>
-          <TableHead>latest_revision</TableHead>
-          <TableHead>export_status</TableHead>
+          <TableHead>歌曲 ID</TableHead>
+          <TableHead>歌曲/项目名</TableHead>
+          <TableHead>处理状态</TableHead>
+          <TableHead>上传时间</TableHead>
+          <TableHead>最新乐谱版本</TableHead>
+          <TableHead>导出文件</TableHead>
           <TableHead className="text-right">操作</TableHead>
         </TableRow>
       </TableHeader>
@@ -35,7 +35,7 @@ export function ProjectsTable({ projects }: { projects: ProjectSummary[] }) {
             </TableCell>
             <TableCell className="text-right">
               <Button asChild variant="outline" size="sm">
-                <Link to={`/projects/${project.project_id}`}>详情</Link>
+                <Link to={`/projects/${project.project_id}`}>查看详情</Link>
               </Button>
             </TableCell>
           </TableRow>

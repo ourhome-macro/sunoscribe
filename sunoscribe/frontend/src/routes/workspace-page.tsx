@@ -3,6 +3,7 @@ import { useQuery } from '@tanstack/react-query'
 import { Download, FileJson, FileMusic } from 'lucide-react'
 import { useSearchParams } from 'react-router-dom'
 
+import { GlossaryTerm } from '@/components/layout/glossary-term'
 import { NoteDetailSheet } from '@/components/notes/note-detail-sheet'
 import { UncertainNotesPanel } from '@/components/notes/uncertain-notes-panel'
 import { DiffSummary } from '@/components/score/diff-summary'
@@ -12,6 +13,7 @@ import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Select } from '@/components/ui/select'
 import { apiClient } from '@/lib/api/client'
+import { formatStatus } from '@/lib/copy'
 import type { UncertainNoteDiagnosis } from '@/types/agents'
 import type { RevisionDiffSummary } from '@/types/revision'
 
@@ -30,7 +32,7 @@ export function WorkspacePage() {
   const revisionOptions = useMemo(
     () =>
       (revisionsQuery.data ?? []).map((revision) => ({
-        label: `r${revision.revision_number} · ${revision.revision_type}`,
+        label: `版本 ${revision.revision_number} · ${formatStatus(revision.revision_type).label}`,
         value: revision.id,
       })),
     [revisionsQuery.data],
@@ -40,19 +42,22 @@ export function WorkspacePage() {
     <div>
       <div className="mb-6 flex flex-col gap-4 xl:flex-row xl:items-center xl:justify-between">
         <div>
-          <h1 className="text-2xl font-semibold tracking-tight">Score Workspace</h1>
-          <p className="mt-1 text-sm text-muted-foreground">{projectQuery.data?.name ?? 'Lead-vocal transcription workspace'}</p>
+          <h1 className="text-2xl font-semibold tracking-tight">乐谱工作台</h1>
+          <p className="mt-1 text-sm text-muted-foreground">当前歌曲：{projectQuery.data?.name ?? '主唱旋律扒谱'}</p>
+          <p className="mt-1 text-xs text-muted-foreground">
+            当前乐谱版本用于检查、修正和导出；<GlossaryTerm term="MIDI" /> 与 <GlossaryTerm term="MusicXML" /> 都从它生成。
+          </p>
         </div>
         <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
           <Select className="min-w-64" value={selectedRevisionId} options={revisionOptions} onChange={() => undefined} />
           <Button variant="outline">
-            <FileMusic className="h-4 w-4" /> MusicXML
+            <FileMusic className="h-4 w-4" /> 导出 MusicXML
           </Button>
           <Button variant="outline">
-            <Download className="h-4 w-4" /> MIDI
+            <Download className="h-4 w-4" /> 导出 MIDI
           </Button>
           <Button variant="outline">
-            <FileJson className="h-4 w-4" /> score view JSON
+            <FileJson className="h-4 w-4" /> 导出前端显示数据
           </Button>
         </div>
       </div>
@@ -66,12 +71,12 @@ export function WorkspacePage() {
         <WaveformPlaceholder />
         <Card>
           <CardHeader>
-            <CardTitle>Debug Summary</CardTitle>
-            <CardDescription>只读诊断摘要，复杂 F0Track 不在 UI summary 中请求。</CardDescription>
+            <CardTitle>诊断摘要</CardTitle>
+            <CardDescription>这里只显示帮助听辨和修谱的摘要，不请求完整的人声音高轨迹。</CardDescription>
           </CardHeader>
           <CardContent className="space-y-3 text-sm">
-            <div className="rounded-lg border bg-muted/30 p-3">{diagnosisQuery.data?.summary ?? '等待诊断摘要'}</div>
-            <div className="rounded-lg border bg-muted/30 p-3">new revision id: {newRevisionId ?? '—'}</div>
+            <div className="rounded-lg border bg-muted/30 p-3">{diagnosisQuery.data?.summary ?? '正在等待诊断摘要'}</div>
+            <div className="rounded-lg border bg-muted/30 p-3">新乐谱版本：{newRevisionId ?? '—'}</div>
           </CardContent>
         </Card>
       </div>

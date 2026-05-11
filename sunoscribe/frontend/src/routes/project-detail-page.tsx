@@ -23,11 +23,11 @@ export function ProjectDetailPage() {
   return (
     <div>
       <PageHeader
-        title={project?.name ?? 'Project Detail'}
-        description="项目信息、当前分析状态、revision 和 artifact 摘要。"
+        title={project?.name ?? '歌曲详情'}
+        description="查看这首歌的处理进度、乐谱版本和系统生成的文件。"
         actions={
           <Button asChild disabled={!latestRevision}>
-            <Link to={`/workspace?project=${projectId}&revision=${latestRevision?.id ?? ''}`}>进入 Score Workspace</Link>
+            <Link to={`/workspace?project=${projectId}&revision=${latestRevision?.id ?? ''}`}>进入乐谱工作台</Link>
           </Button>
         }
       />
@@ -35,23 +35,23 @@ export function ProjectDetailPage() {
       <div className="grid gap-6 xl:grid-cols-[360px_1fr]">
         <Card>
           <CardHeader>
-            <CardTitle>项目信息</CardTitle>
-            <CardDescription>{project?.description}</CardDescription>
+            <CardTitle>歌曲信息</CardTitle>
+            <CardDescription>{project?.description ?? '这首歌的主唱旋律会被整理成可检查的乐谱版本。'}</CardDescription>
           </CardHeader>
           <CardContent className="space-y-3 text-sm">
-            <Detail label="project_id" value={project?.project_id ?? projectId} />
-            <Detail label="status" value={<StatusBadge status={project?.status} />} />
-            <Detail label="analysis_status" value={<StatusBadge status={project?.analysis_status} />} />
-            <Detail label="created_at" value={formatDateTime(project?.created_at)} />
-            <Detail label="latest_revision" value={project?.latest_revision ?? '—'} />
-            <Detail label="export_status" value={<StatusBadge status={project?.export_status} />} />
+            <Detail label="歌曲 ID" value={project?.project_id ?? projectId} />
+            <Detail label="处理状态" value={<StatusBadge status={project?.status} />} />
+            <Detail label="分析进度" value={<StatusBadge status={project?.analysis_status} />} />
+            <Detail label="上传时间" value={formatDateTime(project?.created_at)} />
+            <Detail label="最新乐谱版本" value={project?.latest_revision ?? '—'} />
+            <Detail label="导出文件" value={<StatusBadge status={project?.export_status} />} />
           </CardContent>
         </Card>
 
         <Card>
           <CardHeader>
-            <CardTitle>当前分析状态</CardTitle>
-            <CardDescription>typed data lineage 的阶段性占位展示。</CardDescription>
+            <CardTitle>这首歌处理到了哪一步？</CardTitle>
+            <CardDescription>成功表示该步骤已经留下可追踪结果；失败会显示明确原因，不会伪装成成功。</CardDescription>
           </CardHeader>
           <CardContent>
             <StageProgress stages={project?.stage_progress ?? []} />

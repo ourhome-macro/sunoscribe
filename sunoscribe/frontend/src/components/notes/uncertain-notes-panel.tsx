@@ -1,6 +1,7 @@
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
+import { formatPatchType } from '@/lib/copy'
 import { formatPercent } from '@/lib/utils'
 import type { UncertainNoteDiagnosis } from '@/types/agents'
 
@@ -15,20 +16,20 @@ export function UncertainNotesPanel({ notes, onSelectNote }: UncertainNotesPanel
   return (
     <Card className="h-full">
       <CardHeader>
-        <CardTitle>Uncertain Notes</CardTitle>
-        <CardDescription>来自 agent diagnose 与 ScoreRevision client summary。</CardDescription>
+        <CardTitle>需要确认的音符</CardTitle>
+        <CardDescription>这些音符可能有八度、时值或节拍问题。点一行可以听辨后快速修正。</CardDescription>
       </CardHeader>
       <CardContent>
         <Table>
           <TableHeader>
             <TableRow>
-              <TableHead>note_id</TableHead>
-              <TableHead>measure</TableHead>
-              <TableHead>beat</TableHead>
-              <TableHead>pitch</TableHead>
-              <TableHead>confidence</TableHead>
-              <TableHead>reason_codes</TableHead>
-              <TableHead>suggested_patch_types</TableHead>
+              <TableHead>音符 ID</TableHead>
+              <TableHead>第几小节</TableHead>
+              <TableHead>拍点</TableHead>
+              <TableHead>音高</TableHead>
+              <TableHead>可信度</TableHead>
+              <TableHead>为什么不确定</TableHead>
+              <TableHead>建议操作</TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
@@ -46,7 +47,7 @@ export function UncertainNotesPanel({ notes, onSelectNote }: UncertainNotesPanel
                   <div className="flex flex-wrap gap-1">
                     {note.suggested_patch_types.map((patchType) => (
                       <Button key={patchType} size="sm" variant="secondary" className="h-7 text-xs" onClick={(event) => event.preventDefault()}>
-                        {patchType}
+                        {formatPatchType(patchType).label}
                       </Button>
                     ))}
                   </div>

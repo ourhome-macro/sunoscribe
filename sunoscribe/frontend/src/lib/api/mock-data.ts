@@ -7,20 +7,20 @@ import type { ScoreRevisionSummary } from '@/types/revision'
 const now = new Date('2026-05-10T09:20:00+08:00')
 
 const stageProgress: StageProgressItem[] = [
-  { stage: 'Media Ingest', status: 'success', summary: 'canonical audio ready' },
-  { stage: 'StemService', status: 'success', summary: 'vocals/accompaniment registered' },
-  { stage: 'F0Track', status: 'success', summary: 'RMVPE summary artifact available' },
-  { stage: 'PitchContourIR', status: 'success', summary: 'voiced contour normalized' },
-  { stage: 'MelodySelector', status: 'success', summary: 'lead vocal candidates selected' },
-  { stage: 'DP Quantizer', status: 'success', summary: 'grid-aligned candidate path selected' },
-  { stage: 'ScoreIR', status: 'success', summary: 'machine revision created' },
-  { stage: 'Exports', status: 'success', summary: 'MIDI / MusicXML / view JSON derived from revision' },
+  { stage: 'Media Ingest', status: 'success', summary: '已把上传文件整理成统一音频。' },
+  { stage: 'StemService', status: 'success', summary: '已分离出主唱和伴奏摘要。' },
+  { stage: 'F0Track', status: 'success', summary: '已识别人声的音高轨迹摘要。' },
+  { stage: 'PitchContourIR', status: 'success', summary: '已整理连续的人声旋律线索。' },
+  { stage: 'MelodySelector', status: 'success', summary: '已选出最像主唱的旋律候选。' },
+  { stage: 'DP Quantizer', status: 'success', summary: '已把旋律对齐到拍子和小节。' },
+  { stage: 'ScoreIR', status: 'success', summary: '已生成机器乐谱版本。' },
+  { stage: 'Exports', status: 'success', summary: '已从当前乐谱版本导出文件。' },
 ]
 
 export const mockProjects: ProjectSummary[] = [
   {
     project_id: '6db4af60-1f69-4f74-b7c8-9c0e4c7fb101',
-    name: 'Mojito lead vocal transcription',
+    name: 'Mojito 主唱旋律',
     status: 'ready',
     created_at: '2026-05-08T20:24:00+08:00',
     latest_revision: '72a86fb1-7ba9-4ee3-91cb-0a3f63e63f10',
@@ -28,7 +28,7 @@ export const mockProjects: ProjectSummary[] = [
   },
   {
     project_id: '3b4a9ea4-4472-48af-8774-6baf2fb1a002',
-    name: 'Acoustic cover smoke sample',
+    name: '木吉他翻唱测试',
     status: 'processing',
     created_at: '2026-05-09T15:42:00+08:00',
     latest_revision: null,
@@ -36,7 +36,7 @@ export const mockProjects: ProjectSummary[] = [
   },
   {
     project_id: '7b1f6c71-1a0e-4e70-9385-6b972f8aa333',
-    name: 'Noisy live vocal test',
+    name: '现场噪声人声测试',
     status: 'failed',
     created_at: '2026-05-09T18:11:00+08:00',
     latest_revision: null,
@@ -183,20 +183,20 @@ export const mockArtifacts: PublicArtifactResponse[] = [
 
 export const mockProjectDetail: ProjectDetail = {
   ...mockProjects[0],
-  description: 'Lead-vocal transcription workspace. Exports are derived from the selected ScoreRevision.',
+  description: '这首歌已经生成主唱旋律乐谱，导出文件都来自当前选中的乐谱版本。',
   current_task_id: 'task-20260508-mojito',
   analysis_status: 'complete',
   stage_progress: stageProgress,
 }
 
 export const mockDiagnosis: AgentDiagnoseResponse = {
-  summary: '4 notes are marked uncertain or low-confidence in ScoreIR.',
+  summary: '有 4 个音符需要确认，主要集中在第 5-6 小节和第 21 小节。',
   section_findings: [],
   suspected_issues: [
     {
       code: 'low_confidence_cluster',
       severity: 'medium',
-      summary: 'Measures 5-6 contain clustered low-confidence notes.',
+      summary: '第 5-6 小节有连续的低可信度音符。',
       note_ids: ['n-018', 'n-021'],
       evidence: { region_count: 1 },
     },
@@ -215,14 +215,14 @@ export const mockDiagnosis: AgentDiagnoseResponse = {
   recommended_actions: [
     {
       action: 'Inspect uncertain notes before regenerating exports',
-      rationale: 'Patch operations create a new ScoreRevision and keep machine revision traceable.',
+      rationale: '修正音符会创建新的乐谱版本，并保留机器生成版本作为可追踪来源。',
     },
   ],
 }
 
 export const mockDiagnostics: DiagnosticsResponse = {
   derived_diagnostics: {
-    summary: 'Artifacts are available for ScoreIR-level diagnosis. Full F0Track is intentionally not requested by the UI.',
+    summary: '当前乐谱版本有足够的摘要用于诊断；前端只读取摘要，不请求完整人声音高轨迹。',
     f0_track_available: true,
     note_candidates_available: true,
     rhythm_grid_available: true,
@@ -259,7 +259,7 @@ export const mockDashboard = {
       task_id: 'task-20260509-live-noisy',
       project_id: '7b1f6c71-1a0e-4e70-9385-6b972f8aa333',
       stage: 'StemService',
-      reason: 'vocal separation dependency failed explicitly',
+      reason: '主唱分离依赖失败，任务已明确停止。',
       created_at: now.toISOString(),
     },
   ],

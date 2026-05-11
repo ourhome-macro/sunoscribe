@@ -13,11 +13,11 @@ export function ProjectsPage() {
   return (
     <div>
       <PageHeader
-        title="Projects"
-        description="项目列表展示分析状态、latest revision 与 revision-scoped export 状态。"
+        title="我的歌曲"
+        description="每一首歌都有自己的处理状态、最新乐谱版本和可导出的文件。"
         actions={
           <Button asChild>
-            <Link to="/upload">创建项目</Link>
+            <Link to="/upload">上传新歌曲</Link>
           </Button>
         }
       />
