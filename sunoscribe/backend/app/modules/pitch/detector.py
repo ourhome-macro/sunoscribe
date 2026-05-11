@@ -235,6 +235,7 @@ class PitchDetector:
             frequencies=freq_arr[:frame_count],
             confidences=conf_arr[:frame_count],
             duration_sec=float(duration_sec),
+            backend="rmvpe",
         )
 
     def _resolve_rmvpe_model_path(self) -> str | None:
@@ -652,6 +653,7 @@ class PitchDetector:
             frequencies=freq_arr,
             confidences=conf_arr,
             duration_sec=float(duration_sec),
+            backend=backend,
         )
 
     def _store_frame_artifacts(
@@ -680,7 +682,7 @@ class PitchDetector:
         time_arr = time_arr[:frame_count]
         freq_arr = freq_arr[:frame_count]
         conf_arr = np.clip(np.nan_to_num(conf_arr[:frame_count], nan=0.0, posinf=0.0, neginf=0.0), 0.0, 1.0)
-        voiced = self._voiced_mask_from_frames(freq_arr, conf_arr)
+        voiced = self._voiced_mask_from_frames(freq_arr, conf_arr, backend=backend)
         frame_hop_sec = self._estimate_frame_hop_sec(time_arr)
         vocal_activity = self._build_vocal_activity_segments(
             times=time_arr,
@@ -716,7 +718,12 @@ class PitchDetector:
                     "frame_hop_sec": round(float(frame_hop_sec), 6),
                     "voiced_frame_count": int(np.sum(voiced)),
                     "unvoiced_frame_count": int(frame_count - np.sum(voiced)),
-                    "voiced_confidence_threshold": float(self.config.crepe_vuv_confidence_threshold),
+                    "voiced_confidence_threshold": self._segmentation_param(
+                        backend,
+                        rmvpe_name="rmvpe_vuv_threshold",
+                        crepe_name="crepe_vuv_confidence_threshold",
+                    ),
+                    "segmentation_backend": self._segmentation_backend(backend),
                 },
             },
             "warnings": [],
@@ -792,17 +799,73 @@ class PitchDetector:
         frequencies: np.ndarray,
         confidences: np.ndarray,
         duration_sec: float,
+        backend: str | None = None,
     ) -> List[Note]:
-        voiced_threshold = max(0.0, min(1.0, float(self.config.crepe_vuv_confidence_threshold)))
-        min_note_duration = max(0.01, float(self.config.crepe_min_note_duration_sec))
-        min_voiced_frames = max(1, int(self.config.crepe_min_voiced_frames))
-        jump_threshold = max(0.05, float(self.config.crepe_pitch_jump_semitones))
-        smoothing_window = max(1, int(self.config.crepe_smoothing_window))
+        backend_key = self._segmentation_backend(backend)
+        voiced_threshold = max(
+            0.0,
+            min(
+                1.0,
+                self._segmentation_param(
+                    backend_key,
+                    rmvpe_name="rmvpe_vuv_threshold",
+                    crepe_name="crepe_vuv_confidence_threshold",
+                ),
+            ),
+        )
+        min_note_duration = max(
+            0.01,
+            self._segmentation_param(
+                backend_key,
+                rmvpe_name="rmvpe_min_note_duration_sec",
+                crepe_name="crepe_min_note_duration_sec",
+            ),
+        )
+        min_voiced_frames = max(
+            1,
+            int(
+                self._segmentation_param(
+                    backend_key,
+                    rmvpe_name="rmvpe_min_voiced_frames",
+                    crepe_name="crepe_min_voiced_frames",
+                )
+            ),
+        )
+        jump_threshold = max(
+            0.05,
+            self._segmentation_param(
+                backend_key,
+                rmvpe_name="rmvpe_pitch_jump_semitones",
+                crepe_name="crepe_pitch_jump_semitones",
+            ),
+        )
+        smoothing_window = max(
+            1,
+            int(
+                self._segmentation_param(
+                    backend_key,
+                    rmvpe_name="rmvpe_smoothing_window",
+                    crepe_name="crepe_smoothing_window",
+                )
+            ),
+        )
 
         frame_hop_sec = self._estimate_frame_hop_sec(times)
         max_unvoiced_gap_frames = max(
             0,
-            int(round(max(0.0, float(self.config.crepe_max_unvoiced_gap_sec)) / max(frame_hop_sec, 1e-4))),
+            int(
+                round(
+                    max(
+                        0.0,
+                        self._segmentation_param(
+                            backend_key,
+                            rmvpe_name="rmvpe_max_unvoiced_gap_sec",
+                            crepe_name="crepe_max_unvoiced_gap_sec",
+                        ),
+                    )
+                    / max(frame_hop_sec, 1e-4)
+                )
+            ),
         )
 
         midi = np.full(frequencies.shape, np.nan, dtype=float)
@@ -866,8 +929,8 @@ class PitchDetector:
             median_midi = float(np.median(seg_midi))
             mad_semitones = self._median_absolute_deviation(seg_midi, median_midi)
             span_semitones = self._pitch_span(seg_midi)
-            stability_factor = self._stability_factor(mad_semitones)
-            span_factor = self._span_factor(span_semitones)
+            stability_factor = self._stability_factor(mad_semitones, backend=backend_key)
+            span_factor = self._span_factor(span_semitones, backend=backend_key)
             quality_factor = max(0.0, min(1.0, 0.55 * stability_factor + 0.45 * span_factor))
             adjusted_conf = avg_conf * (0.35 + 0.65 * quality_factor)
 
@@ -903,13 +966,50 @@ class PitchDetector:
                 return float(np.median(diffs))
         return max(0.001, float(self.config.crepe_step_size_ms) / 1000.0)
 
-    def _voiced_mask_from_frames(self, frequencies: np.ndarray, confidences: np.ndarray) -> np.ndarray:
-        voiced_threshold = max(0.0, min(1.0, float(self.config.crepe_vuv_confidence_threshold)))
+    def _voiced_mask_from_frames(
+        self,
+        frequencies: np.ndarray,
+        confidences: np.ndarray,
+        *,
+        backend: str | None = None,
+    ) -> np.ndarray:
+        backend_key = self._segmentation_backend(backend)
+        voiced_threshold = max(
+            0.0,
+            min(
+                1.0,
+                self._segmentation_param(
+                    backend_key,
+                    rmvpe_name="rmvpe_vuv_threshold",
+                    crepe_name="crepe_vuv_confidence_threshold",
+                ),
+            ),
+        )
         voiced = (confidences >= voiced_threshold) & np.isfinite(frequencies) & (frequencies > 0.0)
-        frame_hop_sec = max(0.001, float(self.config.crepe_step_size_ms) / 1000.0)
+        frame_hop_sec = max(
+            0.001,
+            self._segmentation_param(
+                backend_key,
+                rmvpe_name="rmvpe_step_size_ms",
+                crepe_name="crepe_step_size_ms",
+            )
+            / 1000.0,
+        )
         max_unvoiced_gap_frames = max(
             0,
-            int(round(max(0.0, float(self.config.crepe_max_unvoiced_gap_sec)) / max(frame_hop_sec, 1e-4))),
+            int(
+                round(
+                    max(
+                        0.0,
+                        self._segmentation_param(
+                            backend_key,
+                            rmvpe_name="rmvpe_max_unvoiced_gap_sec",
+                            crepe_name="crepe_max_unvoiced_gap_sec",
+                        ),
+                    )
+                    / max(frame_hop_sec, 1e-4)
+                )
+            ),
         )
         return self._bridge_short_unvoiced(voiced, max_gap_frames=max_unvoiced_gap_frames)
 
@@ -997,23 +1097,67 @@ class PitchDetector:
         hi = float(np.percentile(values, 90))
         return max(0.0, hi - lo)
 
-    def _stability_factor(self, mad_semitones: float) -> float:
-        good = max(1e-6, float(self.config.crepe_note_mad_good_semitones))
-        bad = max(good + 1e-6, float(self.config.crepe_note_mad_bad_semitones))
+    def _stability_factor(self, mad_semitones: float, *, backend: str | None = None) -> float:
+        backend_key = self._segmentation_backend(backend)
+        good = max(
+            1e-6,
+            self._segmentation_param(
+                backend_key,
+                rmvpe_name="rmvpe_note_mad_good_semitones",
+                crepe_name="crepe_note_mad_good_semitones",
+            ),
+        )
+        bad = max(
+            good + 1e-6,
+            self._segmentation_param(
+                backend_key,
+                rmvpe_name="rmvpe_note_mad_bad_semitones",
+                crepe_name="crepe_note_mad_bad_semitones",
+            ),
+        )
         if mad_semitones <= good:
             return 1.0
         if mad_semitones >= bad:
             return 0.0
         return max(0.0, min(1.0, (bad - mad_semitones) / (bad - good)))
 
-    def _span_factor(self, span_semitones: float) -> float:
-        soft = max(1e-6, float(self.config.crepe_note_span_soft_semitones))
-        hard = max(soft + 1e-6, float(self.config.crepe_note_span_hard_semitones))
+    def _span_factor(self, span_semitones: float, *, backend: str | None = None) -> float:
+        backend_key = self._segmentation_backend(backend)
+        soft = max(
+            1e-6,
+            self._segmentation_param(
+                backend_key,
+                rmvpe_name="rmvpe_note_span_soft_semitones",
+                crepe_name="crepe_note_span_soft_semitones",
+            ),
+        )
+        hard = max(
+            soft + 1e-6,
+            self._segmentation_param(
+                backend_key,
+                rmvpe_name="rmvpe_note_span_hard_semitones",
+                crepe_name="crepe_note_span_hard_semitones",
+            ),
+        )
         if span_semitones <= soft:
             return 1.0
         if span_semitones >= hard:
             return 0.0
         return max(0.0, min(1.0, (hard - span_semitones) / (hard - soft)))
+
+    @staticmethod
+    def _segmentation_backend(backend: str | None) -> str:
+        value = str(backend or "").strip().lower()
+        if value in {"rmvpe", "r-mvpe", "rvc-rmvpe"}:
+            return "rmvpe"
+        return "crepe"
+
+    def _segmentation_param(self, backend: str | None, *, rmvpe_name: str, crepe_name: str) -> float:
+        if self._segmentation_backend(backend) == "rmvpe":
+            value = getattr(self.config, rmvpe_name, None)
+            if value is not None:
+                return float(value)
+        return float(getattr(self.config, crepe_name))
 
     def _predict_with_torchcrepe(
         self,

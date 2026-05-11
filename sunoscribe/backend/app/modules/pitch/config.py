@@ -22,7 +22,16 @@ class PitchDetectionConfig:
     rmvpe_model_path: str | None = None
     rmvpe_sample_rate: int = 16000
     rmvpe_step_size_ms: int = 10
-    rmvpe_vuv_threshold: float = 0.03
+    rmvpe_vuv_threshold: float = 0.30
+    rmvpe_min_note_duration_sec: float = 0.08
+    rmvpe_min_voiced_frames: int = 3
+    rmvpe_pitch_jump_semitones: float = 1.2
+    rmvpe_max_unvoiced_gap_sec: float = 0.03
+    rmvpe_smoothing_window: int = 7
+    rmvpe_note_mad_good_semitones: float = 0.25
+    rmvpe_note_mad_bad_semitones: float = 1.6
+    rmvpe_note_span_soft_semitones: float = 1.2
+    rmvpe_note_span_hard_semitones: float = 6.0
 
     # CREPE settings
     crepe_model_capacity: str = "full"  # tiny/small/medium/large/full

@@ -62,11 +62,17 @@ METRIC_SPECS = (
     MetricSpec("dtw_recall", (("alignment", "dtw", "dtw_pitch_match_recall_proxy"),)),
     MetricSpec("coverage", (("audibility", "midi_coverage_ratio"), ("diagnostics", "coverage", "midi_coverage_ratio"))),
     MetricSpec("first_delay", (("audibility", "first_note_delay_sec"),)),
+    MetricSpec("gap50_ratio", (("metrics", "gap50_ratio"), ("continuity", "gap50_ratio"), ("diagnostics", "continuity", "gap50_ratio"))),
+    MetricSpec("big_gap_count", (("metrics", "big_gap_count"), ("continuity", "big_gap_count"), ("diagnostics", "continuity", "big_gap_count"))),
+    MetricSpec("short_note_ratio", (("metrics", "short_note_ratio"), ("continuity", "short_note_ratio"), ("diagnostics", "continuity", "short_note_ratio"))),
+    MetricSpec("large_jump_ratio", (("metrics", "large_jump_ratio"), ("continuity", "large_jump_ratio"), ("diagnostics", "continuity", "large_jump_ratio"))),
 )
 
 DIAGNOSTIC_METRIC_SPECS = (
     MetricSpec("predicted_note_count", (("notes", "predicted_note_count"), ("quantized_notes", "note_count"))),
     MetricSpec("predicted_short_note_ratio", (("notes", "predicted_short_note_ratio"),)),
+    MetricSpec("diagnostic_gap50_ratio", (("notes", "predicted_gap50_ratio"), ("continuity", "gap50_ratio"))),
+    MetricSpec("diagnostic_large_jump_ratio", (("notes", "predicted_large_jump_ratio"), ("continuity", "large_jump_ratio"))),
     MetricSpec(
         "fragmentation",
         (
@@ -158,8 +164,8 @@ def render_markdown_report(report: dict[str, Any]) -> str:
             continue
         lines.extend(
             [
-                "| Sample | Status | Δ Recall | Δ Matched | Δ Coverage | Δ First Delay | Notes |",
-                "| --- | --- | ---: | ---: | ---: | ---: | --- |",
+                "| Sample | Status | Delta Recall | Delta Matched | Delta Coverage | Delta Gap50 | Delta Short Notes | Delta Large Jumps | Delta First Delay | Notes |",
+                "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |",
             ]
         )
         for item in items:
@@ -167,13 +173,16 @@ def render_markdown_report(report: dict[str, Any]) -> str:
             reasons = item.get("manual_review_reasons") if isinstance(item.get("manual_review_reasons"), list) else []
             notes = "; ".join(str(reason) for reason in reasons[:3]) or _diagnostic_change_note(item)
             lines.append(
-                "| {sample} | {old} → {new} | {recall} | {matched} | {coverage} | {delay} | {notes} |".format(
+                "| {sample} | {old} -> {new} | {recall} | {matched} | {coverage} | {gap50} | {short_notes} | {large_jumps} | {delay} | {notes} |".format(
                     sample=_escape_md(str(item.get("sample_id", UNAVAILABLE))),
                     old=_escape_md(str(item.get("old_status", UNAVAILABLE))),
                     new=_escape_md(str(item.get("new_status", UNAVAILABLE))),
                     recall=_format_delta(deltas.get("recall")),
                     matched=_format_delta(deltas.get("matched")),
                     coverage=_format_delta(deltas.get("coverage")),
+                    gap50=_format_delta(deltas.get("gap50_ratio")),
+                    short_notes=_format_delta(deltas.get("short_note_ratio")),
+                    large_jumps=_format_delta(deltas.get("large_jump_ratio")),
                     delay=_format_delta(deltas.get("first_delay")),
                     notes=_escape_md(notes),
                 )

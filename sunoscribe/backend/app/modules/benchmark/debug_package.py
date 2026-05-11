@@ -14,6 +14,7 @@ from .midi_metrics import (
     NoteEvent,
     compute_midi_alignment_diagnostics,
     compute_midi_audibility_metrics,
+    compute_midi_continuity_metrics,
     compute_midi_metrics,
     extract_reference_melody_notes,
     find_midi_track_index_by_name,
@@ -543,6 +544,7 @@ def build_derived_diagnostics(
     )
     return {
         "notes": notes,
+        "continuity": compute_midi_continuity_metrics(predicted_notes).to_dict(),
         "f0": f0,
         "pitch_contours": pitch_contours,
         "vocal_activity": vocal_activity,
@@ -1561,6 +1563,7 @@ def _computed_metrics_payload(
 ) -> dict[str, Any]:
     metrics = compute_midi_metrics(expected_notes, predicted_notes, config=metric_config)
     audibility = compute_midi_audibility_metrics(expected_notes, predicted_notes)
+    continuity = compute_midi_continuity_metrics(predicted_notes)
     alignment = compute_midi_alignment_diagnostics(expected_notes, predicted_notes, config=metric_config)
     return {
         "sample_id": sample.id,
@@ -1573,6 +1576,7 @@ def _computed_metrics_payload(
         "config": asdict(metric_config),
         "metrics": metrics.to_dict(),
         "audibility": audibility.to_dict(),
+        "continuity": continuity.to_dict(),
         "alignment": alignment.to_dict(),
     }
 
@@ -1606,6 +1610,7 @@ def _midi_pitch_name(pitch: int) -> str:
 def _derive_note_diagnostics(expected_notes: list[NoteEvent], predicted_notes: list[NoteEvent]) -> dict[str, Any]:
     expected_stats = _note_collection_stats(expected_notes)
     predicted_stats = _note_collection_stats(predicted_notes)
+    predicted_continuity = compute_midi_continuity_metrics(predicted_notes).to_dict()
     expected_span = expected_stats["time_span_sec"]
     predicted_span = predicted_stats["time_span_sec"]
     expected_median_pitch = expected_stats["median_pitch"]
@@ -1638,6 +1643,15 @@ def _derive_note_diagnostics(expected_notes: list[NoteEvent], predicted_notes: l
         "expected_median_pitch": expected_median_pitch,
         "predicted_median_pitch": predicted_median_pitch,
         "median_pitch_delta": median_pitch_delta,
+        "predicted_gap50_ratio": predicted_continuity["gap50_ratio"],
+        "predicted_gap50_count": predicted_continuity["gap50_count"],
+        "predicted_big_gap_count": predicted_continuity["big_gap_count"],
+        "predicted_big_gap_ratio": predicted_continuity["big_gap_ratio"],
+        "predicted_longest_inter_note_gap_sec": predicted_continuity["longest_inter_note_gap_sec"],
+        "predicted_mean_inter_note_gap_sec": predicted_continuity["mean_inter_note_gap_sec"],
+        "predicted_large_jump_count": predicted_continuity["large_jump_count"],
+        "predicted_large_jump_ratio": predicted_continuity["large_jump_ratio"],
+        "predicted_max_abs_pitch_jump_semitones": predicted_continuity["max_abs_pitch_jump_semitones"],
     }
 
 
@@ -3414,6 +3428,7 @@ def _draw_derived_diagnostics_box(axis: Any, derived_diagnostics: dict[str, Any]
         return
     notes = derived_diagnostics.get("notes") if isinstance(derived_diagnostics.get("notes"), dict) else {}
     match = derived_diagnostics.get("match") if isinstance(derived_diagnostics.get("match"), dict) else {}
+    continuity = derived_diagnostics.get("continuity") if isinstance(derived_diagnostics.get("continuity"), dict) else {}
     pitch_distribution = derived_diagnostics.get("pitch_distribution") if isinstance(derived_diagnostics.get("pitch_distribution"), dict) else {}
     pairwise = pitch_distribution.get("pairwise") if isinstance(pitch_distribution.get("pairwise"), dict) else {}
     expected_vs_predicted = pairwise.get("expected_vs_predicted") if isinstance(pairwise.get("expected_vs_predicted"), dict) else {}
@@ -3422,6 +3437,9 @@ def _draw_derived_diagnostics_box(axis: Any, derived_diagnostics: dict[str, Any]
         [
             f"expected={_fmt(notes.get('expected_note_count'))}",
             f"predicted={_fmt(notes.get('predicted_note_count'))}",
+            f"gap50={_fmt(continuity.get('gap50_ratio'))}",
+            f"short={_fmt(continuity.get('short_note_ratio'))}",
+            f"jump={_fmt(continuity.get('large_jump_ratio'))}",
             f"raw_matched={_fmt(match.get('raw_matched_count'))}",
             f"shift_matched={_fmt(match.get('shift_matched_count'))}",
             f"exp_med={_fmt((pitch_distribution.get('expected_notes') or {}).get('median_pitch'))}",
@@ -3633,6 +3651,7 @@ def _derived_diagnostics_markdown_lines(derived_diagnostics: dict[str, Any] | No
     selected_melody = derived_diagnostics.get("selected_melody") if isinstance(derived_diagnostics.get("selected_melody"), dict) else {}
     quantized_notes = derived_diagnostics.get("quantized_notes") if isinstance(derived_diagnostics.get("quantized_notes"), dict) else {}
     rhythm = derived_diagnostics.get("rhythm") if isinstance(derived_diagnostics.get("rhythm"), dict) else {}
+    continuity = derived_diagnostics.get("continuity") if isinstance(derived_diagnostics.get("continuity"), dict) else {}
     short_note_diagnostics = derived_diagnostics.get("short_note_diagnostics") if isinstance(derived_diagnostics.get("short_note_diagnostics"), dict) else {}
     note_funnel = derived_diagnostics.get("note_funnel") if isinstance(derived_diagnostics.get("note_funnel"), dict) else {}
     note_funnel_layers = note_funnel.get("layers") if isinstance(note_funnel.get("layers"), dict) else {}
@@ -3662,6 +3681,16 @@ def _derived_diagnostics_markdown_lines(derived_diagnostics: dict[str, Any] | No
         f"- expected_short_note_ratio: {_fmt(notes.get('expected_short_note_ratio'))}",
         f"- predicted_short_note_ratio: {_fmt(notes.get('predicted_short_note_ratio'))}",
         f"- pred_exp_note_count_ratio: {_fmt(notes.get('pred_exp_note_count_ratio'))}",
+        "### Continuity Diagnostics",
+        f"- gap50_ratio: {_fmt(continuity.get('gap50_ratio'))}",
+        f"- gap50_count: {_fmt(continuity.get('gap50_count'))}",
+        f"- big_gap_count: {_fmt(continuity.get('big_gap_count'))}",
+        f"- big_gap_ratio: {_fmt(continuity.get('big_gap_ratio'))}",
+        f"- longest_inter_note_gap_sec: {_fmt(continuity.get('longest_inter_note_gap_sec'))}",
+        f"- short_note_ratio: {_fmt(continuity.get('short_note_ratio'))}",
+        f"- large_jump_count: {_fmt(continuity.get('large_jump_count'))}",
+        f"- large_jump_ratio: {_fmt(continuity.get('large_jump_ratio'))}",
+        f"- max_abs_pitch_jump_semitones: {_fmt(continuity.get('max_abs_pitch_jump_semitones'))}",
         "### Time Overlap",
         f"- expected_time_span_sec: {_fmt(notes.get('expected_time_span_sec'))}",
         f"- predicted_time_span_sec: {_fmt(notes.get('predicted_time_span_sec'))}",

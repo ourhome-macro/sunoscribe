@@ -25,6 +25,7 @@ from app.modules.benchmark import (
     build_dataset_report,
     compute_midi_alignment_diagnostics,
     compute_midi_audibility_metrics,
+    compute_midi_continuity_metrics,
     compute_midi_metrics,
     extract_reference_melody_notes,
     find_midi_track_index_by_name,
@@ -355,9 +356,10 @@ def _compute_metrics_stage(
         predicted_notes = read_midi_notes(produced_midi_path, track_index=predicted_lead_track)
         metrics = compute_midi_metrics(expected_notes, predicted_notes, config=metric_config)
         audibility = compute_midi_audibility_metrics(expected_notes, predicted_notes)
+        continuity = compute_midi_continuity_metrics(predicted_notes)
         alignment = compute_midi_alignment_diagnostics(expected_notes, predicted_notes, config=metric_config)
-        diagnostics = build_midi_diagnostics(metrics, audibility, alignment)
-        failure_modes = infer_midi_failure_modes(metrics, audibility, alignment)
+        diagnostics = build_midi_diagnostics(metrics, audibility, alignment, continuity)
+        failure_modes = infer_midi_failure_modes(metrics, audibility, alignment, continuity)
         hook_track = next(
             (track for track in predicted_tracks if str(track.name or "").strip().lower() == "instrumental hook"),
             None,
@@ -376,6 +378,7 @@ def _compute_metrics_stage(
             "predicted_tracks": [track.to_dict() for track in predicted_tracks],
             "metrics": metrics.to_dict(),
             "audibility": audibility.to_dict(),
+            "continuity": continuity.to_dict(),
             "alignment": alignment.to_dict(),
             "diagnostics": diagnostics,
             "suspected_failure_modes": failure_modes,
@@ -391,6 +394,7 @@ def _compute_metrics_stage(
                     "expected_reference_extraction": reference_extraction.to_dict(),
                     "metrics": metrics.to_dict(),
                     "audibility": audibility.to_dict(),
+                    "continuity": continuity.to_dict(),
                     "alignment": alignment.to_dict(),
                     "suspected_failure_modes": failure_modes,
                 },
@@ -416,6 +420,7 @@ def _quality_gate_stage(*, metrics_payload: dict[str, Any]) -> tuple[StageRecord
     start = time.perf_counter()
     metrics = metrics_payload.get("metrics") or {}
     audibility = metrics_payload.get("audibility") or {}
+    continuity = metrics_payload.get("continuity") or {}
     coverage_threshold = _effective_midi_coverage_threshold(metrics)
     checks = [
         _quality_check_max(
@@ -456,6 +461,12 @@ def _quality_gate_stage(*, metrics_payload: dict[str, Any]) -> tuple[StageRecord
             "note_precision": metrics.get("note_precision"),
             "pitch_accuracy": metrics.get("pitch_accuracy"),
             "octave_error_rate": metrics.get("octave_error_rate"),
+            "gap50_ratio": continuity.get("gap50_ratio"),
+            "big_gap_count": continuity.get("big_gap_count"),
+            "short_note_ratio": continuity.get("short_note_ratio"),
+            "large_jump_ratio": continuity.get("large_jump_ratio"),
+            "median_pitch": continuity.get("median_pitch"),
+            "pitch_range": continuity.get("pitch_range"),
         },
         "suspected_failure_modes": metrics_payload.get("suspected_failure_modes") or [],
     }
@@ -558,6 +569,7 @@ def _summary_result_row(result: SampleRunResult) -> dict[str, Any]:
         "metrics": metrics,
         "audibility": metric_payload.get("audibility") if result.metrics else None,
         "alignment": metric_payload.get("alignment") if result.metrics else None,
+        "continuity": metric_payload.get("continuity") if result.metrics else None,
         "diagnostics": metric_payload.get("diagnostics") if result.metrics else None,
         "suspected_failure_modes": metric_payload.get("suspected_failure_modes") if result.metrics else [],
         "quality_gate": result.quality_gate,
@@ -578,6 +590,18 @@ def _summary_metrics_with_quality_fields(metrics_payload: dict[str, Any]) -> dic
         for key in ("midi_coverage_ratio", "first_note_delay_sec"):
             if metrics.get(key) is None and audibility.get(key) is not None:
                 metrics[key] = audibility.get(key)
+    continuity = metrics_payload.get("continuity") or {}
+    if isinstance(continuity, dict):
+        for key in (
+            "gap50_ratio",
+            "big_gap_count",
+            "short_note_ratio",
+            "large_jump_ratio",
+            "median_pitch",
+            "pitch_range",
+        ):
+            if metrics.get(key) is None and continuity.get(key) is not None:
+                metrics[key] = continuity.get(key)
     return metrics
 
 
@@ -694,6 +718,12 @@ def _reference_review_sample(row: dict[str, Any]) -> dict[str, Any]:
         "shift_matched_gain": alignment.get("shift_matched_gain"),
         "alignment_diagnosis": alignment_diagnosis,
         "first_note_delay_sec": first_delay,
+        "gap50_ratio": metrics.get("gap50_ratio"),
+        "big_gap_count": metrics.get("big_gap_count"),
+        "short_note_ratio": metrics.get("short_note_ratio"),
+        "large_jump_ratio": metrics.get("large_jump_ratio"),
+        "predicted_pitch_range": metrics.get("pitch_range"),
+        "predicted_median_pitch": metrics.get("median_pitch"),
         "quality_status": row.get("status"),
         "quality_failed_checks": [check.get("name") for check in ((row.get("quality_gate") or {}).get("failed_checks") or [])],
     }
@@ -719,20 +749,23 @@ def _summary_markdown(summary: dict[str, Any]) -> str:
         f"- Comparable mean pitch accuracy: `{aggregate.get('pitch_accuracy_mean')}`",
         f"- Comparable mean MIDI coverage: `{aggregate.get('midi_coverage_ratio_mean')}`",
         f"- Comparable mean first-note delay: `{aggregate.get('first_note_delay_sec_mean')}`",
+        f"- Comparable mean gap50 ratio: `{aggregate.get('gap50_ratio_mean')}`",
+        f"- Comparable mean short-note ratio: `{aggregate.get('short_note_ratio_mean')}`",
+        f"- Comparable mean large-jump ratio: `{aggregate.get('large_jump_ratio_mean')}`",
         f"- Readiness: `{readiness.get('status', 'not_checked')}`",
         f"- Reference suspect: `{reference_counts.get('reference_suspect', 0)}`",
         f"- Likely comparable: `{reference_counts.get('likely_comparable', 0)}`",
         f"- Needs manual review: `{reference_counts.get('needs_manual_review', 0)}`",
         "",
-        "| Sample | Status | Reference Status | Reference Reasons | Raw F1 | Raw Recall | Raw Matched | Raw Coverage | Shift s | Shift Recall | Shift F1 | Shift Matched | Shift Coverage | Shift Diagnosis | First Delay s | Best Oct Rec | Best Time Rec | DTW Rec | Pitch Acc | Failure Modes | Error |",
-        "| --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- | ---: | ---: | ---: | ---: | ---: | --- | --- |",
+        "| Sample | Status | Reference Status | Reference Reasons | Raw F1 | Raw Recall | Raw Matched | Raw Coverage | Gap50 | Big Gaps | Short Notes | Large Jumps | Shift s | Shift Recall | Shift F1 | Shift Matched | Shift Coverage | Shift Diagnosis | First Delay s | Best Oct Rec | Best Time Rec | DTW Rec | Pitch Acc | Failure Modes | Error |",
+        "| --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- | ---: | ---: | ---: | ---: | ---: | --- | --- |",
     ]
     for result in results:
         metrics = result.get("metrics") or {}
         alignment = result.get("alignment") or {}
         error = result.get("error") or {}
         lines.append(
-            "| {sample} | {status} | {reference_status} | {reference_reasons} | {f1} | {recall} | {matched} | {coverage} | {shift} | {shift_recall} | {shift_f1} | {shift_matched} | {shift_coverage} | {shift_diagnosis} | {delay} | {best_oct} | {best_time} | {dtw_rec} | {pitch} | {modes} | {error} |".format(
+            "| {sample} | {status} | {reference_status} | {reference_reasons} | {f1} | {recall} | {matched} | {coverage} | {gap50} | {big_gaps} | {short_notes} | {large_jumps} | {shift} | {shift_recall} | {shift_f1} | {shift_matched} | {shift_coverage} | {shift_diagnosis} | {delay} | {best_oct} | {best_time} | {dtw_rec} | {pitch} | {modes} | {error} |".format(
                 sample=result.get("sample_id"),
                 status=result.get("status"),
                 reference_status=result.get("reference_status") or "",
@@ -741,6 +774,10 @@ def _summary_markdown(summary: dict[str, Any]) -> str:
                 recall=_fmt_metric(metrics.get("note_recall")),
                 matched=metrics.get("matched_note_count") if metrics else "",
                 coverage=_fmt_metric(metrics.get("midi_coverage_ratio")),
+                gap50=_fmt_metric(metrics.get("gap50_ratio")),
+                big_gaps=metrics.get("big_gap_count") if metrics else "",
+                short_notes=_fmt_metric(metrics.get("short_note_ratio")),
+                large_jumps=_fmt_metric(metrics.get("large_jump_ratio")),
                 shift=_fmt_metric(alignment.get("pred_to_exp_shift_sec")),
                 shift_recall=_fmt_metric(alignment.get("shift_corrected_recall")),
                 shift_f1=_fmt_metric(alignment.get("shift_corrected_f1")),
@@ -784,7 +821,17 @@ def _summary_markdown(summary: dict[str, Any]) -> str:
 
 
 def _aggregate_metrics(metrics_values: list[dict[str, Any]], *, metric_payloads: list[dict[str, Any]] | None = None) -> dict[str, Any]:
-    keys = ["note_precision", "note_recall", "note_f1", "pitch_accuracy", "duration_overlap", "octave_error_rate"]
+    keys = [
+        "note_precision",
+        "note_recall",
+        "note_f1",
+        "pitch_accuracy",
+        "duration_overlap",
+        "octave_error_rate",
+        "gap50_ratio",
+        "short_note_ratio",
+        "large_jump_ratio",
+    ]
     aggregate: dict[str, Any] = {"metric_sample_count": len(metrics_values)}
     for key in keys:
         values = [float(metrics[key]) for metrics in metrics_values if metrics.get(key) is not None]
@@ -891,9 +938,10 @@ def _sample_logging_context(*, logs: dict[str, str]):
 def _write_quality_diagnostics(*, run_root: Path, results: list[SampleRunResult]) -> None:
     samples: list[dict[str, Any]] = []
     for result in results:
-        metrics = result.metrics.get("metrics") if result.metrics else None
+        metrics = _summary_metrics_with_quality_fields(result.metrics or {}) if result.metrics else None
         audibility = result.metrics.get("audibility") if result.metrics else None
         alignment = result.metrics.get("alignment") if result.metrics else None
+        continuity = result.metrics.get("continuity") if result.metrics else None
         samples.append(
             {
                 "sample_id": result.sample_id,
@@ -908,6 +956,7 @@ def _write_quality_diagnostics(*, run_root: Path, results: list[SampleRunResult]
                 "metrics": metrics,
                 "audibility": audibility,
                 "alignment": alignment,
+                "continuity": continuity,
                 "diagnostics": result.metrics.get("diagnostics") if result.metrics else None,
                 "quality_gate": result.quality_gate,
                 "suspected_failure_modes": result.metrics.get("suspected_failure_modes") if result.metrics else [],
@@ -960,11 +1009,14 @@ def _quality_diagnostics_markdown(payload: dict[str, Any]) -> str:
         f"- Comparable metric samples: `{aggregate.get('metric_sample_count')}`",
         f"- Excluded metric samples: `{aggregate.get('excluded_metric_sample_count')}`",
         f"- Comparable overall F1: `{aggregate.get('overall_f1')}`",
+        f"- Comparable mean gap50 ratio: `{aggregate.get('gap50_ratio_mean')}`",
+        f"- Comparable mean short-note ratio: `{aggregate.get('short_note_ratio_mean')}`",
+        f"- Comparable mean large-jump ratio: `{aggregate.get('large_jump_ratio_mean')}`",
         "",
         "## Worst By Note F1",
         "",
-        "| Sample | Status | Reference Status | Reference Reasons | Raw F1 | Raw Recall | Raw Matched | Raw Coverage | Shift s | Shift Recall | Shift F1 | Shift Diagnosis | First Delay s | Best Oct Rec | Best Time Rec | DTW Rec | Failure Modes |",
-        "| --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- | ---: | ---: | ---: | ---: | --- |",
+        "| Sample | Status | Reference Status | Reference Reasons | Raw F1 | Raw Recall | Raw Matched | Raw Coverage | Gap50 | Big Gaps | Short Notes | Large Jumps | Shift s | Shift Recall | Shift F1 | Shift Diagnosis | First Delay s | Best Oct Rec | Best Time Rec | DTW Rec | Failure Modes |",
+        "| --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- | ---: | ---: | ---: | ---: | --- |",
     ]
     for sample in sorted(metric_samples, key=lambda item: _sort_float((item.get("metrics") or {}).get("note_f1")))[:20]:
         lines.append(_quality_table_row(sample))
@@ -973,8 +1025,8 @@ def _quality_diagnostics_markdown(payload: dict[str, Any]) -> str:
             "",
             "## Worst By MIDI Coverage",
             "",
-            "| Sample | Status | Reference Status | Reference Reasons | Raw F1 | Raw Recall | Raw Matched | Raw Coverage | Shift s | Shift Recall | Shift F1 | Shift Diagnosis | First Delay s | Best Oct Rec | Best Time Rec | DTW Rec | Failure Modes |",
-            "| --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- | ---: | ---: | ---: | ---: | --- |",
+            "| Sample | Status | Reference Status | Reference Reasons | Raw F1 | Raw Recall | Raw Matched | Raw Coverage | Gap50 | Big Gaps | Short Notes | Large Jumps | Shift s | Shift Recall | Shift F1 | Shift Diagnosis | First Delay s | Best Oct Rec | Best Time Rec | DTW Rec | Failure Modes |",
+            "| --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- | ---: | ---: | ---: | ---: | --- |",
         ]
     )
     for sample in sorted(metric_samples, key=lambda item: _sort_float((item.get("metrics") or {}).get("midi_coverage_ratio")))[:20]:
@@ -984,8 +1036,8 @@ def _quality_diagnostics_markdown(payload: dict[str, Any]) -> str:
             "",
             "## Worst By First-Note Delay",
             "",
-            "| Sample | Status | Reference Status | Reference Reasons | Raw F1 | Raw Recall | Raw Matched | Raw Coverage | Shift s | Shift Recall | Shift F1 | Shift Diagnosis | First Delay s | Best Oct Rec | Best Time Rec | DTW Rec | Failure Modes |",
-            "| --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- | ---: | ---: | ---: | ---: | --- |",
+            "| Sample | Status | Reference Status | Reference Reasons | Raw F1 | Raw Recall | Raw Matched | Raw Coverage | Gap50 | Big Gaps | Short Notes | Large Jumps | Shift s | Shift Recall | Shift F1 | Shift Diagnosis | First Delay s | Best Oct Rec | Best Time Rec | DTW Rec | Failure Modes |",
+            "| --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- | ---: | ---: | ---: | ---: | --- |",
         ]
     )
     for sample in sorted(
@@ -1005,7 +1057,7 @@ def _quality_diagnostics_markdown(payload: dict[str, Any]) -> str:
 def _quality_table_row(sample: dict[str, Any]) -> str:
     metrics = sample.get("metrics") or {}
     alignment = sample.get("alignment") or {}
-    return "| {sample_id} | {status} | {reference_status} | {reference_reasons} | {f1} | {recall} | {matched} | {coverage} | {shift} | {shift_recall} | {shift_f1} | {shift_diagnosis} | {delay} | {best_oct} | {best_time} | {dtw_rec} | {modes} |".format(
+    return "| {sample_id} | {status} | {reference_status} | {reference_reasons} | {f1} | {recall} | {matched} | {coverage} | {gap50} | {big_gaps} | {short_notes} | {large_jumps} | {shift} | {shift_recall} | {shift_f1} | {shift_diagnosis} | {delay} | {best_oct} | {best_time} | {dtw_rec} | {modes} |".format(
         sample_id=sample.get("sample_id"),
         status=sample.get("status"),
         reference_status=sample.get("reference_status") or "",
@@ -1014,6 +1066,10 @@ def _quality_table_row(sample: dict[str, Any]) -> str:
         recall=_fmt_metric(metrics.get("note_recall")),
         matched=metrics.get("matched_note_count"),
         coverage=_fmt_metric(metrics.get("midi_coverage_ratio")),
+        gap50=_fmt_metric(metrics.get("gap50_ratio")),
+        big_gaps=metrics.get("big_gap_count") if metrics else "",
+        short_notes=_fmt_metric(metrics.get("short_note_ratio")),
+        large_jumps=_fmt_metric(metrics.get("large_jump_ratio")),
         shift=_fmt_metric(alignment.get("pred_to_exp_shift_sec")),
         shift_recall=_fmt_metric(alignment.get("shift_corrected_recall")),
         shift_f1=_fmt_metric(alignment.get("shift_corrected_f1")),

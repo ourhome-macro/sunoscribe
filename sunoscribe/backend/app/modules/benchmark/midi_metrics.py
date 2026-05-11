@@ -7,6 +7,11 @@ from pathlib import Path
 from typing import Any
 
 
+MIDI_FAILURE_FRAGMENTED_MELODY_GAPS = "fragmented_melody_gaps"
+MIDI_FAILURE_EXCESSIVE_SHORT_NOTES = "excessive_short_notes"
+MIDI_FAILURE_LARGE_PITCH_JUMPS = "large_pitch_jumps"
+
+
 class MidiReadError(RuntimeError):
     """Raised when a MIDI file cannot be read for benchmark metrics."""
 
@@ -91,6 +96,32 @@ class MidiAudibilityMetrics:
     velocity_min: int | None
     velocity_mean: float | None
     velocity_max: int | None
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(frozen=True, slots=True)
+class MidiContinuityMetrics:
+    note_count: int
+    adjacent_pair_count: int
+    gap_threshold_sec: float
+    gap50_count: int
+    gap50_ratio: float
+    big_gap_threshold_sec: float
+    big_gap_count: int
+    big_gap_ratio: float
+    longest_inter_note_gap_sec: float | None
+    mean_inter_note_gap_sec: float | None
+    short_note_threshold_sec: float
+    short_note_count: int
+    short_note_ratio: float
+    large_jump_threshold_semitones: int
+    large_jump_count: int
+    large_jump_ratio: float
+    max_abs_pitch_jump_semitones: int | None
+    median_pitch: float | None
+    pitch_range: list[int | None]
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -560,6 +591,47 @@ def compute_midi_audibility_metrics(
     )
 
 
+def compute_midi_continuity_metrics(
+    notes: list[NoteEvent],
+    *,
+    gap_threshold_sec: float = 0.05,
+    big_gap_threshold_sec: float = 0.5,
+    short_note_threshold_sec: float = 0.18,
+    large_jump_threshold_semitones: int = 7,
+) -> MidiContinuityMetrics:
+    ordered_notes = sorted(notes, key=lambda note: (note.start, note.end, note.pitch))
+    adjacent_pair_count = max(0, len(ordered_notes) - 1)
+    gaps = [max(0.0, ordered_notes[index + 1].start - ordered_notes[index].end) for index in range(adjacent_pair_count)]
+    pitch_jumps = [abs(int(ordered_notes[index + 1].pitch) - int(ordered_notes[index].pitch)) for index in range(adjacent_pair_count)]
+    durations = [note.duration for note in ordered_notes]
+
+    gap_count = sum(1 for gap in gaps if gap > gap_threshold_sec)
+    big_gap_count = sum(1 for gap in gaps if gap > big_gap_threshold_sec)
+    short_note_count = sum(1 for duration in durations if duration < short_note_threshold_sec)
+    large_jump_count = sum(1 for jump in pitch_jumps if jump >= large_jump_threshold_semitones)
+    return MidiContinuityMetrics(
+        note_count=len(ordered_notes),
+        adjacent_pair_count=adjacent_pair_count,
+        gap_threshold_sec=float(gap_threshold_sec),
+        gap50_count=gap_count,
+        gap50_ratio=_safe_div(gap_count, adjacent_pair_count),
+        big_gap_threshold_sec=float(big_gap_threshold_sec),
+        big_gap_count=big_gap_count,
+        big_gap_ratio=_safe_div(big_gap_count, adjacent_pair_count),
+        longest_inter_note_gap_sec=max(gaps) if gaps else None,
+        mean_inter_note_gap_sec=(sum(gaps) / len(gaps)) if gaps else None,
+        short_note_threshold_sec=float(short_note_threshold_sec),
+        short_note_count=short_note_count,
+        short_note_ratio=_safe_div(short_note_count, len(ordered_notes)),
+        large_jump_threshold_semitones=int(large_jump_threshold_semitones),
+        large_jump_count=large_jump_count,
+        large_jump_ratio=_safe_div(large_jump_count, adjacent_pair_count),
+        max_abs_pitch_jump_semitones=max(pitch_jumps) if pitch_jumps else None,
+        median_pitch=_median_pitch(ordered_notes),
+        pitch_range=_pitch_range(ordered_notes),
+    )
+
+
 def compute_midi_alignment_diagnostics(
     expected_notes: list[NoteEvent],
     predicted_notes: list[NoteEvent],
@@ -656,6 +728,7 @@ def build_midi_diagnostics(
     metrics: MidiMetrics,
     audibility: MidiAudibilityMetrics,
     alignment: MidiAlignmentDiagnostics | None = None,
+    continuity: MidiContinuityMetrics | None = None,
 ) -> dict[str, Any]:
     expected_count = metrics.expected_note_count
     predicted_count = metrics.predicted_note_count
@@ -676,6 +749,8 @@ def build_midi_diagnostics(
     }
     if alignment is not None:
         diagnostics["alignment"] = alignment.to_dict()
+    if continuity is not None:
+        diagnostics["continuity"] = continuity.to_dict()
     return diagnostics
 
 
@@ -683,6 +758,7 @@ def infer_midi_failure_modes(
     metrics: MidiMetrics,
     audibility: MidiAudibilityMetrics,
     alignment: MidiAlignmentDiagnostics | None = None,
+    continuity: MidiContinuityMetrics | None = None,
 ) -> list[str]:
     modes: list[str] = []
     expected_count = metrics.expected_note_count
@@ -714,6 +790,13 @@ def infer_midi_failure_modes(
         smart_diagnosis = alignment.smart_onset_alignment.alignment_diagnosis
         if smart_diagnosis == "possible_reference_time_offset" and smart_diagnosis not in modes:
             modes.append(smart_diagnosis)
+    if continuity is not None and continuity.note_count >= 20:
+        if continuity.gap50_ratio >= 0.65 and MIDI_FAILURE_FRAGMENTED_MELODY_GAPS not in modes:
+            modes.append(MIDI_FAILURE_FRAGMENTED_MELODY_GAPS)
+        if continuity.short_note_ratio >= 0.20 and MIDI_FAILURE_EXCESSIVE_SHORT_NOTES not in modes:
+            modes.append(MIDI_FAILURE_EXCESSIVE_SHORT_NOTES)
+        if continuity.large_jump_ratio >= 0.10 and MIDI_FAILURE_LARGE_PITCH_JUMPS not in modes:
+            modes.append(MIDI_FAILURE_LARGE_PITCH_JUMPS)
     return modes
 
 
