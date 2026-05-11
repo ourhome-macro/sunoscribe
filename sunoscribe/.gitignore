@@ -88,3 +88,5 @@ node_modules/
 !backend/app/models/*.py
 *.mp4
 summary.md
+*.png
+*_*.md

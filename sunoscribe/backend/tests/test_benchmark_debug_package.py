@@ -7,12 +7,20 @@ import unittest
 
 from app.modules.benchmark.debug_package import (
     _derive_pitch_distribution_diagnostics,
+    build_note_funnel_debug,
     _derive_quantized_note_diagnostics,
+    _derive_rhythm_diagnostics,
     _derive_short_note_diagnostics,
+    build_rhythm_debug,
+    build_rhythm_debug_markdown,
+    build_rhythm_grid_candidates,
+    build_rhythm_grid_candidates_markdown,
     build_pitch_debug_markdown,
     export_benchmark_debug_package,
 )
 from app.modules.benchmark.midi_metrics import NoteEvent
+from app.modules.benchmark.rhythm_candidate_summary import build_rhythm_candidate_summary
+from app.scripts.benchmark_debug_package import main as debug_package_main
 
 
 def _write_midi(path: Path, notes: list[tuple[float, float, int]], *, track_name: str = "Lead Vocal") -> None:
@@ -65,6 +73,67 @@ def _write_candidates(path: Path, raw_pitches: list[int], *, selected_pitches: l
             for index, pitch in enumerate(selected_pitches)
         ]
     path.write_text(json.dumps(payload), encoding="utf-8")
+
+
+def _write_batch_debug_fixture(root: Path, *, sample_ids: list[str]) -> tuple[Path, Path]:
+    samples_root = root / "samples"
+    source_mp4 = samples_root / "source_mp4"
+    source_mid = samples_root / "source_mid"
+    source_mp4.mkdir(parents=True)
+    source_mid.mkdir(parents=True)
+    manifest_samples = []
+    run_root = samples_root / "benchmark_runs" / "debug_run"
+    results = []
+    for sample_id in sample_ids:
+        source_name = f"{sample_id}.mp4"
+        midi_name = f"{sample_id}.mid"
+        (source_mp4 / source_name).write_bytes(b"mock mp4")
+        _write_midi(source_mid / midi_name, [(0.0, 0.5, 60), (0.5, 1.0, 62)], track_name="melody")
+        manifest_samples.append(
+            {
+                "id": sample_id,
+                "title": sample_id,
+                "enabled": True,
+                "input_mp4": f"source_mp4/{source_name}",
+                "expected_midi": f"source_mid/{midi_name}",
+                "expected_melody_track": 1,
+                "expected_reference_strategy": "track",
+            }
+        )
+        sample_dir = run_root / sample_id
+        workspace = run_root / "projects" / f"bench_{sample_id}"
+        (workspace / "pitch").mkdir(parents=True, exist_ok=True)
+        (workspace / "separation").mkdir(parents=True, exist_ok=True)
+        sample_dir.mkdir(parents=True, exist_ok=True)
+        _write_midi(sample_dir / "produced.mid", [(0.0, 0.5, 60), (0.5, 1.0, 62)], track_name="Lead Vocal")
+        (workspace / "separation" / "mdx_diagnostics.json").write_text(json.dumps({"status": "success"}), encoding="utf-8")
+        (workspace / "pitch" / "rhythm_grid.json").write_text(
+            json.dumps({"bpm": 120.0, "beats_per_bar": 4, "beat_times": [0.0, 0.5, 1.0, 1.5], "downbeat_times": [0.0]}),
+            encoding="utf-8",
+        )
+        (sample_dir / "artifacts.json").write_text(json.dumps({"workspace_path": str(workspace)}), encoding="utf-8")
+        (sample_dir / "metrics.json").write_text(
+            json.dumps(
+                {
+                    "sample_id": sample_id,
+                    "expected_reference_strategy": "track",
+                    "expected_melody_track": 1,
+                    "produced_midi": str(sample_dir / "produced.mid"),
+                    "predicted_lead_track": 1,
+                    "metrics": {"expected_note_count": 2, "predicted_note_count": 2, "matched_note_count": 2, "note_recall": 1.0, "note_f1": 1.0},
+                    "audibility": {"midi_coverage_ratio": 1.0, "first_note_delay_sec": 0.0, "expected_duration_sec": 1.0, "predicted_duration_sec": 1.0},
+                    "alignment": {"dtw": {"dtw_pitch_match_recall_proxy": 1.0}, "smart_onset_alignment": {"shift_corrected_recall": 1.0, "shift_corrected_f1": 1.0, "shift_corrected_matched": 2}},
+                }
+            ),
+            encoding="utf-8",
+        )
+        (sample_dir / "quality_gate.json").write_text(json.dumps({"status": "success", "failed_checks": []}), encoding="utf-8")
+        results.append({"sample_id": sample_id, "status": "success", "quality_gate": {"failed_checks": []}})
+    manifest = samples_root / "manifest.json"
+    manifest.write_text(json.dumps({"version": 1, "root": ".", "samples": manifest_samples}), encoding="utf-8")
+    run_root.mkdir(parents=True, exist_ok=True)
+    (run_root / "summary.json").write_text(json.dumps({"manifest": {"samples": manifest_samples}, "results": results}), encoding="utf-8")
+    return run_root, manifest
 
 
 class BenchmarkDebugPackageTests(unittest.TestCase):
@@ -287,6 +356,10 @@ class BenchmarkDebugPackageTests(unittest.TestCase):
             self.assertTrue((debug_dir / "match_debug.json").exists())
             self.assertTrue((debug_dir / "alignment_debug.json").exists())
             self.assertTrue((debug_dir / "derived_diagnostics.json").exists())
+            self.assertTrue((debug_dir / "rhythm_debug.json").exists())
+            self.assertTrue((debug_dir / "rhythm_debug.md").exists())
+            self.assertTrue((debug_dir / "rhythm_grid_candidates.json").exists())
+            self.assertTrue((debug_dir / "rhythm_grid_candidates.md").exists())
             self.assertTrue((debug_dir / "timeline_debug.png").exists())
             self.assertTrue((debug_dir / "mdx_diagnostics.json").exists())
 
@@ -312,6 +385,21 @@ class BenchmarkDebugPackageTests(unittest.TestCase):
             self.assertAlmostEqual(derived["vocal_activity"]["vocal_activity_active_ratio"], 0.5)
             self.assertEqual(derived["note_candidates"]["note_candidate_count"], 4)
             self.assertAlmostEqual(derived["note_candidates"]["candidate_to_predicted_ratio"], 2.0)
+            self.assertTrue(derived["rhythm"]["available"])
+            self.assertEqual(derived["rhythm"]["tempo_bpm"], 120.0)
+            self.assertEqual(derived["rhythm"]["beat_count"], 3)
+            self.assertIn("preliminary_rhythm_diagnosis", derived["rhythm"])
+            self.assertIn("candidates", derived["rhythm"])
+            self.assertIn("best_diagnostic_candidate_id", derived["rhythm"])
+            self.assertIn("current_candidate_rank", derived["rhythm"])
+            rhythm_grid_payload = json.loads((debug_dir / "rhythm_grid.json").read_text(encoding="utf-8"))
+            self.assertEqual(rhythm_grid_payload["diagnostics"]["diagnostic_only"], True)
+            rhythm_debug_markdown = (debug_dir / "rhythm_debug.md").read_text(encoding="utf-8")
+            self.assertIn("RhythmGrid Debug", rhythm_debug_markdown)
+            self.assertIn("quantizer behavior unchanged", rhythm_debug_markdown)
+            rhythm_candidates_markdown = (debug_dir / "rhythm_grid_candidates.md").read_text(encoding="utf-8")
+            self.assertIn("RhythmGrid Candidate Diagnostics", rhythm_candidates_markdown)
+            self.assertIn("diagnostic_only: true", rhythm_candidates_markdown)
 
             summary = (debug_dir / "debug_summary.md").read_text(encoding="utf-8")
             self.assertIn("sample_id: song", summary)
@@ -321,6 +409,8 @@ class BenchmarkDebugPackageTests(unittest.TestCase):
             self.assertIn("Pitch Contour Diagnostics", summary)
             self.assertIn("Selected Melody Diagnostics", summary)
             self.assertIn("Quantization Diagnostics", summary)
+            self.assertIn("Rhythm Diagnostics", summary)
+            self.assertIn("best_diagnostic_candidate_id", summary)
             self.assertIn("Short Note Diagnostics", summary)
             self.assertIn("## Derived Diagnostics", summary)
             self.assertIn("preliminary_failure_stage_v2", summary)
@@ -562,6 +652,318 @@ class BenchmarkDebugPackageTests(unittest.TestCase):
             self.assertEqual(diagnostics["p95_quantize_error_sec"], 0.02)
             self.assertEqual(diagnostics["fragmentation"]["possible_fragment_pair_count"], 1)
             self.assertEqual(diagnostics["overmerge"]["possible_overmerge_note_count"], 1)
+
+    def test_rhythm_debug_reports_grid_diagnostics(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            rhythm_grid_path = Path(temp_dir) / "rhythm_grid.json"
+            rhythm_grid_path.write_text(
+                json.dumps(
+                    {
+                        "bpm": 120.0,
+                        "bpm_confidence": 0.8,
+                        "beats_per_bar": 4,
+                        "beat_times": [0.0, 0.5, 1.0, 1.8, 2.3],
+                        "downbeat_times": [0.0, 1.8],
+                        "analysis_info": {"downbeat_confidence": 0.3},
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            rhythm_debug = build_rhythm_debug(
+                rhythm_grid_path=rhythm_grid_path,
+                predicted_notes=[
+                    NoteEvent(start=0.0, end=0.2, pitch=60),
+                    NoteEvent(start=0.74, end=0.95, pitch=62),
+                    NoteEvent(start=1.45, end=1.6, pitch=64),
+                ],
+            )
+            markdown = build_rhythm_debug_markdown(sample_id="song", sample_title="Song", rhythm_debug=rhythm_debug)
+
+            self.assertTrue(rhythm_debug["available"])
+            self.assertEqual(rhythm_debug["tempo_bpm"], 120.0)
+            self.assertEqual(rhythm_debug["beat_count"], 5)
+            self.assertEqual(rhythm_debug["downbeat_count"], 2)
+            self.assertIn(rhythm_debug["preliminary_rhythm_diagnosis"], {
+                "possible_downbeat_uncertainty",
+                "possible_bar_phase_error",
+                "possible_off_grid_quantization",
+                "mixed_rhythm_issue",
+            })
+            self.assertIn("RhythmGrid Debug", markdown)
+            self.assertIn("preliminary_rhythm_diagnosis", markdown)
+
+    def test_missing_rhythm_grid_is_unavailable_without_crashing(self) -> None:
+        rhythm_debug = build_rhythm_debug(rhythm_grid_path=None, predicted_notes=[])
+
+        self.assertFalse(rhythm_debug["available"])
+        self.assertEqual(rhythm_debug["unavailable_reason"], "rhythm_grid.json missing")
+        rhythm_candidates = build_rhythm_grid_candidates(rhythm_grid_path=None, predicted_notes=[])
+        self.assertFalse(rhythm_candidates["available"])
+        self.assertEqual(rhythm_candidates["unavailable_reason"], "rhythm_grid.json missing")
+
+        with TemporaryDirectory() as temp_dir:
+            diagnostics = _derive_rhythm_diagnostics(Path(temp_dir) / "missing.json")
+
+        self.assertFalse(diagnostics["available"])
+
+    def test_rhythm_grid_candidates_include_tempo_and_phase_variants(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            rhythm_grid_path = Path(temp_dir) / "rhythm_grid.json"
+            rhythm_grid_path.write_text(
+                json.dumps(
+                    {
+                        "bpm": 120.0,
+                        "beats_per_bar": 4,
+                        "beat_times": [0.0, 0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 3.5],
+                        "downbeat_times": [0.5, 2.5],
+                        "analysis_info": {"downbeat_confidence": 0.6, "ioi_bpm": 118.0, "raw_bpm": 121.0},
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            candidates = build_rhythm_grid_candidates(
+                rhythm_grid_path=rhythm_grid_path,
+                predicted_notes=[
+                    NoteEvent(start=0.0, end=0.2, pitch=60),
+                    NoteEvent(start=0.5, end=0.7, pitch=62),
+                    NoteEvent(start=1.0, end=1.2, pitch=64),
+                ],
+            )
+            markdown = build_rhythm_grid_candidates_markdown(
+                sample_id="song",
+                sample_title="Song",
+                rhythm_candidates=candidates,
+            )
+            by_id = {candidate["candidate_id"]: candidate for candidate in candidates["candidates"]}
+
+            self.assertTrue(candidates["available"])
+            self.assertTrue(candidates["diagnostic_only"])
+            self.assertIn("current_grid", by_id)
+            self.assertIn("half_tempo_grid", by_id)
+            self.assertIn("double_tempo_grid", by_id)
+            for phase in range(4):
+                self.assertIn(f"downbeat_phase_shift_{phase}", by_id)
+            self.assertEqual(by_id["half_tempo_grid"]["beat_count"], 4)
+            self.assertEqual(by_id["double_tempo_grid"]["beat_count"], 15)
+            self.assertEqual(by_id["downbeat_phase_shift_1"]["downbeat_count"], 2)
+            self.assertIn("candidate_score", by_id["current_grid"])
+            self.assertIn("score_breakdown", by_id["current_grid"])
+            self.assertIn("best_diagnostic_candidate_id", candidates)
+            self.assertIn("current_candidate_rank", candidates)
+            self.assertIn("candidate comparison", markdown.lower())
+            self.assertIn("possible half/double tempo suspicion", markdown)
+
+    def test_debug_package_cli_single_sample_still_works(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            run_root, manifest = _write_batch_debug_fixture(Path(temp_dir), sample_ids=["song_a"])
+
+            exit_code = debug_package_main([
+                "--run-root",
+                str(run_root),
+                "--manifest",
+                str(manifest),
+                "--sample-id",
+                "song_a",
+            ])
+
+            self.assertEqual(exit_code, 0)
+            self.assertTrue((run_root / "song_a" / "debug_package" / "rhythm_grid_candidates.json").exists())
+            self.assertTrue((run_root / "song_a" / "debug_package" / "note_funnel_debug.json").exists())
+
+    def test_debug_package_cli_all_enabled_writes_batch_summary(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            run_root, manifest = _write_batch_debug_fixture(Path(temp_dir), sample_ids=["song_a", "song_b"])
+
+            exit_code = debug_package_main([
+                "--run-root",
+                str(run_root),
+                "--manifest",
+                str(manifest),
+                "--all-enabled",
+            ])
+
+            self.assertEqual(exit_code, 0)
+            summary_path = run_root / "debug_package_batch_summary.json"
+            markdown_path = run_root / "debug_package_batch_summary.md"
+            self.assertTrue(summary_path.exists())
+            self.assertTrue(markdown_path.exists())
+            payload = json.loads(summary_path.read_text(encoding="utf-8"))
+            self.assertEqual(payload["total_requested"], 2)
+            self.assertEqual(payload["generated_count"], 2)
+            self.assertEqual(payload["failed_count"], 0)
+            by_id = {row["sample_id"]: row for row in payload["per_sample"]}
+            for sample_id in ["song_a", "song_b"]:
+                self.assertTrue((run_root / sample_id / "debug_package" / "rhythm_grid_candidates.json").exists())
+                self.assertTrue((run_root / sample_id / "debug_package" / "note_funnel_debug.json").exists())
+                self.assertTrue((run_root / sample_id / "debug_package" / "note_funnel_debug.md").exists())
+                self.assertIn("note_funnel_debug.json", by_id[sample_id]["generated_files"])
+
+            rhythm_summary = build_rhythm_candidate_summary(run_root)
+            self.assertEqual(len(rhythm_summary["samples"]), 2)
+            self.assertNotEqual(rhythm_summary["aggregate_counts"]["Candidate Diagnostics Missing"], 2)
+
+    def test_debug_package_cli_batch_continues_after_sample_failure(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            run_root, manifest = _write_batch_debug_fixture(Path(temp_dir), sample_ids=["song_a", "song_b"])
+            (run_root / "song_b" / "produced.mid").unlink()
+
+            exit_code = debug_package_main([
+                "--run-root",
+                str(run_root),
+                "--manifest",
+                str(manifest),
+                "--all-enabled",
+            ])
+
+            self.assertEqual(exit_code, 0)
+            payload = json.loads((run_root / "debug_package_batch_summary.json").read_text(encoding="utf-8"))
+            self.assertEqual(payload["total_requested"], 2)
+            self.assertEqual(payload["generated_count"], 2)
+            self.assertEqual(payload["failed_count"], 0)
+            by_id = {row["sample_id"]: row for row in payload["per_sample"]}
+            self.assertIn("rhythm_grid_candidates.json", by_id["song_a"]["generated_files"])
+            self.assertIn("predicted_notes.json", by_id["song_b"]["missing_files"])
+
+
+    def test_note_funnel_debug_reports_retention_and_missing_quantized(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            f0_path = root / "f0_track.json"
+            candidates_path = root / "note_candidates.json"
+            selected_path = root / "selected_melody.json"
+            score_ir_path = root / "score_ir.json"
+            _write_f0(f0_path, [60, 61, 62], hop=0.1)
+            candidates_path.write_text(
+                json.dumps(
+                    {
+                        "melody_candidates": {
+                            "notes": [
+                                {"start_time": index * 0.2, "duration_sec": 0.18, "midi_pitch": 60 + index}
+                                for index in range(4)
+                            ]
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+            selected_path.write_text(
+                json.dumps(
+                    {
+                        "selected_notes": [
+                            {"start_time_sec": index * 0.2, "end_time_sec": index * 0.2 + 0.18, "pitch_center_midi": 60 + index}
+                            for index in range(2)
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            score_ir_path.write_text(
+                json.dumps(
+                    {
+                        "notes": [
+                            {"start_time": 0.0, "duration_sec": 0.36, "pitch_midi": 60},
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            diagnostics = build_note_funnel_debug(
+                expected_notes=[NoteEvent(start=0.0, end=0.18, pitch=60) for _ in range(4)],
+                predicted_notes=[NoteEvent(start=0.0, end=0.36, pitch=60)],
+                f0_track_path=f0_path,
+                note_candidates_path=candidates_path,
+                selected_melody_path=selected_path,
+                quantized_notes_path=root / "missing_quantized_notes.json",
+                score_ir_path=score_ir_path,
+            )
+
+            self.assertEqual(diagnostics["f0_voiced_frame_count"], 3)
+            self.assertEqual(diagnostics["note_candidate_count"], 4)
+            self.assertEqual(diagnostics["selected_note_count"], 2)
+            self.assertEqual(diagnostics["quantized_note_count"], "unavailable")
+            self.assertEqual(diagnostics["score_ir_note_count"], 1)
+            self.assertEqual(diagnostics["predicted_midi_note_count"], 1)
+            self.assertEqual(diagnostics["retention"]["candidate_to_selected_count_ratio"], 0.5)
+            self.assertIn("quantized_notes", diagnostics["missing_layers"])
+
+    def test_note_funnel_short_note_loss_and_overmerge_flags(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            candidates_path = root / "note_candidates.json"
+            selected_path = root / "selected_melody.json"
+            quantized_path = root / "quantized_notes.json"
+            score_ir_path = root / "score_ir.json"
+            candidates = [
+                {"start_time": index * 0.12, "duration_sec": 0.10, "midi_pitch": 60 + (index % 3)}
+                for index in range(20)
+            ]
+            predicted = [NoteEvent(start=index * 0.5, end=index * 0.5 + 0.5, pitch=60 + (index % 3)) for index in range(8)]
+            candidates_path.write_text(json.dumps({"melody_candidates": {"notes": candidates}}), encoding="utf-8")
+            selected_path.write_text(json.dumps({"selected_notes": candidates}), encoding="utf-8")
+            quantized_path.write_text(json.dumps({"notes": candidates[:8]}), encoding="utf-8")
+            score_ir_path.write_text(
+                json.dumps({"notes": [{"start_time": note.start, "duration_sec": note.duration, "pitch_midi": note.pitch} for note in predicted]}),
+                encoding="utf-8",
+            )
+
+            diagnostics = build_note_funnel_debug(
+                expected_notes=[NoteEvent(start=index * 0.12, end=index * 0.12 + 0.10, pitch=60 + (index % 3)) for index in range(20)],
+                predicted_notes=predicted,
+                f0_track_path=None,
+                note_candidates_path=candidates_path,
+                selected_melody_path=selected_path,
+                quantized_notes_path=quantized_path,
+                score_ir_path=score_ir_path,
+            )
+            flags = diagnostics["loss_attribution"]["flags"]
+
+            self.assertTrue(flags["possible_short_note_loss"]["triggered"])
+            self.assertTrue(flags["possible_overmerge"]["triggered"])
+            self.assertIn("possible_quantization_overmerge", diagnostics["loss_attribution"]["triggered_flags"])
+
+    def test_note_funnel_export_loss_and_fragmentation_flags(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            candidates_path = root / "note_candidates.json"
+            selected_path = root / "selected_melody.json"
+            quantized_path = root / "quantized_notes.json"
+            score_ir_path = root / "score_ir.json"
+            notes = [
+                {"start_time": index * 0.25, "duration_sec": 0.20, "midi_pitch": 60 + (index % 5)}
+                for index in range(20)
+            ]
+            for path, payload in [
+                (candidates_path, {"melody_candidates": {"notes": notes}}),
+                (selected_path, {"selected_notes": notes}),
+                (quantized_path, {"notes": notes}),
+                (score_ir_path, {"notes": notes}),
+            ]:
+                path.write_text(json.dumps(payload), encoding="utf-8")
+
+            export_loss = build_note_funnel_debug(
+                expected_notes=[NoteEvent(start=index * 0.25, end=index * 0.25 + 0.20, pitch=60) for index in range(20)],
+                predicted_notes=[NoteEvent(start=0.0, end=0.2, pitch=60)],
+                f0_track_path=None,
+                note_candidates_path=candidates_path,
+                selected_melody_path=selected_path,
+                quantized_notes_path=quantized_path,
+                score_ir_path=score_ir_path,
+            )
+            self.assertTrue(export_loss["loss_attribution"]["flags"]["possible_export_loss"]["triggered"])
+
+            fragmentation = build_note_funnel_debug(
+                expected_notes=[NoteEvent(start=index * 0.5, end=index * 0.5 + 0.5, pitch=60) for index in range(10)],
+                predicted_notes=[NoteEvent(start=index * 0.1, end=index * 0.1 + 0.08, pitch=60) for index in range(20)],
+                f0_track_path=None,
+                note_candidates_path=candidates_path,
+                selected_melody_path=selected_path,
+                quantized_notes_path=quantized_path,
+                score_ir_path=score_ir_path,
+            )
+            self.assertTrue(fragmentation["loss_attribution"]["flags"]["possible_fragmentation"]["triggered"])
 
     def test_short_note_loss_attribution_reports_quantizer_stage(self) -> None:
         with TemporaryDirectory() as temp_dir:

@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 import json
@@ -32,6 +32,12 @@ DEBUG_PACKAGE_FILES = [
     "vocal_activity.json",
     "note_candidates.json",
     "rhythm_grid.json",
+    "rhythm_debug.json",
+    "rhythm_debug.md",
+    "rhythm_grid_candidates.json",
+    "rhythm_grid_candidates.md",
+    "note_funnel_debug.json",
+    "note_funnel_debug.md",
     "selected_melody.json",
     "quantized_notes.json",
     "score_ir.json",
@@ -90,6 +96,7 @@ def export_benchmark_debug_package(
     match_debug: dict[str, Any] | None = None
     alignment_debug: dict[str, Any] | None = None
     derived_diagnostics: dict[str, Any] | None = None
+    note_funnel_debug: dict[str, Any] | None = None
 
     workspace_path = _resolve_workspace_path(
         artifacts_payload=artifacts_payload,
@@ -191,6 +198,60 @@ def export_benchmark_debug_package(
     else:
         missing_files.add("predicted_notes.json")
 
+    rhythm_grid_path = debug_dir / "rhythm_grid.json"
+    rhythm_debug = build_rhythm_debug(
+        rhythm_grid_path=rhythm_grid_path if rhythm_grid_path.exists() else None,
+        predicted_notes=predicted_notes,
+    )
+    _enrich_rhythm_grid_debug_copy(rhythm_grid_path, rhythm_debug)
+    _write_json(debug_dir / "rhythm_debug.json", rhythm_debug)
+    generated_files.add("rhythm_debug.json")
+    (debug_dir / "rhythm_debug.md").write_text(
+        build_rhythm_debug_markdown(
+            sample_id=sample_id,
+            sample_title=str(sample_metadata.get("title") or sample_id),
+            rhythm_debug=rhythm_debug,
+        ),
+        encoding="utf-8",
+    )
+    generated_files.add("rhythm_debug.md")
+    rhythm_candidates = build_rhythm_grid_candidates(
+        rhythm_grid_path=rhythm_grid_path if rhythm_grid_path.exists() else None,
+        predicted_notes=predicted_notes,
+    )
+    _write_json(debug_dir / "rhythm_grid_candidates.json", rhythm_candidates)
+    generated_files.add("rhythm_grid_candidates.json")
+    (debug_dir / "rhythm_grid_candidates.md").write_text(
+        build_rhythm_grid_candidates_markdown(
+            sample_id=sample_id,
+            sample_title=str(sample_metadata.get("title") or sample_id),
+            rhythm_candidates=rhythm_candidates,
+        ),
+        encoding="utf-8",
+    )
+    generated_files.add("rhythm_grid_candidates.md")
+
+    note_funnel_debug = build_note_funnel_debug(
+        expected_notes=expected_notes,
+        predicted_notes=predicted_notes,
+        f0_track_path=debug_dir / "f0_track.json" if (debug_dir / "f0_track.json").exists() else None,
+        note_candidates_path=debug_dir / "note_candidates.json" if (debug_dir / "note_candidates.json").exists() else None,
+        selected_melody_path=debug_dir / "selected_melody.json" if (debug_dir / "selected_melody.json").exists() else None,
+        quantized_notes_path=debug_dir / "quantized_notes.json" if (debug_dir / "quantized_notes.json").exists() else None,
+        score_ir_path=debug_dir / "score_ir.json" if (debug_dir / "score_ir.json").exists() else None,
+    )
+    _write_json(debug_dir / "note_funnel_debug.json", note_funnel_debug)
+    generated_files.add("note_funnel_debug.json")
+    (debug_dir / "note_funnel_debug.md").write_text(
+        build_note_funnel_debug_markdown(
+            sample_id=sample_id,
+            sample_title=str(sample_metadata.get("title") or sample_id),
+            note_funnel_debug=note_funnel_debug,
+        ),
+        encoding="utf-8",
+    )
+    generated_files.add("note_funnel_debug.md")
+
     if expected_notes and predicted_notes:
         if not metrics_payload.get("metrics"):
             metrics_payload = _computed_metrics_payload(
@@ -225,6 +286,10 @@ def export_benchmark_debug_package(
         pitch_contours_path=debug_dir / "pitch_contours.json" if (debug_dir / "pitch_contours.json").exists() else None,
         selected_melody_path=debug_dir / "selected_melody.json" if (debug_dir / "selected_melody.json").exists() else None,
         quantized_notes_path=debug_dir / "quantized_notes.json" if (debug_dir / "quantized_notes.json").exists() else None,
+        score_ir_path=debug_dir / "score_ir.json" if (debug_dir / "score_ir.json").exists() else None,
+        note_funnel_debug=note_funnel_debug,
+        rhythm_debug_path=debug_dir / "rhythm_debug.json" if (debug_dir / "rhythm_debug.json").exists() else None,
+        rhythm_candidates_path=debug_dir / "rhythm_grid_candidates.json" if (debug_dir / "rhythm_grid_candidates.json").exists() else None,
         match_debug=match_debug,
         alignment_debug=alignment_debug,
         metrics_payload=metrics_payload,
@@ -423,6 +488,10 @@ def build_derived_diagnostics(
     pitch_contours_path: Path | None = None,
     selected_melody_path: Path | None = None,
     quantized_notes_path: Path | None = None,
+    score_ir_path: Path | None = None,
+    note_funnel_debug: dict[str, Any] | None = None,
+    rhythm_debug_path: Path | None = None,
+    rhythm_candidates_path: Path | None = None,
 ) -> dict[str, Any]:
     notes = _derive_note_diagnostics(expected_notes, predicted_notes)
     f0 = _derive_f0_diagnostics(f0_track_path)
@@ -431,12 +500,22 @@ def build_derived_diagnostics(
     note_candidates = _derive_note_candidate_diagnostics(note_candidates_path, predicted_note_count=len(predicted_notes))
     selected_melody = _derive_selected_melody_diagnostics(selected_melody_path)
     quantized_notes = _derive_quantized_note_diagnostics(quantized_notes_path)
+    rhythm = _derive_rhythm_diagnostics(rhythm_debug_path, rhythm_candidates_path=rhythm_candidates_path)
     short_note_diagnostics = _derive_short_note_diagnostics(
         expected_notes,
         predicted_notes,
         note_candidates_path=note_candidates_path,
         selected_melody_path=selected_melody_path,
         quantized_notes_path=quantized_notes_path,
+    )
+    note_funnel = note_funnel_debug or build_note_funnel_debug(
+        expected_notes=expected_notes,
+        predicted_notes=predicted_notes,
+        f0_track_path=f0_track_path,
+        note_candidates_path=note_candidates_path,
+        selected_melody_path=selected_melody_path,
+        quantized_notes_path=quantized_notes_path,
+        score_ir_path=score_ir_path,
     )
     pitch_distribution = _derive_pitch_distribution_diagnostics(
         expected_notes=expected_notes,
@@ -470,7 +549,9 @@ def build_derived_diagnostics(
         "note_candidates": note_candidates,
         "selected_melody": selected_melody,
         "quantized_notes": quantized_notes,
+        "rhythm": rhythm,
         "short_note_diagnostics": short_note_diagnostics,
+        "note_funnel": note_funnel,
         "pitch_distribution": pitch_distribution,
         "match": match,
         "coverage": {
@@ -585,6 +666,7 @@ def build_debug_summary_markdown(
     predicted_density = _safe_density(predicted_note_count, expected_duration)
     expected_density = _safe_density(expected_note_count, expected_duration)
     matched_density = _safe_density(_as_int(_metric_value(metrics, summary_metrics, "matched_note_count")) or 0, expected_duration)
+    rhythm = derived_diagnostics.get("rhythm") if isinstance(derived_diagnostics, dict) and isinstance(derived_diagnostics.get("rhythm"), dict) else {}
     f0_available = "f0_track.json" in found_files
     vocal_activity_available = "vocal_activity.json" in found_files
     note_candidates_available = "note_candidates.json" in found_files
@@ -628,6 +710,17 @@ def build_debug_summary_markdown(
         f"- shift_recall_gain: {_fmt(_alignment_value(alignment, smart, 'shift_recall_gain'))}",
         f"- shift_matched_gain: {_fmt(_alignment_value(alignment, smart, 'shift_matched_gain'))}",
         f"- alignment_diagnosis: {_fmt(_alignment_value(alignment, smart, 'alignment_diagnosis'))}",
+        "",
+        "## Rhythm Diagnostics",
+        f"- tempo: {_fmt(rhythm.get('tempo_bpm'))} bpm",
+        f"- tempo_stability: {_fmt(rhythm.get('tempo_stability'))}",
+        f"- downbeat_confidence: {_fmt(rhythm.get('downbeat_confidence'))}",
+        f"- off_grid_onset_ratio: {_fmt(rhythm.get('off_grid_onset_ratio'))}",
+        f"- rhythm preliminary diagnosis: {_fmt(rhythm.get('preliminary_rhythm_diagnosis'))}",
+        f"- current_candidate_rank: {_fmt(rhythm.get('current_candidate_rank'))}",
+        f"- best_diagnostic_candidate_id: {_fmt(rhythm.get('best_diagnostic_candidate_id'))}",
+        f"- current_vs_best_score_delta: {_fmt(rhythm.get('current_vs_best_score_delta'))}",
+        f"- rhythm_candidate_warning: {_fmt(rhythm.get('rhythm_candidate_warning')) if rhythm.get('rhythm_candidate_warning') else 'none'}",
         "",
         "## Octave And DTW Metrics",
         f"- best octave shift: {_fmt(alignment.get('best_octave_shift_semitones'))}",
@@ -772,6 +865,463 @@ def build_pitch_debug_markdown(
     if not warnings:
         lines.append("- none")
     return "\n".join(lines)
+
+
+def build_rhythm_debug(
+    *,
+    rhythm_grid_path: Path | None,
+    predicted_notes: list[NoteEvent] | None = None,
+) -> dict[str, Any]:
+    if rhythm_grid_path is None or not rhythm_grid_path.exists():
+        return _unavailable("rhythm_grid.json missing")
+    payload = _read_json(rhythm_grid_path)
+    if not isinstance(payload, dict):
+        return _unavailable("rhythm grid unavailable")
+
+    beat_times = _float_list(payload.get("beat_times"))
+    downbeat_times = _float_list(payload.get("downbeat_times"))
+    analysis_info = payload.get("analysis_info") if isinstance(payload.get("analysis_info"), dict) else {}
+    gaps = _positive_diffs(beat_times)
+    tempo_bpm = _rhythm_tempo_bpm(payload, gaps)
+    tempo_stability = _tempo_stability(payload, gaps)
+    beat_gap_mean = _mean(gaps)
+    beat_gap_p95 = _percentile(gaps, 95.0)
+    beat_gap_max = max(gaps) if gaps else None
+    downbeat_confidence = _first_float(
+        analysis_info.get("downbeat_confidence"),
+        payload.get("downbeat_confidence"),
+    )
+    if downbeat_confidence is None:
+        downbeat_confidence = 0.0 if not downbeat_times else None
+    bar_phase_confidence = _bar_phase_confidence(
+        beat_times=beat_times,
+        downbeat_times=downbeat_times,
+        beats_per_bar=max(2, _as_int(payload.get("beats_per_bar")) or 4),
+        downbeat_confidence=downbeat_confidence,
+    )
+    off_grid = _off_grid_onsets(predicted_notes or [], beat_times, beat_gap_mean)
+    pickup_likelihood = _pickup_likelihood(predicted_notes or [], beat_times, downbeat_times, beat_gap_mean)
+    rubato_likelihood = _rubato_likelihood(gaps)
+    uncertain_regions = _grid_uncertain_regions(
+        beat_times=beat_times,
+        beat_gap_mean=beat_gap_mean,
+        beat_gap_p95=beat_gap_p95,
+        downbeat_confidence=downbeat_confidence,
+        bar_phase_confidence=bar_phase_confidence,
+        off_grid_onsets=off_grid["onsets"],
+    )
+    diagnosis = _rhythm_preliminary_diagnosis(
+        tempo_stability=tempo_stability,
+        downbeat_confidence=downbeat_confidence,
+        bar_phase_confidence=bar_phase_confidence,
+        off_grid_onset_ratio=off_grid["ratio"],
+        pickup_likelihood=pickup_likelihood,
+        rubato_likelihood=rubato_likelihood,
+    )
+    flags = _rhythm_flags(
+        diagnosis=diagnosis,
+        tempo_stability=tempo_stability,
+        downbeat_confidence=downbeat_confidence,
+        bar_phase_confidence=bar_phase_confidence,
+        off_grid_onset_ratio=off_grid["ratio"],
+        pickup_likelihood=pickup_likelihood,
+        rubato_likelihood=rubato_likelihood,
+    )
+    return {
+        "available": True,
+        "diagnostic_only": True,
+        "tempo_bpm": _round_optional(tempo_bpm),
+        "tempo_stability": _round_optional(tempo_stability),
+        "beat_count": len(beat_times),
+        "beat_gap_mean_sec": _round_optional(beat_gap_mean),
+        "beat_gap_p95_sec": _round_optional(beat_gap_p95),
+        "beat_gap_max_sec": _round_optional(beat_gap_max),
+        "downbeat_count": len(downbeat_times),
+        "downbeat_confidence": _round_optional(downbeat_confidence),
+        "bar_phase_confidence": _round_optional(bar_phase_confidence),
+        "off_grid_onset_ratio": _round_optional(off_grid["ratio"]),
+        "pickup_likelihood": _round_optional(pickup_likelihood),
+        "rubato_likelihood": _round_optional(rubato_likelihood),
+        "grid_uncertain_region_count": len(uncertain_regions),
+        "grid_uncertain_regions": uncertain_regions,
+        "preliminary_rhythm_diagnosis": diagnosis,
+        "rhythm_flags": flags,
+        "off_grid_predicted_note_onsets": off_grid["onsets"][:50],
+    }
+
+
+def build_rhythm_debug_markdown(*, sample_id: str, sample_title: str, rhythm_debug: dict[str, Any] | None) -> str:
+    rhythm_debug = rhythm_debug if isinstance(rhythm_debug, dict) else _unavailable("rhythm debug unavailable")
+    regions = rhythm_debug.get("grid_uncertain_regions") if isinstance(rhythm_debug.get("grid_uncertain_regions"), list) else []
+    flags = rhythm_debug.get("rhythm_flags") if isinstance(rhythm_debug.get("rhythm_flags"), list) else []
+    lines = [
+        f"# RhythmGrid Debug: {sample_title or sample_id}",
+        "",
+        "## Scope",
+        "- diagnostic_only: true",
+        "- quantizer behavior unchanged",
+        "- benchmark status semantics unchanged",
+        "",
+        "## Rhythm Diagnostics",
+        f"- available: {str(bool(rhythm_debug.get('available'))).lower()}",
+        f"- tempo_bpm: {_fmt(rhythm_debug.get('tempo_bpm'))}",
+        f"- tempo_stability: {_fmt(rhythm_debug.get('tempo_stability'))}",
+        f"- beat_count: {_fmt(rhythm_debug.get('beat_count'))}",
+        f"- beat_gap_mean_sec: {_fmt(rhythm_debug.get('beat_gap_mean_sec'))}",
+        f"- beat_gap_p95_sec: {_fmt(rhythm_debug.get('beat_gap_p95_sec'))}",
+        f"- beat_gap_max_sec: {_fmt(rhythm_debug.get('beat_gap_max_sec'))}",
+        f"- downbeat_count: {_fmt(rhythm_debug.get('downbeat_count'))}",
+        f"- downbeat_confidence: {_fmt(rhythm_debug.get('downbeat_confidence'))}",
+        f"- bar_phase_confidence: {_fmt(rhythm_debug.get('bar_phase_confidence'))}",
+        f"- off_grid_onset_ratio: {_fmt(rhythm_debug.get('off_grid_onset_ratio'))}",
+        f"- pickup_likelihood: {_fmt(rhythm_debug.get('pickup_likelihood'))}",
+        f"- rubato_likelihood: {_fmt(rhythm_debug.get('rubato_likelihood'))}",
+        f"- grid_uncertain_region_count: {_fmt(rhythm_debug.get('grid_uncertain_region_count'))}",
+        f"- preliminary_rhythm_diagnosis: {_fmt(rhythm_debug.get('preliminary_rhythm_diagnosis'))}",
+        f"- rhythm_flags: {', '.join(str(flag) for flag in flags) if flags else 'none'}",
+        f"- unavailable_reason: {_fmt(rhythm_debug.get('unavailable_reason')) if not rhythm_debug.get('available') else 'none'}",
+        "",
+        "## Grid Uncertain Regions",
+    ]
+    if regions:
+        lines.extend(
+            f"- {region.get('reason', 'unknown')}: {_fmt(region.get('start_sec'))}s - {_fmt(region.get('end_sec'))}s confidence={_fmt(region.get('confidence'))}"
+            for region in regions[:25]
+            if isinstance(region, dict)
+        )
+    else:
+        lines.append("- none")
+    return "\n".join(lines)
+
+
+def build_rhythm_grid_candidates(
+    *,
+    rhythm_grid_path: Path | None,
+    predicted_notes: list[NoteEvent] | None = None,
+) -> dict[str, Any]:
+    if rhythm_grid_path is None or not rhythm_grid_path.exists():
+        return _unavailable("rhythm_grid.json missing")
+    payload = _read_json(rhythm_grid_path)
+    if not isinstance(payload, dict):
+        return _unavailable("rhythm grid unavailable")
+    beat_times = _float_list(payload.get("beat_times"))
+    downbeat_times = _float_list(payload.get("downbeat_times"))
+    if len(beat_times) < 2:
+        unavailable = _unavailable("rhythm grid has fewer than 2 beats")
+        unavailable["diagnostic_only"] = True
+        return unavailable
+
+    beats_per_bar = max(2, _as_int(payload.get("beats_per_bar")) or 4)
+    analysis_info = payload.get("analysis_info") if isinstance(payload.get("analysis_info"), dict) else {}
+    downbeat_confidence = _first_float(analysis_info.get("downbeat_confidence"), payload.get("downbeat_confidence"))
+    if downbeat_confidence is None:
+        downbeat_confidence = 0.0 if not downbeat_times else None
+    base_tempo = _rhythm_tempo_bpm(payload, _positive_diffs(beat_times))
+    candidates: list[dict[str, Any]] = []
+
+    def add_candidate(candidate_id: str, source: str, candidate_beats: list[float], candidate_downbeats: list[float], tempo_bpm: float | None, warnings: list[str] | None = None) -> None:
+        if any(candidate["candidate_id"] == candidate_id for candidate in candidates):
+            return
+        candidates.append(
+            _build_rhythm_grid_candidate(
+                candidate_id=candidate_id,
+                source=source,
+                beat_times=candidate_beats,
+                downbeat_times=candidate_downbeats,
+                tempo_bpm=tempo_bpm,
+                beats_per_bar=beats_per_bar,
+                downbeat_confidence=downbeat_confidence,
+                predicted_notes=predicted_notes or [],
+                warnings=warnings or [],
+            )
+        )
+
+    add_candidate("current_grid", "current_rhythm_grid", beat_times, downbeat_times, base_tempo)
+    half_beats = beat_times[::2]
+    add_candidate("half_tempo_grid", "derived_from_current_every_other_beat", half_beats, _phase_downbeats(half_beats, beats_per_bar, 0), (base_tempo / 2.0) if base_tempo else None)
+    double_beats = _double_tempo_beats(beat_times)
+    add_candidate("double_tempo_grid", "derived_from_current_midpoint_beats", double_beats, _phase_downbeats(double_beats, beats_per_bar, 0), (base_tempo * 2.0) if base_tempo else None)
+    for phase in range(4):
+        add_candidate(
+            f"downbeat_phase_shift_{phase}",
+            "derived_from_current_downbeat_phase",
+            beat_times,
+            _phase_downbeats(beat_times, beats_per_bar, phase),
+            base_tempo,
+        )
+
+    ioi_bpm = _first_float(analysis_info.get("ioi_median_bpm"), analysis_info.get("ioi_bpm"), payload.get("ioi_bpm"))
+    if ioi_bpm is not None and ioi_bpm > 0 and base_tempo is not None and abs(ioi_bpm - base_tempo) > 0.5:
+        add_candidate("ioi_median_grid", "beat_tracker_ioi_bpm_diagnostic", beat_times, downbeat_times, ioi_bpm, ["uses IOI BPM metadata only; beat positions unchanged"])
+    raw_bpm = _first_float(analysis_info.get("raw_bpm"), analysis_info.get("raw_beat_tracker_bpm"), payload.get("raw_bpm"))
+    if raw_bpm is not None and raw_bpm > 0 and base_tempo is not None and abs(raw_bpm - base_tempo) > 0.5:
+        add_candidate("raw_beat_tracker_grid", "beat_tracker_raw_bpm_diagnostic", beat_times, downbeat_times, raw_bpm, ["uses raw beat tracker BPM metadata only; beat positions unchanged"])
+
+    ranked = sorted(candidates, key=lambda candidate: candidate.get("candidate_score") or 0.0, reverse=True)
+    rank_by_id = {candidate["candidate_id"]: index + 1 for index, candidate in enumerate(ranked)}
+    for candidate in candidates:
+        candidate["rank"] = rank_by_id.get(candidate["candidate_id"])
+    best = ranked[0] if ranked else None
+    current = next((candidate for candidate in candidates if candidate["candidate_id"] == "current_grid"), None)
+    current_score = _as_float(current.get("candidate_score")) if current else None
+    best_score = _as_float(best.get("candidate_score")) if best else None
+    score_delta = None if current_score is None or best_score is None else max(0.0, best_score - current_score)
+    return {
+        "available": True,
+        "diagnostic_only": True,
+        "candidate_count": len(candidates),
+        "candidates": candidates,
+        "best_diagnostic_candidate_id": best.get("candidate_id") if best else None,
+        "current_candidate_rank": rank_by_id.get("current_grid"),
+        "current_vs_best_score_delta": _round_optional(score_delta),
+        "rhythm_candidate_warning": _rhythm_candidate_warning(current=current, best=best, score_delta=score_delta),
+    }
+
+
+def build_rhythm_grid_candidates_markdown(*, sample_id: str, sample_title: str, rhythm_candidates: dict[str, Any] | None) -> str:
+    rhythm_candidates = rhythm_candidates if isinstance(rhythm_candidates, dict) else _unavailable("rhythm grid candidates unavailable")
+    candidates = rhythm_candidates.get("candidates") if isinstance(rhythm_candidates.get("candidates"), list) else []
+    warning = rhythm_candidates.get("rhythm_candidate_warning")
+    lines = [
+        f"# RhythmGrid Candidate Diagnostics: {sample_title or sample_id}",
+        "",
+        "## Scope",
+        "- diagnostic_only: true",
+        "- candidate scoring does not affect ScoreRevision",
+        "- quantizer behavior unchanged",
+        "- benchmark status semantics unchanged",
+        "",
+        "## Current Grid vs Best Diagnostic Grid",
+        f"- best_diagnostic_candidate_id: {_fmt(rhythm_candidates.get('best_diagnostic_candidate_id'))}",
+        f"- current_candidate_rank: {_fmt(rhythm_candidates.get('current_candidate_rank'))}",
+        f"- current_vs_best_score_delta: {_fmt(rhythm_candidates.get('current_vs_best_score_delta'))}",
+        f"- rhythm_candidate_warning: {_fmt(warning) if warning else 'none'}",
+        "",
+        "## Candidate Comparison",
+        "| rank | candidate_id | source | tempo_bpm | beats | downbeats | stability | bar_phase | off_grid | score | warnings |",
+        "| ---: | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |",
+    ]
+    for candidate in sorted(candidates, key=lambda item: item.get("rank") or 9999):
+        warnings = candidate.get("warnings") if isinstance(candidate.get("warnings"), list) else []
+        lines.append(
+            "| {rank} | {candidate_id} | {source} | {tempo} | {beats} | {downbeats} | {stability} | {bar_phase} | {off_grid} | {score} | {warnings} |".format(
+                rank=_fmt(candidate.get("rank")),
+                candidate_id=candidate.get("candidate_id"),
+                source=candidate.get("source"),
+                tempo=_fmt(candidate.get("tempo_bpm")),
+                beats=_fmt(candidate.get("beat_count")),
+                downbeats=_fmt(candidate.get("downbeat_count")),
+                stability=_fmt(candidate.get("tempo_stability")),
+                bar_phase=_fmt(candidate.get("bar_phase_confidence")),
+                off_grid=_fmt(candidate.get("off_grid_onset_ratio")),
+                score=_fmt(candidate.get("candidate_score")),
+                warnings="; ".join(str(item) for item in warnings) if warnings else "none",
+            )
+        )
+    suspicion = _candidate_suspicion_summary(candidates, rhythm_candidates)
+    lines.extend(
+        [
+            "",
+            "## Suspicion Summary",
+            f"- possible half/double tempo suspicion: {suspicion['tempo']}",
+            f"- possible downbeat phase issue: {suspicion['phase']}",
+            f"- possible pickup issue: {suspicion['pickup']}",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def _enrich_rhythm_grid_debug_copy(rhythm_grid_path: Path, rhythm_debug: dict[str, Any]) -> None:
+    if not rhythm_grid_path.exists() or not rhythm_debug.get("available"):
+        return
+    payload = _read_json(rhythm_grid_path)
+    if not isinstance(payload, dict):
+        return
+    diagnostics = payload.get("diagnostics") if isinstance(payload.get("diagnostics"), dict) else {}
+    diagnostics.update(
+        {
+            "diagnostic_only": True,
+            "tempo_stability": rhythm_debug.get("tempo_stability"),
+            "beat_gap_mean_sec": rhythm_debug.get("beat_gap_mean_sec"),
+            "beat_gap_p95_sec": rhythm_debug.get("beat_gap_p95_sec"),
+            "beat_gap_max_sec": rhythm_debug.get("beat_gap_max_sec"),
+            "bar_phase_confidence": rhythm_debug.get("bar_phase_confidence"),
+            "off_grid_onset_ratio": rhythm_debug.get("off_grid_onset_ratio"),
+            "pickup_likelihood": rhythm_debug.get("pickup_likelihood"),
+            "rubato_likelihood": rhythm_debug.get("rubato_likelihood"),
+            "grid_uncertain_region_count": rhythm_debug.get("grid_uncertain_region_count"),
+            "preliminary_rhythm_diagnosis": rhythm_debug.get("preliminary_rhythm_diagnosis"),
+            "rhythm_flags": rhythm_debug.get("rhythm_flags"),
+        }
+    )
+    payload["diagnostics"] = diagnostics
+    _write_json(rhythm_grid_path, payload)
+
+
+def _build_rhythm_grid_candidate(
+    *,
+    candidate_id: str,
+    source: str,
+    beat_times: list[float],
+    downbeat_times: list[float],
+    tempo_bpm: float | None,
+    beats_per_bar: int,
+    downbeat_confidence: float | None,
+    predicted_notes: list[NoteEvent],
+    warnings: list[str],
+) -> dict[str, Any]:
+    beat_times = sorted(set(float(value) for value in beat_times))
+    downbeat_times = sorted(set(float(value) for value in downbeat_times))
+    gaps = _positive_diffs(beat_times)
+    beat_gap_mean = _mean(gaps)
+    beat_gap_p95 = _percentile(gaps, 95.0)
+    beat_gap_max = max(gaps) if gaps else None
+    stability_payload = {"tempo_bpm": tempo_bpm} if tempo_bpm is not None else {}
+    tempo_stability = _tempo_stability(stability_payload, gaps)
+    if tempo_stability is None:
+        tempo_stability = 0.0
+    bar_phase_confidence = _bar_phase_confidence(
+        beat_times=beat_times,
+        downbeat_times=downbeat_times,
+        beats_per_bar=beats_per_bar,
+        downbeat_confidence=downbeat_confidence,
+    )
+    off_grid = _off_grid_onsets(predicted_notes, beat_times, beat_gap_mean)
+    pickup_likelihood = _pickup_likelihood(predicted_notes, beat_times, downbeat_times, beat_gap_mean)
+    rubato_likelihood = _rubato_likelihood(gaps)
+    uncertain_regions = _grid_uncertain_regions(
+        beat_times=beat_times,
+        beat_gap_mean=beat_gap_mean,
+        beat_gap_p95=beat_gap_p95,
+        downbeat_confidence=downbeat_confidence,
+        bar_phase_confidence=bar_phase_confidence,
+        off_grid_onsets=off_grid["onsets"],
+    )
+    score_breakdown = _rhythm_candidate_score_breakdown(
+        tempo_stability=tempo_stability,
+        beat_gap_p95=beat_gap_p95,
+        beat_gap_mean=beat_gap_mean,
+        bar_phase_confidence=bar_phase_confidence,
+        off_grid_onset_ratio=off_grid["ratio"],
+        downbeat_confidence=downbeat_confidence,
+    )
+    candidate_warnings = list(warnings)
+    if len(beat_times) < 2:
+        candidate_warnings.append("candidate has fewer than 2 beats")
+    if not downbeat_times:
+        candidate_warnings.append("candidate has no downbeats")
+    return {
+        "candidate_id": candidate_id,
+        "source": source,
+        "diagnostic_only": True,
+        "tempo_bpm": _round_optional(tempo_bpm),
+        "beat_count": len(beat_times),
+        "downbeat_count": len(downbeat_times),
+        "beat_gap_mean_sec": _round_optional(beat_gap_mean),
+        "beat_gap_p95_sec": _round_optional(beat_gap_p95),
+        "beat_gap_max_sec": _round_optional(beat_gap_max),
+        "tempo_stability": _round_optional(tempo_stability),
+        "downbeat_confidence": _round_optional(downbeat_confidence),
+        "bar_phase_confidence": _round_optional(bar_phase_confidence),
+        "off_grid_onset_ratio": _round_optional(off_grid["ratio"]),
+        "pickup_likelihood": _round_optional(pickup_likelihood),
+        "rubato_likelihood": _round_optional(rubato_likelihood),
+        "uncertain_region_count": len(uncertain_regions),
+        "candidate_score": _round_optional(score_breakdown["total"]),
+        "score_breakdown": score_breakdown,
+        "warnings": candidate_warnings,
+    }
+
+
+def _rhythm_candidate_score_breakdown(
+    *,
+    tempo_stability: float | None,
+    beat_gap_p95: float | None,
+    beat_gap_mean: float | None,
+    bar_phase_confidence: float | None,
+    off_grid_onset_ratio: float | None,
+    downbeat_confidence: float | None,
+) -> dict[str, float]:
+    tempo_component = _clamp01(tempo_stability)
+    if beat_gap_p95 is None or beat_gap_mean is None or beat_gap_mean <= 0:
+        beat_gap_component = 0.0
+    else:
+        beat_gap_component = _clamp01(1.0 - max(0.0, beat_gap_p95 - beat_gap_mean) / max(beat_gap_mean, 1e-6))
+    bar_phase_component = _clamp01(bar_phase_confidence)
+    off_grid_component = 0.0 if off_grid_onset_ratio is None else _clamp01(1.0 - off_grid_onset_ratio)
+    downbeat_component = _clamp01(downbeat_confidence)
+    total = (
+        0.30 * tempo_component
+        + 0.20 * beat_gap_component
+        + 0.20 * bar_phase_component
+        + 0.20 * off_grid_component
+        + 0.10 * downbeat_component
+    )
+    return {
+        "tempo_stability": _round_float(tempo_component),
+        "beat_gap_p95": _round_float(beat_gap_component),
+        "bar_phase_confidence": _round_float(bar_phase_component),
+        "off_grid_onset_ratio": _round_float(off_grid_component),
+        "downbeat_confidence": _round_float(downbeat_component),
+        "total": _round_float(total),
+    }
+
+
+def _double_tempo_beats(beat_times: list[float]) -> list[float]:
+    if len(beat_times) < 2:
+        return list(beat_times)
+    doubled: list[float] = []
+    for index in range(1, len(beat_times)):
+        previous = beat_times[index - 1]
+        current = beat_times[index]
+        if not doubled:
+            doubled.append(previous)
+        midpoint = previous + (current - previous) / 2.0
+        doubled.extend([midpoint, current])
+    return sorted(set(_round_float(value) for value in doubled))
+
+
+def _phase_downbeats(beat_times: list[float], beats_per_bar: int, phase: int) -> list[float]:
+    if not beat_times:
+        return []
+    return [float(value) for index, value in enumerate(beat_times) if index % max(2, beats_per_bar) == phase % max(2, beats_per_bar)]
+
+
+def _rhythm_candidate_warning(current: dict[str, Any] | None, best: dict[str, Any] | None, score_delta: float | None) -> str | None:
+    if not current or not best or best.get("candidate_id") == "current_grid" or score_delta is None:
+        return None
+    if score_delta < 0.12:
+        return None
+    best_id = str(best.get("candidate_id"))
+    if best_id in {"half_tempo_grid", "double_tempo_grid"}:
+        return "possible_half_or_double_tempo_grid"
+    if best_id.startswith("downbeat_phase_shift_"):
+        return "possible_downbeat_phase_issue"
+    return "diagnostic_candidate_scores_much_better_than_current_grid"
+
+
+def _candidate_suspicion_summary(candidates: list[dict[str, Any]], payload: dict[str, Any]) -> dict[str, str]:
+    by_id = {str(candidate.get("candidate_id")): candidate for candidate in candidates if isinstance(candidate, dict)}
+    current_score = _as_float(by_id.get("current_grid", {}).get("candidate_score"))
+    best_id = payload.get("best_diagnostic_candidate_id")
+    tempo = "none"
+    for candidate_id in ("half_tempo_grid", "double_tempo_grid"):
+        score = _as_float(by_id.get(candidate_id, {}).get("candidate_score"))
+        if current_score is not None and score is not None and score - current_score >= 0.12:
+            tempo = candidate_id
+            break
+    phase = "none"
+    if isinstance(best_id, str) and best_id.startswith("downbeat_phase_shift_") and best_id != "downbeat_phase_shift_0":
+        phase = best_id
+    pickup = "possible" if any((_as_float(candidate.get("pickup_likelihood")) or 0.0) >= 0.7 for candidate in candidates) else "none"
+    return {"tempo": tempo, "phase": phase, "pickup": pickup}
+
+
+def _clamp01(value: Any) -> float:
+    number = _as_float(value)
+    if number is None:
+        return 0.0
+    return max(0.0, min(1.0, number))
 
 
 def _pitch_label(value: Any) -> str:
@@ -1144,6 +1694,7 @@ def _derive_f0_diagnostics(f0_track_path: Path | None) -> dict[str, Any]:
         "f0_median_confidence": _median(confidences),
         "f0_pitch_range": [min(voiced_pitches), max(voiced_pitches)] if voiced_pitches else None,
         "f0_time_span_sec": (max(times) - min(times)) if times else None,
+        "f0_voiced_duration_sec": _round_optional(voiced_count * _median(_positive_diffs(sorted(times))) if voiced_count and len(times) >= 2 else None),
     }
 
 
@@ -1250,6 +1801,466 @@ def _derive_quantized_note_diagnostics(quantized_notes_path: Path | None) -> dic
         "fragmentation": fragmentation,
         "overmerge": overmerge,
     }
+
+
+def build_note_funnel_debug(
+    *,
+    expected_notes: list[NoteEvent],
+    predicted_notes: list[NoteEvent],
+    f0_track_path: Path | None,
+    note_candidates_path: Path | None,
+    selected_melody_path: Path | None,
+    quantized_notes_path: Path | None,
+    score_ir_path: Path | None,
+) -> dict[str, Any]:
+    f0_summary = _note_funnel_f0_summary(f0_track_path)
+    expected_layer = _note_funnel_layer_from_notes("expected", expected_notes)
+    candidate_events = _load_artifact_note_events(note_candidates_path, kind="note_candidates")
+    selected_events = _load_artifact_note_events(selected_melody_path, kind="selected_melody")
+    quantized_events = _load_artifact_note_events(quantized_notes_path, kind="quantized_notes")
+    score_ir_events = _load_artifact_note_events(score_ir_path, kind="score_ir")
+
+    layers = {
+        "expected": expected_layer,
+        "note_candidates": _note_funnel_layer_from_artifact(
+            "note_candidates",
+            candidate_events,
+            note_candidates_path,
+            "note_candidates.json missing",
+        ),
+        "selected_melody": _note_funnel_layer_from_artifact(
+            "selected_melody",
+            selected_events,
+            selected_melody_path,
+            "selected_melody.json missing",
+        ),
+        "quantized_notes": _note_funnel_layer_from_artifact(
+            "quantized_notes",
+            quantized_events,
+            quantized_notes_path,
+            "quantized_notes.json missing",
+        ),
+        "score_ir": _note_funnel_layer_from_artifact(
+            "score_ir",
+            score_ir_events,
+            score_ir_path,
+            "score_ir.json missing",
+        ),
+        "predicted_midi": _note_funnel_layer_from_notes("predicted_midi", predicted_notes),
+    }
+    retention = _note_funnel_retention(layers)
+    loss_attribution = _note_funnel_loss_attribution(layers, retention)
+    available_layers = [name for name, layer in layers.items() if layer.get("available")]
+    return {
+        "available": True,
+        "diagnostic_only": True,
+        "f0_voiced_frame_count": f0_summary.get("f0_voiced_frame_count"),
+        "f0_voiced_duration_sec": f0_summary.get("f0_voiced_duration_sec"),
+        "note_candidate_count": layers["note_candidates"].get("count"),
+        "selected_note_count": layers["selected_melody"].get("count"),
+        "quantized_note_count": layers["quantized_notes"].get("count"),
+        "score_ir_note_count": layers["score_ir"].get("count"),
+        "predicted_midi_note_count": layers["predicted_midi"].get("count"),
+        "expected_note_count": layers["expected"].get("count"),
+        "f0": f0_summary,
+        "layers": layers,
+        "retention": retention,
+        "loss_attribution": loss_attribution,
+        "available_layers": available_layers,
+        "missing_layers": [name for name, layer in layers.items() if not layer.get("available")],
+    }
+
+
+def build_note_funnel_debug_markdown(
+    *,
+    sample_id: str,
+    sample_title: str,
+    note_funnel_debug: dict[str, Any],
+) -> str:
+    layers = note_funnel_debug.get("layers") if isinstance(note_funnel_debug.get("layers"), dict) else {}
+    retention = note_funnel_debug.get("retention") if isinstance(note_funnel_debug.get("retention"), dict) else {}
+    loss = note_funnel_debug.get("loss_attribution") if isinstance(note_funnel_debug.get("loss_attribution"), dict) else {}
+    flags = loss.get("flags") if isinstance(loss.get("flags"), dict) else {}
+    triggered = loss.get("triggered_flags") if isinstance(loss.get("triggered_flags"), list) else []
+    lines = [
+        f"# Note Funnel Debug: {sample_title}",
+        "",
+        f"- sample_id: {sample_id}",
+        "- diagnostic_only: true",
+        f"- f0_voiced_frame_count: {_fmt(note_funnel_debug.get('f0_voiced_frame_count'))}",
+        f"- f0_voiced_duration_sec: {_fmt(note_funnel_debug.get('f0_voiced_duration_sec'))}",
+        "",
+        "## Layer Summary",
+        "| Layer | Available | Count | Notes/sec | Median duration | Short ratio | Very short ratio | Median pitch | Pitch range | Total note duration | Missing reason |",
+        "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | --- | ---: | --- |",
+    ]
+    for layer_name in ["expected", "note_candidates", "selected_melody", "quantized_notes", "score_ir", "predicted_midi"]:
+        layer = layers.get(layer_name) if isinstance(layers.get(layer_name), dict) else {}
+        pitch_range = layer.get("pitch_range")
+        pitch_range_text = "missing"
+        if isinstance(pitch_range, list) and len(pitch_range) >= 2:
+            pitch_range_text = f"{_fmt(pitch_range[0])}-{_fmt(pitch_range[1])}"
+        lines.append(
+            "| "
+            + " | ".join(
+                [
+                    layer_name,
+                    str(bool(layer.get("available"))).lower(),
+                    _fmt(layer.get("count")),
+                    _fmt(layer.get("notes_per_second")),
+                    _fmt(layer.get("median_duration_sec")),
+                    _fmt(layer.get("short_note_ratio")),
+                    _fmt(layer.get("very_short_note_ratio")),
+                    _fmt(layer.get("median_pitch")),
+                    pitch_range_text,
+                    _fmt(layer.get("total_note_duration_sec")),
+                    _fmt(layer.get("unavailable_reason")) if not layer.get("available") else "none",
+                ]
+            )
+            + " |"
+        )
+    lines.extend(
+        [
+            "",
+            "## Retention",
+            f"- candidate_to_selected_count_ratio: {_fmt(retention.get('candidate_to_selected_count_ratio'))}",
+            f"- selected_to_quantized_count_ratio: {_fmt(retention.get('selected_to_quantized_count_ratio'))}",
+            f"- quantized_to_score_ir_count_ratio: {_fmt(retention.get('quantized_to_score_ir_count_ratio'))}",
+            f"- score_ir_to_predicted_count_ratio: {_fmt(retention.get('score_ir_to_predicted_count_ratio'))}",
+            f"- candidate_to_predicted_count_ratio: {_fmt(retention.get('candidate_to_predicted_count_ratio'))}",
+            "",
+            "## Loss Attribution",
+            f"- triggered_flags: {', '.join(str(flag) for flag in triggered) if triggered else 'none'}",
+            f"- primary_attribution: {_fmt(loss.get('primary_attribution'))}",
+        ]
+    )
+    for key in [
+        "possible_candidate_extraction_loss",
+        "possible_melody_selection_loss",
+        "possible_quantization_overmerge",
+        "possible_score_build_loss",
+        "possible_export_loss",
+        "possible_short_note_loss",
+        "possible_overmerge",
+        "possible_fragmentation",
+    ]:
+        flag = flags.get(key) if isinstance(flags, dict) else None
+        if isinstance(flag, dict):
+            lines.append(
+                f"- {key}: {str(bool(flag.get('triggered'))).lower()}"
+                f" (evidence: {_fmt(flag.get('evidence'))})"
+            )
+    return "\n".join(lines)
+
+
+def _note_funnel_f0_summary(f0_track_path: Path | None) -> dict[str, Any]:
+    if f0_track_path is None or not f0_track_path.exists():
+        return _unavailable("f0_track.json missing")
+    payload = _read_json(f0_track_path)
+    frames = payload.get("frames") if isinstance(payload, dict) else payload
+    if not isinstance(frames, list):
+        return _unavailable("f0 frames unavailable")
+    frame_hop = None
+    if isinstance(payload, dict):
+        analysis_info = payload.get("analysis_info") if isinstance(payload.get("analysis_info"), dict) else {}
+        frame_hop = _as_float(_first_present(analysis_info, "frame_hop_sec", "hop_sec", "hop_length_sec"))
+    times: list[float] = []
+    voiced_times: list[float] = []
+    voiced_count = 0
+    for frame in frames:
+        if not isinstance(frame, dict):
+            continue
+        time_sec = _as_float(_first_present(frame, "time_sec", "time", "t", "timestamp"))
+        if time_sec is not None:
+            times.append(time_sec)
+        if _frame_is_voiced(frame):
+            voiced_count += 1
+            if time_sec is not None:
+                voiced_times.append(time_sec)
+    if frame_hop is None:
+        diffs = _positive_diffs(sorted(times))
+        frame_hop = _median(diffs)
+    voiced_duration = voiced_count * frame_hop if frame_hop is not None else None
+    if voiced_duration is None and len(voiced_times) >= 2:
+        voiced_duration = max(voiced_times) - min(voiced_times)
+    return {
+        "available": True,
+        "f0_frame_count": len(frames),
+        "f0_voiced_frame_count": voiced_count,
+        "f0_voiced_duration_sec": _round_optional(voiced_duration),
+        "frame_hop_sec": _round_optional(frame_hop),
+    }
+
+
+def _note_funnel_layer_from_notes(layer_name: str, notes: list[NoteEvent]) -> dict[str, Any]:
+    return _note_funnel_layer_stats(layer_name, notes, available=True)
+
+
+def _note_funnel_layer_from_artifact(
+    layer_name: str,
+    events: list[NoteEvent] | None,
+    path: Path | None,
+    missing_reason: str,
+) -> dict[str, Any]:
+    if path is None or not path.exists():
+        return _note_funnel_unavailable_layer(layer_name, missing_reason)
+    if events is None:
+        return _note_funnel_unavailable_layer(layer_name, f"{path.name} unreadable")
+    return _note_funnel_layer_stats(layer_name, events, available=True)
+
+
+def _note_funnel_unavailable_layer(layer_name: str, reason: str) -> dict[str, Any]:
+    return {
+        "available": False,
+        "layer": layer_name,
+        "unavailable_reason": reason,
+        "count": "unavailable",
+        "notes_per_second": "unavailable",
+        "median_duration_sec": "unavailable",
+        "short_note_ratio": "unavailable",
+        "very_short_note_ratio": "unavailable",
+        "median_pitch": "unavailable",
+        "pitch_range": "unavailable",
+        "total_note_duration_sec": "unavailable",
+    }
+
+
+def _note_funnel_layer_stats(layer_name: str, notes: list[NoteEvent], *, available: bool) -> dict[str, Any]:
+    stats = _note_collection_stats(notes)
+    durations = [float(note.duration) for note in notes]
+    total_duration = sum(durations)
+    return {
+        "available": available,
+        "layer": layer_name,
+        "count": len(notes),
+        "notes_per_second": _round_optional(_safe_divide(len(notes), stats.get("time_span_sec"))),
+        "median_duration_sec": _round_optional(stats.get("median_duration_sec")),
+        "short_note_ratio": _round_optional(stats.get("short_note_ratio")),
+        "very_short_note_ratio": _round_optional(_safe_divide(sum(1 for duration in durations if duration < 0.125), len(durations))),
+        "median_pitch": _round_optional(stats.get("median_pitch")),
+        "pitch_range": stats.get("pitch_range"),
+        "total_note_duration_sec": _round_float(total_duration),
+        "time_span_sec": _round_optional(stats.get("time_span_sec")),
+    }
+
+
+def _note_funnel_retention(layers: dict[str, dict[str, Any]]) -> dict[str, Any]:
+    return {
+        "candidate_to_selected_count_ratio": _round_optional(_layer_count_ratio(layers, "selected_melody", "note_candidates")),
+        "selected_to_quantized_count_ratio": _round_optional(_layer_count_ratio(layers, "quantized_notes", "selected_melody")),
+        "quantized_to_score_ir_count_ratio": _round_optional(_layer_count_ratio(layers, "score_ir", "quantized_notes")),
+        "score_ir_to_predicted_count_ratio": _round_optional(_layer_count_ratio(layers, "predicted_midi", "score_ir")),
+        "candidate_to_predicted_count_ratio": _round_optional(_layer_count_ratio(layers, "predicted_midi", "note_candidates")),
+    }
+
+
+def _layer_count_ratio(layers: dict[str, dict[str, Any]], numerator_layer: str, denominator_layer: str) -> float | None:
+    numerator = _layer_count(layers, numerator_layer)
+    denominator = _layer_count(layers, denominator_layer)
+    return _safe_divide(numerator, denominator)
+
+
+def _layer_count(layers: dict[str, dict[str, Any]], layer_name: str) -> int | None:
+    layer = layers.get(layer_name) if isinstance(layers.get(layer_name), dict) else {}
+    count = layer.get("count")
+    return _as_int(count)
+
+
+def _layer_float(layers: dict[str, dict[str, Any]], layer_name: str, key: str) -> float | None:
+    layer = layers.get(layer_name) if isinstance(layers.get(layer_name), dict) else {}
+    return _as_float(layer.get(key))
+
+
+def _note_funnel_loss_attribution(layers: dict[str, dict[str, Any]], retention: dict[str, Any]) -> dict[str, Any]:
+    expected_count = _layer_count(layers, "expected") or 0
+    candidate_count = _layer_count(layers, "note_candidates")
+    selected_count = _layer_count(layers, "selected_melody")
+    quantized_count = _layer_count(layers, "quantized_notes")
+    score_ir_count = _layer_count(layers, "score_ir")
+    predicted_count = _layer_count(layers, "predicted_midi") or 0
+    expected_short_ratio = _layer_float(layers, "expected", "short_note_ratio")
+    predicted_short_ratio = _layer_float(layers, "predicted_midi", "short_note_ratio")
+    expected_median_duration = _layer_float(layers, "expected", "median_duration_sec")
+    candidate_median_duration = _layer_float(layers, "note_candidates", "median_duration_sec")
+    predicted_median_duration = _layer_float(layers, "predicted_midi", "median_duration_sec")
+    short_note_ratio_delta = (
+        expected_short_ratio - predicted_short_ratio
+        if expected_short_ratio is not None and predicted_short_ratio is not None
+        else None
+    )
+    overmerge_reference_duration = max(
+        [value for value in [candidate_median_duration, expected_median_duration] if value is not None],
+        default=None,
+    )
+
+    flags = {
+        "possible_candidate_extraction_loss": _flag(
+            candidate_count is not None
+            and expected_count > 0
+            and candidate_count < max(10, int(expected_count * 0.35)),
+            {
+                "expected_note_count": expected_count,
+                "note_candidate_count": candidate_count,
+                "candidate_expected_ratio": _round_optional(_safe_divide(candidate_count, expected_count)),
+            },
+        ),
+        "possible_melody_selection_loss": _flag(
+            candidate_count is not None
+            and selected_count is not None
+            and candidate_count >= max(10, int(expected_count * 0.35))
+            and selected_count < candidate_count * 0.55,
+            {
+                "note_candidate_count": candidate_count,
+                "selected_note_count": selected_count,
+                "candidate_to_selected_count_ratio": retention.get("candidate_to_selected_count_ratio"),
+            },
+        ),
+        "possible_quantization_overmerge": _flag(
+            selected_count is not None
+            and quantized_count is not None
+            and selected_count >= 10
+            and quantized_count < selected_count * 0.70,
+            {
+                "selected_note_count": selected_count,
+                "quantized_note_count": quantized_count,
+                "selected_to_quantized_count_ratio": retention.get("selected_to_quantized_count_ratio"),
+            },
+        ),
+        "possible_score_build_loss": _flag(
+            quantized_count is not None
+            and score_ir_count is not None
+            and quantized_count >= 10
+            and score_ir_count < quantized_count * 0.85,
+            {
+                "quantized_note_count": quantized_count,
+                "score_ir_note_count": score_ir_count,
+                "quantized_to_score_ir_count_ratio": retention.get("quantized_to_score_ir_count_ratio"),
+            },
+        ),
+        "possible_export_loss": _flag(
+            score_ir_count is not None
+            and score_ir_count >= 10
+            and predicted_count < score_ir_count * 0.85,
+            {
+                "score_ir_note_count": score_ir_count,
+                "predicted_midi_note_count": predicted_count,
+                "score_ir_to_predicted_count_ratio": retention.get("score_ir_to_predicted_count_ratio"),
+            },
+        ),
+        "possible_short_note_loss": _flag(
+            expected_short_ratio is not None
+            and predicted_short_ratio is not None
+            and expected_short_ratio >= 0.45
+            and predicted_short_ratio <= expected_short_ratio - 0.25,
+            {
+                "expected_short_note_ratio": _round_optional(expected_short_ratio),
+                "predicted_short_note_ratio": _round_optional(predicted_short_ratio),
+                "short_note_ratio_delta": _round_optional(short_note_ratio_delta),
+            },
+        ),
+        "possible_overmerge": _flag(
+            candidate_count is not None
+            and predicted_count > 0
+            and candidate_count >= predicted_count * 1.25
+            and predicted_median_duration is not None
+            and overmerge_reference_duration is not None
+            and predicted_median_duration >= overmerge_reference_duration * 1.25,
+            {
+                "note_candidate_count": candidate_count,
+                "predicted_midi_note_count": predicted_count,
+                "candidate_to_predicted_count_ratio": retention.get("candidate_to_predicted_count_ratio"),
+                "candidate_median_duration_sec": _round_optional(candidate_median_duration),
+                "expected_median_duration_sec": _round_optional(expected_median_duration),
+                "predicted_median_duration_sec": _round_optional(predicted_median_duration),
+            },
+        ),
+        "possible_fragmentation": _flag(
+            expected_count > 0
+            and predicted_count >= expected_count * 1.35
+            and predicted_median_duration is not None
+            and predicted_median_duration < 0.20,
+            {
+                "expected_note_count": expected_count,
+                "predicted_midi_note_count": predicted_count,
+                "predicted_expected_count_ratio": _round_optional(_safe_divide(predicted_count, expected_count)),
+                "predicted_median_duration_sec": _round_optional(predicted_median_duration),
+            },
+        ),
+    }
+    triggered = [name for name, payload in flags.items() if payload.get("triggered")]
+    return {
+        "available": True,
+        "flags": flags,
+        "triggered_flags": triggered,
+        "primary_attribution": triggered[0] if triggered else "none",
+    }
+
+
+def _flag(triggered: bool, evidence: dict[str, Any]) -> dict[str, Any]:
+    return {"triggered": bool(triggered), "evidence": evidence}
+
+
+def _derive_rhythm_diagnostics(rhythm_debug_path: Path | None, *, rhythm_candidates_path: Path | None = None) -> dict[str, Any]:
+    if rhythm_debug_path is None or not rhythm_debug_path.exists():
+        diagnostics = _unavailable("rhythm_debug.json missing")
+        _attach_rhythm_candidate_summary(diagnostics, rhythm_candidates_path)
+        return diagnostics
+    payload = _read_json(rhythm_debug_path)
+    if not isinstance(payload, dict):
+        diagnostics = _unavailable("rhythm diagnostics unavailable")
+        _attach_rhythm_candidate_summary(diagnostics, rhythm_candidates_path)
+        return diagnostics
+    if not payload.get("available"):
+        _attach_rhythm_candidate_summary(payload, rhythm_candidates_path)
+        return payload
+    fields = [
+        "available",
+        "diagnostic_only",
+        "tempo_bpm",
+        "tempo_stability",
+        "beat_count",
+        "beat_gap_mean_sec",
+        "beat_gap_p95_sec",
+        "beat_gap_max_sec",
+        "downbeat_count",
+        "downbeat_confidence",
+        "bar_phase_confidence",
+        "off_grid_onset_ratio",
+        "pickup_likelihood",
+        "rubato_likelihood",
+        "grid_uncertain_region_count",
+        "grid_uncertain_regions",
+        "preliminary_rhythm_diagnosis",
+        "rhythm_flags",
+    ]
+    diagnostics = {field: payload.get(field) for field in fields}
+    _attach_rhythm_candidate_summary(diagnostics, rhythm_candidates_path)
+    return diagnostics
+
+
+def _attach_rhythm_candidate_summary(diagnostics: dict[str, Any], rhythm_candidates_path: Path | None) -> None:
+    candidates_payload = _read_json(rhythm_candidates_path) if rhythm_candidates_path is not None and rhythm_candidates_path.exists() else None
+    if not isinstance(candidates_payload, dict):
+        diagnostics.update(
+            {
+                "candidates": [],
+                "best_diagnostic_candidate_id": None,
+                "current_candidate_rank": None,
+                "current_vs_best_score_delta": None,
+                "rhythm_candidate_warning": None,
+            }
+        )
+        return
+    candidates = candidates_payload.get("candidates") if isinstance(candidates_payload.get("candidates"), list) else []
+    diagnostics.update(
+        {
+            "candidates": candidates,
+            "best_diagnostic_candidate_id": candidates_payload.get("best_diagnostic_candidate_id"),
+            "current_candidate_rank": candidates_payload.get("current_candidate_rank"),
+            "current_vs_best_score_delta": candidates_payload.get("current_vs_best_score_delta"),
+            "rhythm_candidate_warning": candidates_payload.get("rhythm_candidate_warning"),
+        }
+    )
 
 
 def _derive_short_note_diagnostics(
@@ -1377,7 +2388,7 @@ def _load_artifact_note_events(path: Path | None, *, kind: str) -> list[NoteEven
         return None
     if kind == "selected_melody" and isinstance(payload, dict):
         items = payload.get("selected_notes") if isinstance(payload.get("selected_notes"), list) else []
-    elif kind == "quantized_notes" and isinstance(payload, dict):
+    elif kind in {"quantized_notes", "score_ir"} and isinstance(payload, dict):
         items = payload.get("notes") if isinstance(payload.get("notes"), list) else []
     else:
         items = _walk_note_like_items(_preferred_candidate_note_payload(payload))
@@ -2621,7 +3632,13 @@ def _derived_diagnostics_markdown_lines(derived_diagnostics: dict[str, Any] | No
     note_candidates = derived_diagnostics.get("note_candidates") if isinstance(derived_diagnostics.get("note_candidates"), dict) else {}
     selected_melody = derived_diagnostics.get("selected_melody") if isinstance(derived_diagnostics.get("selected_melody"), dict) else {}
     quantized_notes = derived_diagnostics.get("quantized_notes") if isinstance(derived_diagnostics.get("quantized_notes"), dict) else {}
+    rhythm = derived_diagnostics.get("rhythm") if isinstance(derived_diagnostics.get("rhythm"), dict) else {}
     short_note_diagnostics = derived_diagnostics.get("short_note_diagnostics") if isinstance(derived_diagnostics.get("short_note_diagnostics"), dict) else {}
+    note_funnel = derived_diagnostics.get("note_funnel") if isinstance(derived_diagnostics.get("note_funnel"), dict) else {}
+    note_funnel_layers = note_funnel.get("layers") if isinstance(note_funnel.get("layers"), dict) else {}
+    note_funnel_retention = note_funnel.get("retention") if isinstance(note_funnel.get("retention"), dict) else {}
+    note_funnel_loss = note_funnel.get("loss_attribution") if isinstance(note_funnel.get("loss_attribution"), dict) else {}
+    note_funnel_flags = note_funnel_loss.get("triggered_flags") if isinstance(note_funnel_loss.get("triggered_flags"), list) else []
     quant_fragmentation = quantized_notes.get("fragmentation") if isinstance(quantized_notes.get("fragmentation"), dict) else {}
     quant_overmerge = quantized_notes.get("overmerge") if isinstance(quantized_notes.get("overmerge"), dict) else {}
     short_loss_attribution = short_note_diagnostics.get("loss_attribution") if isinstance(short_note_diagnostics.get("loss_attribution"), dict) else {}
@@ -2714,6 +3731,46 @@ def _derived_diagnostics_markdown_lines(derived_diagnostics: dict[str, Any] | No
         f"- overmerge_overlap_pair_count: {_fmt(quant_overmerge.get('overlap_pair_count'))}",
         f"- overmerge_risk_score: {_fmt(quant_overmerge.get('risk_score'))}",
         f"- unavailable_reason: {_fmt(quantized_notes.get('unavailable_reason')) if not quantized_notes.get('available') else 'none'}",
+        "### Rhythm Diagnostics",
+        f"- available: {str(bool(rhythm.get('available'))).lower()}",
+        f"- tempo_bpm: {_fmt(rhythm.get('tempo_bpm'))}",
+        f"- tempo_stability: {_fmt(rhythm.get('tempo_stability'))}",
+        f"- beat_count: {_fmt(rhythm.get('beat_count'))}",
+        f"- beat_gap_mean_sec: {_fmt(rhythm.get('beat_gap_mean_sec'))}",
+        f"- beat_gap_p95_sec: {_fmt(rhythm.get('beat_gap_p95_sec'))}",
+        f"- beat_gap_max_sec: {_fmt(rhythm.get('beat_gap_max_sec'))}",
+        f"- downbeat_count: {_fmt(rhythm.get('downbeat_count'))}",
+        f"- downbeat_confidence: {_fmt(rhythm.get('downbeat_confidence'))}",
+        f"- bar_phase_confidence: {_fmt(rhythm.get('bar_phase_confidence'))}",
+        f"- off_grid_onset_ratio: {_fmt(rhythm.get('off_grid_onset_ratio'))}",
+        f"- pickup_likelihood: {_fmt(rhythm.get('pickup_likelihood'))}",
+        f"- rubato_likelihood: {_fmt(rhythm.get('rubato_likelihood'))}",
+        f"- grid_uncertain_region_count: {_fmt(rhythm.get('grid_uncertain_region_count'))}",
+        f"- preliminary_rhythm_diagnosis: {_fmt(rhythm.get('preliminary_rhythm_diagnosis'))}",
+        f"- rhythm_flags: {', '.join(str(flag) for flag in rhythm.get('rhythm_flags') or []) if isinstance(rhythm.get('rhythm_flags'), list) else 'none'}",
+        f"- rhythm_candidate_count: {_fmt(len(rhythm.get('candidates') or [])) if isinstance(rhythm.get('candidates'), list) else 'missing'}",
+        f"- best_diagnostic_candidate_id: {_fmt(rhythm.get('best_diagnostic_candidate_id'))}",
+        f"- current_candidate_rank: {_fmt(rhythm.get('current_candidate_rank'))}",
+        f"- current_vs_best_score_delta: {_fmt(rhythm.get('current_vs_best_score_delta'))}",
+        f"- rhythm_candidate_warning: {_fmt(rhythm.get('rhythm_candidate_warning')) if rhythm.get('rhythm_candidate_warning') else 'none'}",
+        f"- unavailable_reason: {_fmt(rhythm.get('unavailable_reason')) if not rhythm.get('available') else 'none'}",
+        "### Note Funnel",
+        f"- f0_voiced_frame_count: {_fmt(note_funnel.get('f0_voiced_frame_count'))}",
+        f"- f0_voiced_duration_sec: {_fmt(note_funnel.get('f0_voiced_duration_sec'))}",
+        f"- note_candidate_count: {_fmt(note_funnel.get('note_candidate_count'))}",
+        f"- selected_note_count: {_fmt(note_funnel.get('selected_note_count'))}",
+        f"- quantized_note_count: {_fmt(note_funnel.get('quantized_note_count'))}",
+        f"- score_ir_note_count: {_fmt(note_funnel.get('score_ir_note_count'))}",
+        f"- predicted_midi_note_count: {_fmt(note_funnel.get('predicted_midi_note_count'))}",
+        f"- expected_note_count: {_fmt(note_funnel.get('expected_note_count'))}",
+        f"- candidate_to_selected_count_ratio: {_fmt(note_funnel_retention.get('candidate_to_selected_count_ratio'))}",
+        f"- selected_to_quantized_count_ratio: {_fmt(note_funnel_retention.get('selected_to_quantized_count_ratio'))}",
+        f"- quantized_to_score_ir_count_ratio: {_fmt(note_funnel_retention.get('quantized_to_score_ir_count_ratio'))}",
+        f"- score_ir_to_predicted_count_ratio: {_fmt(note_funnel_retention.get('score_ir_to_predicted_count_ratio'))}",
+        f"- candidate_to_predicted_count_ratio: {_fmt(note_funnel_retention.get('candidate_to_predicted_count_ratio'))}",
+        f"- triggered_funnel_flags: {', '.join(str(flag) for flag in note_funnel_flags) if note_funnel_flags else 'none'}",
+        f"- primary_attribution: {_fmt(note_funnel_loss.get('primary_attribution'))}",
+        f"- missing_layers: {', '.join(str(layer) for layer in note_funnel.get('missing_layers') or []) if isinstance(note_funnel.get('missing_layers'), list) and note_funnel.get('missing_layers') else 'none'}",
         "### Short Note Diagnostics",
         f"- available: {str(bool(short_note_diagnostics.get('available'))).lower()}",
         f"- expected_short_note_count: {_fmt(short_note_diagnostics.get('expected_short_note_count'))}",
@@ -2881,5 +3938,270 @@ def _first_present(payload: dict[str, Any], *keys: str) -> Any:
     for key in keys:
         if key in payload and payload[key] is not None:
             return payload[key]
+    return None
+
+
+def _float_list(value: Any) -> list[float]:
+    if not isinstance(value, list):
+        return []
+    result: list[float] = []
+    for item in value:
+        number = _as_float(item)
+        if number is not None:
+            result.append(float(number))
+    return sorted(result)
+
+
+def _positive_diffs(values: list[float]) -> list[float]:
+    return [values[index] - values[index - 1] for index in range(1, len(values)) if values[index] > values[index - 1]]
+
+
+def _rhythm_tempo_bpm(payload: dict[str, Any], beat_gaps: list[float]) -> float | None:
+    for key in ("tempo_bpm", "bpm"):
+        value = _as_float(payload.get(key))
+        if value is not None and value > 0:
+            return value
+    gap = _median(beat_gaps)
+    if gap is None or gap <= 0:
+        return None
+    return 60.0 / gap
+
+
+def _tempo_stability(payload: dict[str, Any], beat_gaps: list[float]) -> float | None:
+    for key in ("tempo_stability", "stability_score", "bpm_confidence"):
+        value = _as_float(payload.get(key))
+        if value is not None:
+            return max(0.0, min(1.0, value))
+    if len(beat_gaps) < 2:
+        return None
+    mean_gap = _mean(beat_gaps)
+    if mean_gap is None or mean_gap <= 0:
+        return None
+    deviations = [abs(gap - mean_gap) for gap in beat_gaps]
+    mean_abs_deviation = _mean(deviations) or 0.0
+    return max(0.0, min(1.0, 1.0 - mean_abs_deviation / max(mean_gap, 1e-6)))
+
+
+def _bar_phase_confidence(
+    *,
+    beat_times: list[float],
+    downbeat_times: list[float],
+    beats_per_bar: int,
+    downbeat_confidence: float | None,
+) -> float | None:
+    if not beat_times or not downbeat_times:
+        return 0.0
+    beat_index_by_time = [_nearest_index(beat_times, downbeat) for downbeat in downbeat_times]
+    valid_indices = [index for index in beat_index_by_time if index is not None]
+    if not valid_indices:
+        return 0.0
+    phase_matches = sum(1 for index in valid_indices if index % beats_per_bar == valid_indices[0] % beats_per_bar)
+    phase_consistency = phase_matches / max(1, len(valid_indices))
+    if downbeat_confidence is None:
+        return phase_consistency
+    return max(0.0, min(1.0, 0.55 * phase_consistency + 0.45 * downbeat_confidence))
+
+
+def _off_grid_onsets(predicted_notes: list[NoteEvent], beat_times: list[float], beat_gap_mean: float | None) -> dict[str, Any]:
+    if not predicted_notes or len(beat_times) < 2 or beat_gap_mean is None or beat_gap_mean <= 0:
+        return {"ratio": None, "onsets": []}
+    tolerance = max(0.06, min(0.18, beat_gap_mean * 0.18))
+    off_grid: list[dict[str, Any]] = []
+    for note in predicted_notes:
+        distance = _distance_to_nearest(beat_times, float(note.start))
+        if distance is not None and distance > tolerance:
+            off_grid.append(
+                {
+                    "start_sec": _round_float(float(note.start)),
+                    "pitch": int(note.pitch),
+                    "nearest_grid_distance_sec": _round_float(distance),
+                }
+            )
+    return {"ratio": len(off_grid) / max(1, len(predicted_notes)), "onsets": off_grid}
+
+
+def _pickup_likelihood(predicted_notes: list[NoteEvent], beat_times: list[float], downbeat_times: list[float], beat_gap_mean: float | None) -> float | None:
+    if not predicted_notes:
+        return None
+    first_note = min(float(note.start) for note in predicted_notes)
+    anchors = downbeat_times or beat_times
+    if not anchors:
+        return None
+    first_anchor = min(anchors)
+    beat_gap = beat_gap_mean or 0.5
+    leading_gap = first_note - first_anchor
+    if leading_gap < -0.05:
+        return 0.85
+    if 0.05 <= leading_gap <= max(beat_gap * 1.5, 0.75):
+        return 0.45
+    if leading_gap > max(beat_gap * 4.0, 2.0):
+        return 0.75
+    return 0.0
+
+
+def _rubato_likelihood(beat_gaps: list[float]) -> float | None:
+    if len(beat_gaps) < 3:
+        return None
+    mean_gap = _mean(beat_gaps)
+    if mean_gap is None or mean_gap <= 0:
+        return None
+    p95 = _percentile(beat_gaps, 95.0)
+    p05 = _percentile(beat_gaps, 5.0)
+    if p95 is None or p05 is None:
+        return None
+    spread_ratio = max(0.0, (p95 - p05) / max(mean_gap, 1e-6))
+    return max(0.0, min(1.0, spread_ratio / 0.5))
+
+
+def _grid_uncertain_regions(
+    *,
+    beat_times: list[float],
+    beat_gap_mean: float | None,
+    beat_gap_p95: float | None,
+    downbeat_confidence: float | None,
+    bar_phase_confidence: float | None,
+    off_grid_onsets: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    regions: list[dict[str, Any]] = []
+    if beat_times and beat_gap_mean and beat_gap_p95 and beat_gap_p95 > beat_gap_mean * 1.35:
+        threshold = beat_gap_mean * 1.35
+        for index in range(1, len(beat_times)):
+            gap = beat_times[index] - beat_times[index - 1]
+            if gap > threshold:
+                regions.append(
+                    {
+                        "start_sec": _round_float(beat_times[index - 1]),
+                        "end_sec": _round_float(beat_times[index]),
+                        "reason": "irregular_beat_gap",
+                        "confidence": _round_float(min(1.0, (gap - threshold) / max(beat_gap_mean, 1e-6))),
+                    }
+                )
+    if downbeat_confidence is not None and downbeat_confidence < 0.35 and beat_times:
+        regions.append(
+            {
+                "start_sec": _round_float(beat_times[0]),
+                "end_sec": _round_float(beat_times[-1]),
+                "reason": "low_downbeat_confidence",
+                "confidence": _round_float(1.0 - downbeat_confidence),
+            }
+        )
+    if bar_phase_confidence is not None and bar_phase_confidence < 0.45 and beat_times:
+        regions.append(
+            {
+                "start_sec": _round_float(beat_times[0]),
+                "end_sec": _round_float(beat_times[-1]),
+                "reason": "low_bar_phase_confidence",
+                "confidence": _round_float(1.0 - bar_phase_confidence),
+            }
+        )
+    for onset in off_grid_onsets[:20]:
+        start = _as_float(onset.get("start_sec")) if isinstance(onset, dict) else None
+        if start is None:
+            continue
+        regions.append(
+            {
+                "start_sec": _round_float(max(0.0, start - 0.1)),
+                "end_sec": _round_float(start + 0.1),
+                "reason": "off_grid_predicted_note_onset",
+                "confidence": _round_float(min(1.0, (_as_float(onset.get("nearest_grid_distance_sec")) or 0.0) / max(beat_gap_mean or 0.5, 1e-6))),
+            }
+        )
+    return regions[:50]
+
+
+def _rhythm_preliminary_diagnosis(
+    *,
+    tempo_stability: float | None,
+    downbeat_confidence: float | None,
+    bar_phase_confidence: float | None,
+    off_grid_onset_ratio: float | None,
+    pickup_likelihood: float | None,
+    rubato_likelihood: float | None,
+) -> str:
+    issues = []
+    if tempo_stability is not None and tempo_stability < 0.65:
+        issues.append("possible_tempo_instability")
+    if downbeat_confidence is not None and downbeat_confidence < 0.35:
+        issues.append("possible_downbeat_uncertainty")
+    if bar_phase_confidence is not None and bar_phase_confidence < 0.45:
+        issues.append("possible_bar_phase_error")
+    if off_grid_onset_ratio is not None and off_grid_onset_ratio > 0.35:
+        issues.append("possible_off_grid_quantization")
+    if pickup_likelihood is not None and pickup_likelihood >= 0.7:
+        issues.append("possible_pickup_or_leading_silence")
+    if rubato_likelihood is not None and rubato_likelihood >= 0.7 and "possible_tempo_instability" not in issues:
+        issues.append("possible_tempo_instability")
+    if len(issues) > 1:
+        return "mixed_rhythm_issue"
+    if issues:
+        return issues[0]
+    return "stable_grid"
+
+
+def _rhythm_flags(
+    *,
+    diagnosis: str,
+    tempo_stability: float | None,
+    downbeat_confidence: float | None,
+    bar_phase_confidence: float | None,
+    off_grid_onset_ratio: float | None,
+    pickup_likelihood: float | None,
+    rubato_likelihood: float | None,
+) -> list[str]:
+    flags: list[str] = []
+    if diagnosis != "stable_grid":
+        flags.append(diagnosis)
+    if tempo_stability is not None and tempo_stability < 0.65:
+        flags.append("possible_tempo_instability")
+    if downbeat_confidence is not None and downbeat_confidence < 0.35:
+        flags.append("possible_downbeat_uncertainty")
+    if bar_phase_confidence is not None and bar_phase_confidence < 0.45:
+        flags.append("possible_bar_phase_error")
+    if off_grid_onset_ratio is not None and off_grid_onset_ratio > 0.35:
+        flags.append("possible_off_grid_quantization")
+    if pickup_likelihood is not None and pickup_likelihood >= 0.7:
+        flags.append("possible_pickup_or_leading_silence")
+    if rubato_likelihood is not None and rubato_likelihood >= 0.7:
+        flags.append("possible_tempo_instability")
+    return sorted(set(flags))
+
+
+def _nearest_index(values: list[float], target: float) -> int | None:
+    if not values:
+        return None
+    return min(range(len(values)), key=lambda index: abs(values[index] - target))
+
+
+def _distance_to_nearest(values: list[float], target: float) -> float | None:
+    index = _nearest_index(values, target)
+    if index is None:
+        return None
+    return abs(values[index] - target)
+
+
+def _mean(values: list[float]) -> float | None:
+    if not values:
+        return None
+    return float(sum(values) / len(values))
+
+
+def _percentile(values: list[float], percentile: float) -> float | None:
+    if not values:
+        return None
+    sorted_values = sorted(values)
+    if len(sorted_values) == 1:
+        return float(sorted_values[0])
+    position = (len(sorted_values) - 1) * max(0.0, min(100.0, percentile)) / 100.0
+    lower = int(position)
+    upper = min(lower + 1, len(sorted_values) - 1)
+    weight = position - lower
+    return float(sorted_values[lower] * (1.0 - weight) + sorted_values[upper] * weight)
+
+
+def _first_float(*values: Any) -> float | None:
+    for value in values:
+        number = _as_float(value)
+        if number is not None:
+            return number
     return None
 
