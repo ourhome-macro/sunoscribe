@@ -1,16 +1,19 @@
 # SunoScribe
 
-SunoScribe 是一个面向歌曲音频/视频的自动扒谱项目。当前仓库包含后端、前端和音频处理模块；当前已成型的重点是后端音频链路与本地 benchmark 能力：
+SunoScribe 是一个面向歌曲音频/视频的自动扒谱项目。当前仓库包含后端、前端原型、音频处理模块、agent workflow 与本地 benchmark 能力。当前已成型的重点是后端音频链路与 typed artifact / revision 边界：
 
 - 上传音频/视频并回写项目媒体路径。
 - canonical audio、主唱/伴奏分离、歌词识别、主旋律转写、节奏网格与 ScoreIR 构建。
 - 生成 `ScoreRevision`、可追踪 `Artifact`，并从选定 revision 导出 MIDI / MusicXML / score view。
+- 提供受约束的 agent workflow：诊断、ScorePatch 提议/应用、导出重生成与 RVC job spec 准备。
 - production 语义遵循 required-stage 显式失败，不以 fallback/stub 掩盖结果质量问题。
+
+当前前端已经是 `React + Vite + TypeScript` 的工作台原型，包含 Dashboard、Projects、Upload、Project Detail、Score Workspace、Diagnostics 与 Settings 页面；但数据层仍主要使用 `frontend/src/lib/api/mock-data.ts`，尚未接入真实后端 API，OSMD 渲染区也仍是封装占位。
 
 ## 目录
 
 - `backend/`：FastAPI 后端、音频处理编排、数据库模型、测试。
-- `frontend/`：前端占位目录，当前不构成完整可运行产品。
+- `frontend/`：React/Vite/TypeScript 工作台原型，当前以 mock API 展示项目、revision、artifact、诊断和轻量编辑流程。
 - `docs/`：当前正式架构、运行策略与 benchmark 文档。
 - `backend/docs/`：后端运行与模块级历史说明，部分内容已标记为兼容/过渡说明。
 - `.cache/`：本地模型/工具缓存，已被 git 忽略。
@@ -45,6 +48,7 @@ $env:PYTHONPATH='.'
 
 - [正式音频流水线事实源](docs/backend-audio-pipeline.md)
 - [正式 production runtime policy](docs/production-runtime-policy.md)
+- [前端当前实现说明](docs/frontend-current-state.md)
 - [后端说明](backend/README.md)
 - [运行与缓存约定](backend/docs/operations.md)
 - [Pitch P1 协议](backend/docs/pitch/P1_PROTOCOL.md)

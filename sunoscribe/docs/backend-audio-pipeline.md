@@ -4,7 +4,9 @@
 
 本文面向未来维护 SunoScribe 后端音频流水线的工程师与 agent，描述当前后端从上传文件到乐谱导出工件的 typed data lineage、服务边界、阶段契约与落盘路径。
 
-本文只覆盖后端音频流水线，不涉及前端渲染、交互与页面职责。
+本文只覆盖后端音频流水线。前端当前实现状态见 `docs/frontend-current-state.md`。
+
+截至 2026-05-11，代码现状是：`Artifact`、`ScoreRevision`、revision-scoped export、上传即注册 `source_media`、任务编排与受约束 agent workflow 已经有代码实现；前端是 mock 驱动的工作台原型；OSMD、真实前端 API 对接、外部 RVC 调用与完整 score editing UI 尚未完成。
 
 ## 核心原则
 
@@ -25,6 +27,8 @@
 - `RhythmQuantizationService`：从转写阶段可用的语义音频结果中提取 `RhythmGrid` 负载。
 - `ScoreBuildService`：将转写结果、歌词片段、分析结果构建为 `ScoreIR`/`score_data`。
 - `RenderExportService`：从指定 `ScoreRevision` 生成 revision-scoped 的 MIDI、MusicXML、score view 等导出工件。
+- `ScoreRevisionService`：创建 machine/user revisions，注册分析 artifacts，应用受控 patch，并触发 revision-scoped core exports。
+- `AgentWorkflowService`：只在 `ScoreRevision` 与 typed artifacts 之后工作，提供诊断、patch proposal/apply、export regeneration 与 RVC job spec 准备。
 
 推荐将这些服务理解为“阶段处理器”，而 `AudioAnalysisService` 仅负责：
 
@@ -48,11 +52,24 @@ Upload File
   -> RhythmGrid
   -> ScoreRevision
   -> Export Artifacts
+  -> Frontend Render/Edit
+  -> CorrectedF0Track
+  -> RVC Artifacts
 ```
+
+当前实现已经覆盖到 `Export Artifacts`，并提供了后续 `Frontend Render/Edit` 与 `CorrectedF0Track`/RVC job spec 的接口雏形；真正的前端 API 对接、OSMD 渲染、外部 RVC 调用和混音产物还没有形成生产闭环。
 
 ### 1. Upload File -> MediaAsset
 
-输入可以是音频或视频文件。上传后，项目工作区首先保存一份原始输入副本，作为 `MediaAsset` 的文件落点。
+输入可以是音频或视频文件。上传 API 会先把文件保存到配置的上传后端，并更新 `projects.audio_path`，同时立即注册 `source_media` artifact。后续音频分析任务启动后，项目工作区还会保存一份原始输入副本，作为 `MediaAsset` 的工作区落点。
+
+实际入口：
+
+- audio：`POST /api/upload/audio`
+- video：`POST /api/upload/video`
+- API 文件：`backend/app/api/upload.py`
+- 上传服务：`backend/app/services/upload_service.py`
+- artifact 注册：`register_source_media_artifact(...)`
 
 - 工作区副本：`data/projects/<project_id>/input/source.<ext>`
 - 责任服务：`backend/app/services/workspace.py`
@@ -180,6 +197,8 @@ Upload File
 - `data/projects/<project_id>/score/analysis_ir.json`
 - 数据库模型：`backend/app/models/score_revision.py`
 
+数据库侧由 `ScoreRevision` 持久化 `score_ir`、派生 `score_data`、`patch_data` 与 revision metadata。`scores.current_revision_id` 指向当前选中 revision；machine revision 与 user/agent patch revision 不能互相覆盖。
+
 `ScoreRevision` 应承担的职责：
 
 - 表示某一次可追踪、可导出的乐谱版本；
@@ -200,6 +219,7 @@ Upload File
 - MIDI
 - MusicXML
 - score view JSON
+- summary PDF 仍存在于导出服务中，但 PDF 只是摘要/兼容输出，不等同于正式 score PDF engraving。
 
 当前 revision-scoped 文件落点：
 
@@ -227,6 +247,26 @@ Upload File
 - `score_revision_id`
 - 与任务、项目、score 的关联
 
+实现现状：`RenderExportService.ensure_core_exports(...)` 会为选定 revision 生成 MIDI、MusicXML 与 score view artifacts；`/api/score-revisions/{revision_id}/exports/regenerate` 可重新生成这些 core exports。
+
+MusicXML 生成当前仍是代码内构造的导出逻辑，尚未切换到 `music21` 作为长期 engraving/export 层。后续如果开始做高质量 MusicXML 或 score PDF，应优先引入 `music21`/MuseScore/Verovio 等专门服务，而不是继续扩大手写 XML。
+
+### 9. ScoreRevision -> Agent Workflow / Editing / RVC Prep
+
+受约束 agent workflow 已经有后端入口，但它只应发生在 `ScoreRevision` 和 typed artifacts 之后：
+
+- `POST /api/score-revisions/{revision_id}/agent/diagnose`
+- `POST /api/score-revisions/{revision_id}/agent/patch/propose`
+- `POST /api/score-revisions/{revision_id}/agent/patch/apply`
+- `POST /api/score-revisions/{revision_id}/agent/rvc/prepare`
+- `POST /api/score-revisions/{revision_id}/exports/regenerate`
+
+当前实现边界：
+
+- agent context 从 `ScoreRevision`、revision artifacts、`f0_track`、`note_candidates`、`rhythm_grid` 等 typed 数据读取。
+- patch proposal 必须经过 validator；apply 会创建新的 user revision，不覆盖 machine revision。
+- RVC prepare 当前产出的是 job spec / corrected F0 artifact 相关准备信息，不等同于已经调用外部 RVC 服务并生成 converted vocal/mix。
+
 ## 服务职责表
 
 | 服务 | 代码路径 | 主要输入 | 主要输出 | 职责边界 |
@@ -237,7 +277,9 @@ Upload File
 | `MelodyTranscriptionService` | `backend/app/services/melody_transcription_service.py` | `vocals.wav`、canonical WAV、辅助 stems | `F0Track`、`NoteCandidateSet`、pitch 中间产物 | 负责主唱 F0 与旋律候选，不负责导出最终记谱 |
 | `RhythmQuantizationService` | `backend/app/services/rhythm_quantization_service.py` | 语义音频结果 / 节奏相关音频 | `RhythmGrid` | 保持节奏网格为独立 typed artifact |
 | `ScoreBuildService` | `backend/app/services/score_build_service.py` | pitch 结果、歌词片段、分析结果 | `ScoreIR`、`score_data` | 负责构建可版本化乐谱表示 |
+| `ScoreRevisionService` | `backend/app/services/score_revision_service.py` | analysis result / ScorePatch | `ScoreRevision` + analysis/export artifacts | 持久化 machine/user revisions，禁止覆盖机器转写 |
 | `RenderExportService` | `backend/app/services/render_export_service.py` | `ScoreRevision` | MIDI / MusicXML / view JSON 工件 | 导出必须 revision-scoped，不能绕过 revision |
+| `AgentWorkflowService` | `backend/app/services/agent_workflow_service.py` | `ScoreRevision` + typed artifacts | diagnosis / validated patch / RVC job spec | agent 只能读 typed data 并通过 validator 修改 revision |
 | `ProjectWorkspace` | `backend/app/services/workspace.py` | `project_id` | 各阶段标准路径 | 管理每项目工件路径与目录结构 |
 
 ## 标准文件路径约定
@@ -264,6 +306,8 @@ Upload File
 | analysis_ir | `data/projects/<project_id>/score/analysis_ir.json` | 辅助分析结果 |
 | revision exports | `data/projects/<project_id>/revisions/<revision_id>/exports/*` | revision-scoped 核心导出 |
 | runtime final MIDI | `data/projects/<project_id>/exports/final_score.mid` | 编排流程中的最终 MIDI 落点 |
+
+说明：`runtime final MIDI` 是历史/benchmark 兼容落点；产品下载和前端展示应优先使用 `data/projects/<project_id>/revisions/<revision_id>/exports/*` 下的 revision-scoped artifacts。
 
 ## Required Stage 契约与禁止静默降级
 
@@ -297,6 +341,8 @@ vocal separation 在 MVP 中是 required stage。
 - 如果没有有效 `F0Track`、`NoteCandidateSet`、`RhythmGrid` 或必要的 `ScoreIR` 构建条件，不应生成看似可用的最终乐谱。
 - 如果指定 revision 不能导出为 MIDI/MusicXML，导出阶段必须显式报错。
 - 不允许以占位 JSON、空白 MIDI、伪造 MusicXML 掩盖上游失败。
+
+当前仍需注意一个实现差距：`AudioAnalysisService._run_export_stage(...)` 写入的 `exports/final_score.mid` 主要用于 runtime/benchmark 兼容；正式产品导出应以 `RenderExportService` 从 `ScoreRevision` 生成的 revision-scoped artifacts 为准。
 
 ## `AudioAnalysisService` 的推荐定位
 
@@ -342,8 +388,12 @@ save input copy
 - `backend/app/services/rhythm_quantization_service.py`
 - `backend/app/services/score_build_service.py`
 - `backend/app/services/render_export_service.py`
+- `backend/app/services/score_revision_service.py`
+- `backend/app/services/agent_workflow_service.py`
+- `backend/app/services/patch_validator.py`
 - `backend/app/services/workspace.py`
 - `backend/app/models/artifact.py`
 - `backend/app/models/score_revision.py`
+- `backend/app/api/agents.py`
 
 这些文件共同定义了当前后端音频流水线的主要编排边界、typed artifact 落点与导出契约。

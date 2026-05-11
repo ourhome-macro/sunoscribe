@@ -236,7 +236,7 @@ Upload
 
 基于现状，最值得优先处理的是以下几类问题。
 
-### 5.1 Required stage 失败语义还没完全下沉
+### 5.1 Required stage 失败语义已经下沉，但仍需持续收口
 
 现在正式文档已经要求：
 
@@ -244,13 +244,17 @@ Upload
 - production pitch 失败必须失败
 - required artifact 缺失必须失败
 
-但实现里仍有部分阶段先记 warning 再继续的历史编排习惯。
+当前实现已经在主链路做了关键防线：上传会注册 `source_media` artifact，`AudioAnalysisService` 要求 media ingest 与 vocal separation 显式成功，`score_service._run_audio_analysis(...)` 与 `create_machine_score_revision(...)` 会拒绝缺失 `vocals.wav`、fallback `ScoreIR` 或无 lead-vocal notes 的结果。
+
+仍需持续收口的是历史 optional/warning 行为：歌词识别、debug artifact、runtime 兼容 MIDI 等可以 warning，但 required production artifact 不能被 warning 掩盖。
 
 这类问题的优先级很高，因为它决定了 production policy 是否真的可信。
 
-### 5.2 导出边界还要继续以 `ScoreIR` / `ScoreRevision` 为中心收口
+### 5.2 导出边界已转向 `ScoreIR` / `ScoreRevision`，legacy 路径仍需降级
 
-当前系统已经引入了 revision-scoped export，但实现里还保留一些兼容层与旧的 workspace 级路径。
+当前系统已经引入了 revision-scoped export：`ScoreRevision` 持久化 `score_ir` 与派生 `score_data`，`RenderExportService` 从选定 revision 生成 MIDI / MusicXML / score view artifacts。
+
+实现里仍保留一些兼容层与旧的 workspace 级路径，例如 `data/projects/<project_id>/exports/final_score.mid`，它应继续被视为 runtime/benchmark 兼容落点，而不是产品下载与前端展示的事实源。
 
 优先方向应是：
 
@@ -258,9 +262,9 @@ Upload
 - `ScoreIR` / `ScoreRevision` 继续成为真正中心边界
 - legacy workspace export 继续降级成调试或兼容用途
 
-### 5.3 Artifact lineage 还可以更完整
+### 5.3 Artifact lineage 已接入，metadata 还可以更完整
 
-当前 artifact 已经接入，但还值得继续加强：
+当前 artifact 已经接入，包含 `source_media`、analysis artifacts 与 revision-scoped export artifacts。还值得继续加强：
 
 - `task_id` 全链路贯通
 - source media probe 更完整

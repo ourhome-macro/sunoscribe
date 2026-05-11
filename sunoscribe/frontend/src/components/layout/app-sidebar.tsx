@@ -1,15 +1,16 @@
 import { Activity, BarChart3, FileAudio, FolderKanban, Home, Music2, Settings, UploadCloud } from 'lucide-react'
 import { NavLink } from 'react-router-dom'
 
+import { navCopy } from '@/lib/copy'
 import { cn } from '@/lib/utils'
 
 const navItems = [
-  { label: 'Dashboard', href: '/', icon: Home },
-  { label: 'Projects', href: '/projects', icon: FolderKanban },
-  { label: 'Upload', href: '/upload', icon: UploadCloud },
-  { label: 'Workspace', href: '/workspace', icon: Music2 },
-  { label: 'Diagnostics', href: '/diagnostics', icon: Activity },
-  { label: 'Settings', href: '/settings', icon: Settings },
+  { label: navCopy.dashboard, href: '/', icon: Home },
+  { label: navCopy.projects, href: '/projects', icon: FolderKanban },
+  { label: navCopy.upload, href: '/upload', icon: UploadCloud },
+  { label: navCopy.workspace, href: '/workspace', icon: Music2 },
+  { label: navCopy.diagnostics, href: '/diagnostics', icon: Activity },
+  { label: navCopy.settings, href: '/settings', icon: Settings },
 ]
 
 export function AppSidebar() {
@@ -21,7 +22,7 @@ export function AppSidebar() {
         </div>
         <div>
           <div className="font-semibold">SunoScribe</div>
-          <div className="text-xs text-muted-foreground">Lead-vocal Workbench</div>
+          <div className="text-xs text-muted-foreground">AI 自动扒谱工作台</div>
         </div>
       </div>
       <nav className="flex-1 space-y-1 px-3 py-4">
@@ -45,9 +46,9 @@ export function AppSidebar() {
       <div className="border-t p-4">
         <div className="rounded-xl bg-muted p-3 text-xs text-muted-foreground">
           <div className="mb-1 flex items-center gap-2 font-medium text-foreground">
-            <BarChart3 className="h-3.5 w-3.5" /> ScoreRevision first
+            <BarChart3 className="h-3.5 w-3.5" /> 以乐谱版本为准
           </div>
-          Exports are revision-scoped artifacts, not source-of-truth inputs.
+          导出的 MIDI 和 MusicXML 只来自当前乐谱版本，不反过来当作原始答案。
         </div>
       </div>
     </aside>

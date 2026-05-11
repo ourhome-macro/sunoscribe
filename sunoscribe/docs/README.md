@@ -1,16 +1,17 @@
 ﻿# SunoScribe Docs Index
 
-本文档目录收敛后端、音频处理、评测与运行策略说明。当前阶段暂不覆盖前端实现细节。
+本文档目录收敛后端、前端原型、音频处理、评测与运行策略说明。
 
 ## 建议阅读顺序
 
 1. `backend-audio-pipeline.md`：后端音频流水线、typed data lineage、服务边界与 required stage 契约。
 2. `production-runtime-policy.md`：生产/诊断/benchmark profile、RMVPE fallback policy、artifact lineage 与失败策略。
 3. `sunoscribe-mir-practical-guide.md`：面向当前项目状态的 MIR 实践指南，聚焦主链路、benchmark、artifact、revision 与错误分析。
-4. `mvp-trial-runbook.md`：初步 MVP 试验步骤、runtime doctor、单曲 smoke 与 19 首 observe-only benchmark。
-5. `mp4-midi-benchmark.md`：26 首 MP4 -> MIDI 本地 benchmark 设计、指标、manifest 与回归门禁。
-6. `audio_processor.md`、`vocal_separator.md`、`pitch _detection.md`：早期模块级实现说明，可作为历史/实现参考。
-7. `lyrics_processor.md`：歌词处理说明。
+4. `frontend-current-state.md`：当前 React/Vite 前端工作台原型的已实现页面、mock 数据边界与待对接后端事项。
+5. `mvp-trial-runbook.md`：初步 MVP 试验步骤、runtime doctor、单曲 smoke 与 19 首 observe-only benchmark。
+6. `mp4-midi-benchmark.md`：26 首 MP4 -> MIDI 本地 benchmark 设计、指标、manifest 与回归门禁。
+7. `audio_processor.md`、`vocal_separator.md`、`pitch _detection.md`：早期模块级实现说明，可作为历史/实现参考。
+8. `lyrics_processor.md`：歌词处理说明。
 
 ## 当前后端重点
 
@@ -20,3 +21,10 @@
 - Production profile 下 RMVPE 不允许静默 fallback 到 CREPE/basic-pitch。
 - MVP 试验先跑 `doctor -> validate -> single-song smoke -> 19-song observe-only benchmark`。
 - MP4 -> MIDI 质量评测以本地 deterministic benchmark 为主，LangSmith 只用于后续 agent/LLM workflow 评估。
+
+## 当前前端重点
+
+- `frontend/` 已是 `React + Vite + TypeScript` 工作台原型，不再是空占位目录。
+- 当前页面和组件围绕 Project、ScoreRevision、Artifact、diagnostics、agent patch workflow 组织。
+- 当前数据层仍主要读取 `frontend/src/lib/api/mock-data.ts`，尚未接真实后端 API。
+- OSMD 与 MIDI 播放仍是展示/封装占位，后续必须从选定 `ScoreRevision` 派生的 artifact 加载。

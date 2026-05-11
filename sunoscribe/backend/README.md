@@ -82,6 +82,7 @@ $env:PYTHONPATH='.'
 - Projects：`POST/GET /api/projects`、`GET/PUT/DELETE /api/projects/{project_id}`
 - Upload：`POST /api/upload/audio`、`POST /api/upload/video`
 - Scores：`GET/POST /api/projects/{project_id}/score`、`PUT /api/scores/{score_id}`、`GET /api/scores/{score_id}/export`
+- Agent workflows：`POST /api/score-revisions/{revision_id}/agent/diagnose`、`POST /api/score-revisions/{revision_id}/agent/patch/propose`、`POST /api/score-revisions/{revision_id}/agent/patch/apply`、`POST /api/score-revisions/{revision_id}/agent/rvc/prepare`、`POST /api/score-revisions/{revision_id}/exports/regenerate`
 - Lyrics：`GET /api/projects/{project_id}/lyrics`、`PUT /api/lyrics/{lyrics_id}`
 - Tasks：`GET /api/tasks/{task_id}`、`POST /api/tasks/{task_id}/retry`
 - Health：`GET /api/health`、`GET /api/health/pitch`
@@ -95,6 +96,8 @@ $env:PYTHONPATH='.'
 3. 执行主唱/伴奏分离，产出 `vocals.wav`、`accompaniment.wav` 等 stems。
 4. 基于主唱音频做旋律转写、节奏网格提取、ScoreIR 构建与歌词对齐。
 5. 生成 `ScoreRevision` 与 `Artifact`，并从选定 revision 派生 MIDI / MusicXML / score view 导出。
+
+当前还包含受约束 agent workflow：agent 只能读取 `ScoreRevision` 与 typed artifacts，诊断或提出小型 `ScorePatch`，patch 必须经 validator 后才会创建新的 user revision；RVC prepare 目前准备 job spec，不直接调用外部 RVC。
 
 当前 production 语义：
 
