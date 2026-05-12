@@ -35,6 +35,10 @@ from app.modules.benchmark import (
     read_midi_track_info,
     build_mvp_readiness_report,
 )
+from app.modules.benchmark.reason_codes import (
+    FIRST_NOTE_OFFSET_SUSPECT,
+    TIME_ORIGIN_NEEDS_REVIEW,
+)
 from app.services.audio_analysis_service import AudioAnalysisOptions, AudioAnalysisService
 
 
@@ -717,6 +721,8 @@ def _reference_review_sample(row: dict[str, Any]) -> dict[str, Any]:
     first_delay = audibility.get("first_note_delay_sec")
     best_time_recall = alignment.get("best_time_shift_note_recall")
     alignment_diagnosis = alignment.get("alignment_diagnosis")
+    if first_delay is not None and abs(float(first_delay)) >= 12.0:
+        reasons.append(FIRST_NOTE_OFFSET_SUSPECT)
     if (
         first_delay is not None
         and abs(float(first_delay)) > float(REFERENCE_REVIEW_THRESHOLDS["time_origin_delay_sec_min"])
@@ -725,6 +731,15 @@ def _reference_review_sample(row: dict[str, Any]) -> dict[str, Any]:
         and float(best_time_recall) > float(note_recall)
     ):
         reasons.append("time_origin_suspect")
+    if (
+        first_delay is not None
+        and abs(float(first_delay)) >= 8.0
+        and note_recall is not None
+        and float(note_recall) < 0.02
+        and predicted_count is not None
+        and int(predicted_count) >= int(REFERENCE_REVIEW_THRESHOLDS["predicted_note_count_min_for_ratio"])
+    ):
+        reasons.append(TIME_ORIGIN_NEEDS_REVIEW)
     if alignment_diagnosis == "possible_reference_time_offset":
         reasons.append("smart_onset_time_offset")
     if (
@@ -750,6 +765,9 @@ def _reference_review_sample(row: dict[str, Any]) -> dict[str, Any]:
         "expected_duration_sec": expected_duration,
         "expected_note_density_per_sec": expected_note_density,
         "predicted_expected_note_ratio": predicted_expected_ratio,
+        "first_note_delay_sec": first_delay,
+        "best_time_shift_note_recall": best_time_recall,
+        "alignment_diagnosis": alignment_diagnosis,
         "note_recall": note_recall,
         "octave_normalized_note_recall": octave_normalized_note_recall,
         "octave_normalized_note_f1": octave_normalized_note_f1,
@@ -779,8 +797,21 @@ def _reference_review_sample(row: dict[str, Any]) -> dict[str, Any]:
         "predicted_pitch_range": metrics.get("pitch_range"),
         "predicted_median_pitch": metrics.get("median_pitch"),
         "quality_status": row.get("status"),
-        "quality_failed_checks": [check.get("name") for check in ((row.get("quality_gate") or {}).get("failed_checks") or [])],
+        "quality_failed_checks": _quality_failed_check_names(row.get("quality_gate") or {}),
     }
+
+
+def _quality_failed_check_names(quality_gate: dict[str, Any]) -> list[str]:
+    failed_checks = quality_gate.get("failed_checks") if isinstance(quality_gate, dict) else []
+    names: list[str] = []
+    for check in failed_checks or []:
+        if isinstance(check, dict):
+            name = check.get("name")
+            if name is not None:
+                names.append(str(name))
+        elif check is not None:
+            names.append(str(check))
+    return names
 
 
 def _summary_markdown(summary: dict[str, Any]) -> str:

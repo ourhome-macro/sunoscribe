@@ -131,6 +131,23 @@ class Mp4MidiBenchmarkCliTests(unittest.TestCase):
         self.assertIn("octave_reference_suspect", sample["reference_suspect_reasons"])
         self.assertIn("dtw_sequence_alignment_suspect", sample["reference_suspect_reasons"])
 
+    def test_reference_review_flags_near_threshold_first_note_offset(self) -> None:
+        sample = _reference_review_sample(
+            {
+                "sample_id": "late_vocal_reference",
+                "status": "quality_failed",
+                "metrics": {"expected_note_count": 666, "predicted_note_count": 174, "note_recall": 0.0015},
+                "audibility": {"expected_duration_sec": 224.25, "first_note_delay_sec": 14.23},
+                "alignment": {"best_time_shift_note_recall": 0.031, "dtw": {"dtw_pitch_match_recall_proxy": 0.20, "best_dtw_octave_shift_semitones": 12}},
+                "quality_gate": {"failed_checks": ["note_recall"]},
+            }
+        )
+
+        self.assertEqual(sample["reference_status"], "reference_suspect")
+        self.assertIn("first_note_offset_suspect", sample["reference_suspect_reasons"])
+        self.assertIn("time_origin_needs_review", sample["reference_suspect_reasons"])
+        self.assertEqual(sample["first_note_delay_sec"], 14.23)
+
     def test_reference_review_accepts_auto_corrected_octave_shift(self) -> None:
         sample = _reference_review_sample(
             {

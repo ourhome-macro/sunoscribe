@@ -1,0 +1,13 @@
+from __future__ import annotations
+
+FIRST_NOTE_OFFSET_SUSPECT = "first_note_offset_suspect"
+TIME_ORIGIN_NEEDS_REVIEW = "time_origin_needs_review"
+REFERENCE_FIRST_NOTE_OFFSET_SUSPECT = "reference_first_note_offset_suspect"
+REFERENCE_TIME_ORIGIN_NEEDS_REVIEW = "reference_time_origin_needs_review"
+POSSIBLE_GLOBAL_TIME_OFFSET = "possible_global_time_offset"
+SMART_ONSET_ALIGNMENT_IMPROVES_RECALL = "smart_onset_alignment_improves_recall"
+POSSIBLE_OCTAVE_OR_REFERENCE_PITCH_MISMATCH = "possible_octave_or_reference_pitch_mismatch"
+POSSIBLE_GLOBAL_OCTAVE_SHIFT = "possible_global_octave_shift"
+OCTAVE_NORMALIZED_MATCHING_IMPROVES = "octave_normalized_matching_improves"
+DTW_SEQUENCE_ALIGNMENT_SUSPECT = "dtw_sequence_alignment_suspect"
+POSSIBLE_WRONG_REFERENCE_TRACK_OR_PITCH_SOURCE = "possible_wrong_reference_track_or_pitch_source"

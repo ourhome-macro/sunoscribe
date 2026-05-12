@@ -1005,6 +1005,47 @@ class BenchmarkDebugPackageTests(unittest.TestCase):
             self.assertEqual(diagnostics["loss_attribution"]["likely_loss_stage"], "quantizer")
             self.assertEqual(diagnostics["loss_attribution"]["stage_counts"]["quantizer"], 1)
 
+    def test_derived_diagnostics_marks_reference_alignment_as_diagnostic_only(self) -> None:
+        diagnostics = build_derived_diagnostics(
+            expected_notes=[NoteEvent(start=float(index), end=float(index) + 0.5, pitch=72) for index in range(20)],
+            predicted_notes=[NoteEvent(start=14.0 + float(index), end=14.5 + float(index), pitch=60) for index in range(8)],
+            f0_track_path=None,
+            vocal_activity_path=None,
+            note_candidates_path=None,
+            match_debug={"matched_count": 0},
+            alignment_debug={"best_time_shift_sec": -14.0},
+            metrics_payload={
+                "metrics": {
+                    "note_recall": 0.0,
+                    "octave_normalized_note_recall": 0.08,
+                    "octave_normalized_recall_lift": 0.08,
+                    "median_pitch_delta_raw": -12.0,
+                },
+                "audibility": {
+                    "expected_first_note_time_sec": 0.0,
+                    "predicted_first_note_time_sec": 14.0,
+                    "first_note_delay_sec": 14.0,
+                },
+                "alignment": {
+                    "best_time_shift_sec": -14.0,
+                    "best_time_shift_note_recall": 0.12,
+                    "best_octave_shift_semitones": 12,
+                    "best_octave_shift_note_recall": 0.10,
+                    "smart_onset_alignment": {"pred_to_exp_shift_sec": -14.0, "shift_corrected_recall": 0.12},
+                    "dtw": {"dtw_pitch_match_recall_proxy": 0.20},
+                },
+            },
+        )
+
+        reference_alignment = diagnostics["reference_alignment"]
+        self.assertTrue(reference_alignment["diagnostic_only"])
+        self.assertTrue(reference_alignment["reference_suspect"])
+        self.assertIn("reference_first_note_offset_suspect", reference_alignment["reason_codes"])
+        self.assertIn("possible_global_time_offset", reference_alignment["reason_codes"])
+        self.assertIn("possible_octave_or_reference_pitch_mismatch", reference_alignment["reason_codes"])
+        self.assertEqual(reference_alignment["first_note_delay_sec"], 14.0)
+        self.assertEqual(reference_alignment["possible_global_time_offset_sec"], -14.0)
+
     def test_selected_melody_postprocess_diagnostics_are_reported(self) -> None:
         with TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)

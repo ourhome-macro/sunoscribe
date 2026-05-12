@@ -9,6 +9,17 @@ import shutil
 from typing import Any
 
 from .dataset import BenchmarkSample, load_manifest
+from .reason_codes import (
+    DTW_SEQUENCE_ALIGNMENT_SUSPECT,
+    OCTAVE_NORMALIZED_MATCHING_IMPROVES,
+    POSSIBLE_GLOBAL_OCTAVE_SHIFT,
+    POSSIBLE_GLOBAL_TIME_OFFSET,
+    POSSIBLE_OCTAVE_OR_REFERENCE_PITCH_MISMATCH,
+    POSSIBLE_WRONG_REFERENCE_TRACK_OR_PITCH_SOURCE,
+    REFERENCE_FIRST_NOTE_OFFSET_SUSPECT,
+    REFERENCE_TIME_ORIGIN_NEEDS_REVIEW,
+    SMART_ONSET_ALIGNMENT_IMPROVES_RECALL,
+)
 from .midi_metrics import (
     MidiMetricConfig,
     NoteEvent,
@@ -531,6 +542,12 @@ def build_derived_diagnostics(
         expected_note_count=len(expected_notes),
         predicted_note_count=len(predicted_notes),
     )
+    reference_alignment = _derive_reference_alignment_diagnostics(
+        notes=notes,
+        match=match,
+        alignment_debug=alignment_debug,
+        metrics_payload=metrics_payload,
+    )
     coverage = _coverage_from_metrics(metrics_payload)
     preliminary_failure_stage_v2 = _preliminary_failure_stage_v2(
         notes=notes,
@@ -557,6 +574,7 @@ def build_derived_diagnostics(
         "note_funnel": note_funnel,
         "pitch_distribution": pitch_distribution,
         "match": match,
+        "reference_alignment": reference_alignment,
         "coverage": {
             "midi_coverage_ratio": coverage,
             "available": coverage is not None,
@@ -3235,6 +3253,88 @@ def _derive_match_diagnostics(
     }
 
 
+def _derive_reference_alignment_diagnostics(
+    *,
+    notes: dict[str, Any],
+    match: dict[str, Any],
+    alignment_debug: dict[str, Any] | None,
+    metrics_payload: dict[str, Any],
+) -> dict[str, Any]:
+    metrics = metrics_payload.get("metrics") if isinstance(metrics_payload.get("metrics"), dict) else {}
+    audibility = metrics_payload.get("audibility") if isinstance(metrics_payload.get("audibility"), dict) else {}
+    alignment = metrics_payload.get("alignment") if isinstance(metrics_payload.get("alignment"), dict) else {}
+    dtw = alignment.get("dtw") if isinstance(alignment.get("dtw"), dict) else {}
+    smart = alignment.get("smart_onset_alignment") if isinstance(alignment.get("smart_onset_alignment"), dict) else {}
+    alignment_source = alignment_debug if isinstance(alignment_debug, dict) else alignment
+
+    expected_first = _as_float(audibility.get("expected_first_note_time_sec"))
+    predicted_first = _as_float(audibility.get("predicted_first_note_time_sec"))
+    first_delay = _as_float(audibility.get("first_note_delay_sec"))
+    if first_delay is None and expected_first is not None and predicted_first is not None:
+        first_delay = predicted_first - expected_first
+
+    note_recall = _as_float(metrics.get("note_recall"))
+    octave_recall = _as_float(metrics.get("octave_normalized_note_recall"))
+    octave_recall_lift = _as_float(metrics.get("octave_normalized_recall_lift"))
+    if octave_recall_lift is None and octave_recall is not None and note_recall is not None:
+        octave_recall_lift = octave_recall - note_recall
+    dtw_recall = _as_float(dtw.get("dtw_pitch_match_recall_proxy"))
+    dtw_recall_lift = None if dtw_recall is None or note_recall is None else dtw_recall - note_recall
+    median_pitch_delta = _as_float(metrics.get("median_pitch_delta_raw"))
+    if median_pitch_delta is None:
+        median_pitch_delta = _as_float(notes.get("median_pitch_delta"))
+
+    best_time_shift = _as_float(alignment.get("best_time_shift_sec"))
+    best_time_recall = _as_float(alignment.get("best_time_shift_note_recall"))
+    smart_shift = _as_float(smart.get("pred_to_exp_shift_sec"))
+    smart_recall = _as_float(smart.get("shift_corrected_recall"))
+    best_octave_shift = _as_float(alignment.get("best_octave_shift_semitones"))
+    best_octave_recall = _as_float(alignment.get("best_octave_shift_note_recall"))
+    raw_match_rate = _as_float(match.get("raw_match_rate_vs_expected"))
+    time_overlap = _as_float(notes.get("expected_predicted_time_overlap_ratio"))
+
+    reasons: list[str] = []
+    if first_delay is not None and abs(first_delay) >= 12.0:
+        reasons.append(REFERENCE_FIRST_NOTE_OFFSET_SUSPECT)
+    if first_delay is not None and abs(first_delay) >= 8.0 and note_recall is not None and note_recall < 0.02:
+        reasons.append(REFERENCE_TIME_ORIGIN_NEEDS_REVIEW)
+    if best_time_shift is not None and best_time_recall is not None and note_recall is not None and best_time_recall >= note_recall + 0.02:
+        reasons.append(POSSIBLE_GLOBAL_TIME_OFFSET)
+    if smart_shift is not None and smart_recall is not None and note_recall is not None and smart_recall >= note_recall + 0.05:
+        reasons.append(SMART_ONSET_ALIGNMENT_IMPROVES_RECALL)
+    if median_pitch_delta is not None and abs(median_pitch_delta) >= 10.0:
+        reasons.append(POSSIBLE_OCTAVE_OR_REFERENCE_PITCH_MISMATCH)
+    if best_octave_shift is not None and abs(best_octave_shift) in {12.0, 24.0} and best_octave_recall is not None and note_recall is not None and best_octave_recall >= note_recall + 0.02:
+        reasons.append(POSSIBLE_GLOBAL_OCTAVE_SHIFT)
+    if octave_recall_lift is not None and octave_recall_lift >= 0.02:
+        reasons.append(OCTAVE_NORMALIZED_MATCHING_IMPROVES)
+    if dtw_recall_lift is not None and dtw_recall_lift >= 0.10:
+        reasons.append(DTW_SEQUENCE_ALIGNMENT_SUSPECT)
+    if raw_match_rate is not None and raw_match_rate < 0.02 and time_overlap is not None and time_overlap >= 0.80:
+        reasons.append(POSSIBLE_WRONG_REFERENCE_TRACK_OR_PITCH_SOURCE)
+
+    return {
+        "available": bool(metrics or audibility or alignment_source),
+        "diagnostic_only": True,
+        "reference_suspect": bool(reasons),
+        "reason_codes": sorted(set(reasons)),
+        "expected_first_note_time_sec": _round_optional(expected_first),
+        "predicted_first_note_time_sec": _round_optional(predicted_first),
+        "first_note_delay_sec": _round_optional(first_delay),
+        "possible_global_time_offset_sec": _round_optional(best_time_shift),
+        "best_time_shift_note_recall": _round_optional(best_time_recall),
+        "smart_onset_shift_sec": _round_optional(smart_shift),
+        "smart_onset_shift_recall": _round_optional(smart_recall),
+        "best_octave_shift_semitones": _round_optional(best_octave_shift),
+        "best_octave_shift_note_recall": _round_optional(best_octave_recall),
+        "median_pitch_delta_raw": _round_optional(median_pitch_delta),
+        "octave_normalized_recall_lift": _round_optional(octave_recall_lift),
+        "dtw_recall_lift": _round_optional(dtw_recall_lift),
+        "raw_match_rate_vs_expected": _round_optional(raw_match_rate),
+        "expected_predicted_time_overlap_ratio": _round_optional(time_overlap),
+    }
+
+
 def _match_note_indices(
     expected_notes: list[NoteEvent],
     predicted_notes: list[NoteEvent],
@@ -3709,6 +3809,7 @@ def _derived_diagnostics_markdown_lines(derived_diagnostics: dict[str, Any] | No
     quant_overmerge = quantized_notes.get("overmerge") if isinstance(quantized_notes.get("overmerge"), dict) else {}
     short_loss_attribution = short_note_diagnostics.get("loss_attribution") if isinstance(short_note_diagnostics.get("loss_attribution"), dict) else {}
     match = derived_diagnostics.get("match") if isinstance(derived_diagnostics.get("match"), dict) else {}
+    reference_alignment = derived_diagnostics.get("reference_alignment") if isinstance(derived_diagnostics.get("reference_alignment"), dict) else {}
     pitch_distribution = derived_diagnostics.get("pitch_distribution") if isinstance(derived_diagnostics.get("pitch_distribution"), dict) else {}
     pairwise = pitch_distribution.get("pairwise") if isinstance(pitch_distribution.get("pairwise"), dict) else {}
     pitch_flags = pitch_distribution.get("triggered_pitch_flags") if isinstance(pitch_distribution.get("triggered_pitch_flags"), list) else []
@@ -3868,6 +3969,15 @@ def _derived_diagnostics_markdown_lines(derived_diagnostics: dict[str, Any] | No
         f"- raw_match_rate_vs_predicted: {_fmt(match.get('raw_match_rate_vs_predicted'))}",
         f"- shift_match_rate_vs_expected: {_fmt(match.get('shift_match_rate_vs_expected'))}",
         f"- shift_match_rate_vs_predicted: {_fmt(match.get('shift_match_rate_vs_predicted'))}",
+        "### Reference Alignment Diagnostics",
+        f"- diagnostic_only: {str(bool(reference_alignment.get('diagnostic_only'))).lower()}",
+        f"- reference_suspect: {str(bool(reference_alignment.get('reference_suspect'))).lower()}",
+        f"- reason_codes: {', '.join(str(reason) for reason in reference_alignment.get('reason_codes') or []) if isinstance(reference_alignment.get('reason_codes'), list) and reference_alignment.get('reason_codes') else 'none'}",
+        f"- first_note_delay_sec: {_fmt(reference_alignment.get('first_note_delay_sec'))}",
+        f"- possible_global_time_offset_sec: {_fmt(reference_alignment.get('possible_global_time_offset_sec'))}",
+        f"- best_octave_shift_semitones: {_fmt(reference_alignment.get('best_octave_shift_semitones'))}",
+        f"- median_pitch_delta_raw: {_fmt(reference_alignment.get('median_pitch_delta_raw'))}",
+        f"- dtw_recall_lift: {_fmt(reference_alignment.get('dtw_recall_lift'))}",
         "### Pitch Distribution Summary",
         f"- preliminary_pitch_diagnosis: {_fmt(pitch_distribution.get('preliminary_pitch_diagnosis'))}",
         f"- triggered_pitch_flags: {', '.join(str(flag) for flag in pitch_flags) if pitch_flags else 'none'}",
