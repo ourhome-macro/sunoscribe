@@ -133,6 +133,8 @@ class MelodySelector:
             median_deviation_semitones=2,
             median_max_adjust_semitones=4,
             median_max_note_sec=max(float(self.config.melody_short_note_sec), float(self.config.melody_isolated_note_max_duration_sec)),
+            remove_isolated_fragments_enabled=False,
+            sustain_short_gaps_enabled=True,
             min_confidence_for_mutation=0.0,
             vocal_min_midi=int(self.config.melody_pitch_min_midi),
             vocal_max_midi=int(self.config.melody_pitch_max_midi),

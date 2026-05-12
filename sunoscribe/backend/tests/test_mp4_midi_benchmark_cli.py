@@ -513,7 +513,7 @@ class Mp4MidiBenchmarkCliTests(unittest.TestCase):
         self.assertEqual(checks["matched_notes"]["details"]["raw_value"], 1)
         self.assertEqual(checks["matched_notes"]["details"]["octave_normalized_value"], 12)
 
-    def test_run_marks_quality_failed_with_exit_2_and_keeps_workspace(self) -> None:
+    def test_run_marks_quality_failed_as_diagnostic_and_keeps_workspace(self) -> None:
         with TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             manifest = _write_manifest_fixture(root, expected_writer=lambda path: _write_sequence_midi(path, note_count=12))
@@ -547,7 +547,7 @@ class Mp4MidiBenchmarkCliTests(unittest.TestCase):
             quality_diagnostics = json.loads((run_root / "quality_diagnostics.json").read_text(encoding="utf-8"))
             reference_review = json.loads((run_root / "reference_review.json").read_text(encoding="utf-8"))
 
-            self.assertEqual(exit_code, 2)
+            self.assertEqual(exit_code, 0)
             self.assertEqual(summary["results"][0]["status"], "quality_failed")
             self.assertIn("alignment", summary["results"][0])
             self.assertIn("dtw", summary["results"][0]["alignment"])
@@ -573,6 +573,10 @@ class Mp4MidiBenchmarkCliTests(unittest.TestCase):
             self.assertTrue((run_root / "reference_review.md").exists())
             self.assertEqual(reference_review["samples"][0]["sample_id"], "song")
             self.assertEqual(quality_gate["status"], "quality_failed")
+            self.assertTrue(quality_gate["export_policy"]["exports_available"])
+            self.assertEqual(quality_gate["export_policy"]["export_scope"], "diagnostic_review")
+            self.assertFalse(quality_gate["export_policy"]["quality_gate_blocks_exports"])
+            self.assertTrue((run_root / "song" / "produced.mid").exists())
             self.assertIn("continuity", metrics_payload)
             self.assertIn("gap50_ratio", metrics_payload["continuity"])
             self.assertIn("gap50_ratio", metrics_payload["diagnostics"]["continuity"])
@@ -615,7 +619,7 @@ class Mp4MidiBenchmarkCliTests(unittest.TestCase):
             self.assertEqual(summary["results"][0]["status"], "failed")
             self.assertTrue((run_root / "song" / "error.json").exists())
 
-    def test_run_pipeline_failure_takes_precedence_over_quality_failed_exit(self) -> None:
+    def test_run_pipeline_failure_still_takes_precedence_over_quality_failed_exit(self) -> None:
         with TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             samples = root / "samples"

@@ -35,6 +35,12 @@ from app.modules.benchmark import (
     read_midi_track_info,
     build_mvp_readiness_report,
 )
+from app.modules.benchmark.debug_package import (
+    INHERITED_POSTPROCESS_REASON_CODES_DETECTED,
+    build_stage_continuity_markdown_lines,
+    stage_continuity_specs,
+    summarize_stage_continuity_lineage,
+)
 from app.modules.benchmark.reason_codes import (
     FIRST_NOTE_OFFSET_SUSPECT,
     TIME_ORIGIN_NEEDS_REVIEW,
@@ -170,8 +176,6 @@ def main(argv: list[str] | None = None) -> int:
     _write_quality_diagnostics(run_root=run_root, results=results)
     if any(result.status == "failed" for result in results):
         return 1
-    if any(result.status == "quality_failed" for result in results):
-        return 2
     return 0
 
 
@@ -460,6 +464,13 @@ def _quality_gate_stage(*, metrics_payload: dict[str, Any]) -> tuple[StageRecord
     failed_checks = [check for check in checks if not check["passed"]]
     payload = {
         "status": "success" if not failed_checks else "quality_failed",
+        "export_policy": {
+            "exports_available": True,
+            "export_scope": "production" if not failed_checks else "diagnostic_review",
+            "quality_gate_blocks_exports": False,
+            "required_stage_failures_block_exports": True,
+            "message": "Quality gate is diagnostic only; produced MIDI remains available for review." if failed_checks else "Produced MIDI passed quality gate.",
+        },
         "thresholds": QUALITY_GATE_THRESHOLDS,
         "effective_thresholds": {"midi_coverage_ratio_min": coverage_threshold},
         "checks": checks,
@@ -467,6 +478,11 @@ def _quality_gate_stage(*, metrics_payload: dict[str, Any]) -> tuple[StageRecord
         "diagnostic_only": {
             "note_f1": metrics.get("note_f1"),
             "note_precision": metrics.get("note_precision"),
+            "note_recall": metrics.get("note_recall"),
+            "matched_note_count": metrics.get("matched_note_count"),
+            "expected_note_count": metrics.get("expected_note_count"),
+            "predicted_note_count": metrics.get("predicted_note_count"),
+            "predicted_expected_note_ratio": _safe_ratio(metrics.get("predicted_note_count"), metrics.get("expected_note_count")),
             "pitch_accuracy": metrics.get("pitch_accuracy"),
             "octave_error_rate": metrics.get("octave_error_rate"),
             "octave_normalized_note_f1": metrics.get("octave_normalized_note_f1"),
@@ -600,6 +616,7 @@ def _write_summary_files(
 def _summary_result_row(result: SampleRunResult) -> dict[str, Any]:
     metric_payload = result.metrics or {}
     metrics = _summary_metrics_with_quality_fields(metric_payload)
+    stage_continuity = _run_result_stage_continuity(result)
     return {
         "sample_id": result.sample_id,
         "status": result.status,
@@ -609,11 +626,11 @@ def _summary_result_row(result: SampleRunResult) -> dict[str, Any]:
         "audibility": metric_payload.get("audibility") if result.metrics else None,
         "alignment": metric_payload.get("alignment") if result.metrics else None,
         "continuity": metric_payload.get("continuity") if result.metrics else None,
+        "stage_continuity": stage_continuity,
         "diagnostics": metric_payload.get("diagnostics") if result.metrics else None,
         "suspected_failure_modes": metric_payload.get("suspected_failure_modes") if result.metrics else [],
         "quality_gate": result.quality_gate,
         "logs": result.logs,
-        "workspace_path": str(result.workspace_path) if result.workspace_path else None,
         "error": result.error,
         "warnings": result.warnings,
     }
@@ -882,6 +899,14 @@ def _summary_markdown(summary: dict[str, Any]) -> str:
                 error=(error.get("type") or ""),
             )
         )
+        stage_continuity = result.get("stage_continuity") if isinstance(result.get("stage_continuity"), dict) else {}
+        lines.extend(
+            [
+                "",
+                f"### {result.get('sample_id')} Per-Stage Continuity",
+                *build_stage_continuity_markdown_lines(stage_continuity, heading="#### continuity lineage"),
+            ]
+        )
     dataset = summary.get("dataset") or {}
     lines.extend(
         [
@@ -1037,6 +1062,7 @@ def _write_quality_diagnostics(*, run_root: Path, results: list[SampleRunResult]
         audibility = result.metrics.get("audibility") if result.metrics else None
         alignment = result.metrics.get("alignment") if result.metrics else None
         continuity = result.metrics.get("continuity") if result.metrics else None
+        stage_continuity = _run_result_stage_continuity(result)
         samples.append(
             {
                 "sample_id": result.sample_id,
@@ -1047,11 +1073,11 @@ def _write_quality_diagnostics(*, run_root: Path, results: list[SampleRunResult]
                 "quality_gate_json": str(result.run_dir / "quality_gate.json") if result.quality_gate else None,
                 "stage_status_json": str(result.run_dir / "stage_status.json"),
                 "logs": result.logs,
-                "workspace_path": str(result.workspace_path) if result.workspace_path else None,
                 "metrics": metrics,
                 "audibility": audibility,
                 "alignment": alignment,
                 "continuity": continuity,
+                "stage_continuity": stage_continuity,
                 "diagnostics": result.metrics.get("diagnostics") if result.metrics else None,
                 "quality_gate": result.quality_gate,
                 "suspected_failure_modes": result.metrics.get("suspected_failure_modes") if result.metrics else [],
@@ -1146,7 +1172,53 @@ def _quality_diagnostics_markdown(payload: dict[str, Any]) -> str:
         logs = sample.get("logs") or {}
         if logs:
             lines.append(f"- `{sample.get('sample_id')}`: stdout `{logs.get('stdout')}`, stderr `{logs.get('stderr')}`, logging `{logs.get('python_logging')}`")
+    for sample in metric_samples[:20]:
+        stage_continuity = sample.get("stage_continuity") if isinstance(sample.get("stage_continuity"), dict) else {}
+        lines.extend(
+            [
+                "",
+                f"## {sample.get('sample_id')} Per-Stage Continuity",
+                *build_stage_continuity_markdown_lines(stage_continuity, heading="### continuity lineage"),
+            ]
+        )
     return "\n".join(lines) + "\n"
+
+
+def _run_result_stage_continuity(result: SampleRunResult) -> dict[str, Any]:
+    run_dir = Path(result.run_dir)
+    workspace_path = Path(result.workspace_path) if result.workspace_path else None
+    stage_summary = summarize_stage_continuity_lineage(
+        pitch_contours_path=_first_existing_file(
+            run_dir / "pitch_contours.json",
+            workspace_path / "pitch" / "pitch_contours.json" if workspace_path else None,
+        ),
+        note_candidates_path=_first_existing_file(
+            run_dir / "note_candidates.json",
+            workspace_path / "pitch" / "note_candidates.json" if workspace_path else None,
+        ),
+        selected_melody_path=_first_existing_file(
+            run_dir / "selected_melody.json",
+            workspace_path / "pitch" / "selected_melody.json" if workspace_path else None,
+        ),
+        quantized_notes_path=_first_existing_file(
+            run_dir / "quantized_notes.json",
+            workspace_path / "pitch" / "quantized_notes.json" if workspace_path else None,
+            workspace_path / "quantization" / "quantized_notes.json" if workspace_path else None,
+            workspace_path / "score" / "quantized_notes.json" if workspace_path else None,
+        ),
+    )
+    return {
+        "available": stage_summary.get("available"),
+        "diagnostic_warning_codes": stage_summary.get("diagnostic_warning_codes") or [],
+        "stages": stage_summary.get("stages") or [],
+    }
+
+
+def _first_existing_file(*paths: Path | None) -> Path | None:
+    for path in paths:
+        if path is not None and path.exists():
+            return path
+    return None
 
 
 def _quality_table_row(sample: dict[str, Any]) -> str:

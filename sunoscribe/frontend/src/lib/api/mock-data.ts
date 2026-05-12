@@ -178,6 +178,12 @@ export const mockArtifacts: PublicArtifactResponse[] = [
     file_size_bytes: 8200,
     checksum: 'sha256:mock-midi',
     created_at: '2026-05-08T20:31:00+08:00',
+    metadata: {
+      export_scope: 'diagnostic_review',
+      quality_gate_status: 'quality_failed',
+      quality_failed_checks: ['note_recall'],
+      diagnostic_message: 'MIDI is available for listening review, but the melody is sparse/fragmented and should not be treated as a clean transcription.',
+    },
   },
 ]
 

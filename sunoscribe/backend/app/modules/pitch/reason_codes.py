@@ -27,6 +27,8 @@ SHORT_GAP_BRIDGED = "short_gap_bridged"
 SHORT_NOTE_ABSORBED = "short_note_absorbed"
 OCTAVE_JUMP_CORRECTED = "octave_jump_corrected"
 PHRASE_MEDIAN_SMOOTHED = "phrase_median_smoothed"
+ISOLATED_FRAGMENT_REMOVED = "isolated_fragment_removed"
+PHRASE_GAP_SUSTAINED = "phrase_gap_sustained"
 FRAGMENTATION_RISK = POSSIBLE_FRAGMENTATION
 OVERMERGE_RISK = POSSIBLE_OVERMERGE
 

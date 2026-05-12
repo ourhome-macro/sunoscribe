@@ -7,8 +7,10 @@ from typing import Any
 
 from .note_utils import midi_to_note, note_to_midi
 from .reason_codes import (
+    ISOLATED_FRAGMENT_REMOVED,
     OCTAVE_JUMP_CORRECTED,
     PHRASE_MEDIAN_SMOOTHED,
+    PHRASE_GAP_SUSTAINED,
     SHORT_GAP_BRIDGED,
     SHORT_NOTE_ABSORBED,
 )
@@ -29,6 +31,13 @@ class PhrasePostprocessConfig:
     median_deviation_semitones: int = 2
     median_max_adjust_semitones: int = 4
     median_max_note_sec: float = 0.24
+    remove_isolated_fragments_enabled: bool = True
+    isolated_fragment_max_sec: float = 0.16
+    isolated_fragment_max_confidence: float = 0.54
+    isolated_fragment_min_jump_semitones: int = 7
+    sustain_short_gaps_enabled: bool = True
+    sustain_gap_sec: float = 0.18
+    sustain_max_pitch_delta_semitones: int = 2
     min_confidence_for_mutation: float = 0.0
     vocal_min_midi: int = 48
     vocal_max_midi: int = 84
@@ -132,11 +141,13 @@ class PhraseAwarePostprocessor:
             iteration_count += 1
             before = self._signature(notes)
             notes = self._bridge_short_gaps(notes, actions)
+            notes = self._remove_isolated_fragments(notes, actions)
             notes = self._correct_octave_jumps(notes, actions)
             notes = self._correct_octave_islands(notes, actions)
             notes = self._median_smooth(notes, actions)
             notes = self._absorb_short_notes(notes, actions)
             notes = self._bridge_short_gaps(notes, actions)
+            notes = self._sustain_phrase_gaps(notes, actions)
             after = self._signature(notes)
             if after == before:
                 break
@@ -241,7 +252,8 @@ class PhraseAwarePostprocessor:
             if prev_midi is not None and cur_midi is not None and next_midi is not None:
                 anchor = _median_int([prev_midi, next_midi])
                 pitch_outlier = abs(cur_midi - anchor) >= max(1, tolerance + 1)
-            absorbable = shorter_than_neighbors and (pitch_outlier or cur_confidence <= min(prev_confidence, next_confidence) + 0.05)
+            weak_enough = cur_confidence <= min(0.70, min(prev_confidence, next_confidence) + 0.05)
+            absorbable = shorter_than_neighbors and weak_enough and (pitch_outlier or cur_confidence <= min(prev_confidence, next_confidence) + 0.05)
             if local_phrase and short_enough and same_neighbor_pitch and not_stronger_than_neighbors and absorbable:
                 anchor_midi = _weighted_pitch([prev_note, next_note])
                 merged = self._merge_note_group(
@@ -281,6 +293,114 @@ class PhraseAwarePostprocessor:
         if idx == len(notes) - 1:
             resolved.append(self._clone_note(notes[-1]))
         return resolved
+
+    def _remove_isolated_fragments(
+        self,
+        notes: list[dict[str, Any]],
+        actions: list[PhrasePostprocessAction],
+    ) -> list[dict[str, Any]]:
+        if not self.config.remove_isolated_fragments_enabled or len(notes) <= 2:
+            return notes
+        max_duration = max(0.0, float(self.config.isolated_fragment_max_sec))
+        max_confidence = max(0.0, float(self.config.isolated_fragment_max_confidence))
+        min_jump = max(1, int(self.config.isolated_fragment_min_jump_semitones))
+        max_gap = max(0.0, float(self.config.max_phrase_gap_sec))
+        kept: list[dict[str, Any]] = [self._clone_note(notes[0])]
+        for idx in range(1, len(notes) - 1):
+            prev_note = kept[-1]
+            cur_note = notes[idx]
+            next_note = notes[idx + 1]
+            prev_midi = _pitch_midi(prev_note)
+            cur_midi = _pitch_midi(cur_note)
+            next_midi = _pitch_midi(next_note)
+            cur_duration = _duration(cur_note)
+            cur_confidence = float(cur_note.get("confidence") or 0.0)
+            local_phrase = self._is_local_phrase(prev_note, cur_note, next_note, max_gap=max_gap)
+            if prev_midi is None or cur_midi is None or next_midi is None or not local_phrase:
+                kept.append(self._clone_note(cur_note))
+                continue
+            jump_from_prev = abs(cur_midi - prev_midi)
+            jump_to_next = abs(cur_midi - next_midi)
+            anchor_span = abs(prev_midi - next_midi)
+            clearly_isolated = jump_from_prev >= min_jump and jump_to_next >= min_jump and anchor_span <= max(3, self.config.same_pitch_tolerance_semitones + 2)
+            weak_fragment = cur_duration <= max_duration and cur_confidence <= max_confidence
+            if clearly_isolated and weak_fragment and self._can_mutate(cur_note):
+                actions.append(
+                    PhrasePostprocessAction(
+                        action="isolated_fragment_remove",
+                        reason_code=ISOLATED_FRAGMENT_REMOVED,
+                        note_ids=_source_ids([cur_note]),
+                        output_note_id=None,
+                        start_time_sec=float(cur_note["start_time_sec"]),
+                        end_time_sec=float(cur_note["end_time_sec"]),
+                        pitch_before_midi=cur_midi,
+                        pitch_after_midi=None,
+                        details={
+                            "mode": "delete_weak_short_local_outlier",
+                            "duration_sec": round(cur_duration, 6),
+                            "confidence": round(cur_confidence, 6),
+                            "jump_from_prev_semitones": round(jump_from_prev, 6),
+                            "jump_to_next_semitones": round(jump_to_next, 6),
+                            "anchor_span_semitones": round(anchor_span, 6),
+                        },
+                    )
+                )
+                continue
+            kept.append(self._clone_note(cur_note))
+        kept.append(self._clone_note(notes[-1]))
+        return kept
+
+    def _sustain_phrase_gaps(
+        self,
+        notes: list[dict[str, Any]],
+        actions: list[PhrasePostprocessAction],
+    ) -> list[dict[str, Any]]:
+        if not self.config.sustain_short_gaps_enabled or len(notes) <= 1:
+            return notes
+        max_gap = max(0.0, float(self.config.sustain_gap_sec))
+        phrase_gap = max(0.0, float(self.config.max_phrase_gap_sec))
+        max_pitch_delta = max(0, int(self.config.sustain_max_pitch_delta_semitones))
+        sustained: list[dict[str, Any]] = []
+        for idx, note in enumerate(notes):
+            current = self._clone_note(note)
+            if idx < len(notes) - 1:
+                nxt = notes[idx + 1]
+                gap = float(nxt["start_time_sec"]) - float(current["end_time_sec"])
+                cur_midi = _pitch_midi(current)
+                nxt_midi = _pitch_midi(nxt)
+                can_sustain = (
+                    cur_midi is not None
+                    and nxt_midi is not None
+                    and gap > 0.0
+                    and gap <= max_gap
+                    and gap <= phrase_gap
+                    and abs(cur_midi - nxt_midi) <= max_pitch_delta
+                    and self._can_mutate(current)
+                )
+                if can_sustain:
+                    before_end = float(current["end_time_sec"])
+                    current = self._with_end_time(current, float(nxt["start_time_sec"]), PHRASE_GAP_SUSTAINED)
+                    actions.append(
+                        PhrasePostprocessAction(
+                            action="phrase_gap_sustain",
+                            reason_code=PHRASE_GAP_SUSTAINED,
+                            note_ids=_source_ids([note]),
+                            output_note_id=str(current.get("candidate_id")),
+                            start_time_sec=float(note["start_time_sec"]),
+                            end_time_sec=float(current["end_time_sec"]),
+                            pitch_before_midi=cur_midi,
+                            pitch_after_midi=cur_midi,
+                            details={
+                                "mode": "extend_note_end_to_next_onset",
+                                "gap_sec": round(gap, 6),
+                                "end_before_sec": round(before_end, 6),
+                                "end_after_sec": round(float(current["end_time_sec"]), 6),
+                                "pitch_delta_semitones": round(abs(cur_midi - nxt_midi), 6),
+                            },
+                        )
+                    )
+            sustained.append(current)
+        return sustained
 
     def _correct_octave_jumps(
         self,
@@ -323,6 +443,8 @@ class PhraseAwarePostprocessor:
             cur_duration = _duration(cur_note)
             cur_confidence = float(cur_note.get("confidence") or 0.0)
             strongest_anchor_confidence = max(float(note.get("confidence") or 0.0) for note, _ in anchors)
+            if cur_confidence >= min(0.70, strongest_anchor_confidence - 0.05):
+                continue
             if cur_duration > max_mutation_duration and cur_confidence >= strongest_anchor_confidence + 0.05:
                 continue
             left_pitch = _pitch_midi(repaired[idx - 1])
@@ -412,6 +534,10 @@ class PhraseAwarePostprocessor:
                 if not self._phrase_window_is_local([prev_note] + island + [next_note], max_gap=max_gap):
                     continue
                 if any(not self._can_mutate(note) for note in island):
+                    continue
+                island_confidence = max(float(note.get("confidence") or 0.0) for note in island)
+                anchor_confidence = max(float(prev_note.get("confidence") or 0.0), float(next_note.get("confidence") or 0.0))
+                if island_confidence >= min(0.70, anchor_confidence - 0.05):
                     continue
                 island_start = float(island[0]["start_time_sec"])
                 island_end = float(island[-1]["end_time_sec"])
@@ -557,6 +683,15 @@ class PhraseAwarePostprocessor:
     def _with_pitch(self, note: dict[str, Any], pitch_midi: float, reason_code: str) -> dict[str, Any]:
         updated = self._clone_note(note)
         updated["pitch_center_midi"] = round(float(pitch_midi), 6)
+        updated["reason_codes"] = _unique(list(updated.get("reason_codes") or []) + [reason_code])
+        return updated
+
+    def _with_end_time(self, note: dict[str, Any], end_time_sec: float, reason_code: str) -> dict[str, Any]:
+        updated = self._clone_note(note)
+        start = float(updated.get("start_time_sec") or 0.0)
+        end = max(start, float(end_time_sec))
+        updated["end_time_sec"] = round(end, 6)
+        updated["duration_sec"] = round(max(0.0, end - start), 6)
         updated["reason_codes"] = _unique(list(updated.get("reason_codes") or []) + [reason_code])
         return updated
 

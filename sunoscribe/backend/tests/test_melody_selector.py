@@ -7,6 +7,12 @@ from app.modules.pitch.types import Note
 
 
 class TestMelodySelector(unittest.TestCase):
+    def test_postprocessor_defaults_are_conservative(self):
+        selector = MelodySelector(PitchDetectionConfig())
+
+        self.assertFalse(selector.postprocessor.config.remove_isolated_fragments_enabled)
+        self.assertTrue(selector.postprocessor.config.sustain_short_gaps_enabled)
+
     def test_filters_low_confidence_short_and_out_of_range_notes(self):
         selector = MelodySelector(PitchDetectionConfig())
         notes = [

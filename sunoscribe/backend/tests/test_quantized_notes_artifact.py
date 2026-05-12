@@ -40,8 +40,19 @@ class TestQuantizedNotesArtifactBuilder(unittest.TestCase):
         self.assertEqual(artifact["quantizer_backend"], "local_snap")
         self.assertFalse(artifact["fallback_used"])
 
-    def test_dp_v1_falls_back_explicitly_without_rhythm_grid(self) -> None:
-        artifact = QuantizedNotesArtifactBuilder().build(
+    def test_dp_v1_fails_explicitly_without_rhythm_grid_by_default(self) -> None:
+        with self.assertRaisesRegex(ValueError, "rhythm grid unavailable"):
+            QuantizedNotesArtifactBuilder().build(
+                selected_melody={
+                    "selected_notes": [
+                        {"candidate_id": "c1", "start_time_sec": 0.01, "end_time_sec": 0.51, "pitch_center_midi": 60.0, "confidence": 0.9},
+                    ]
+                },
+                rhythm_grid=None,
+            )
+
+    def test_dp_v1_can_fallback_explicitly_without_rhythm_grid(self) -> None:
+        artifact = QuantizedNotesArtifactBuilder(QuantizerArtifactConfig(allow_required_fallback=True)).build(
             selected_melody={
                 "selected_notes": [
                     {"candidate_id": "c1", "start_time_sec": 0.01, "end_time_sec": 0.51, "pitch_center_midi": 60.0, "confidence": 0.9},

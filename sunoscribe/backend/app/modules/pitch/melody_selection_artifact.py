@@ -40,6 +40,13 @@ class MelodySelectionConfig:
     phrase_median_deviation_semitones: int = 2
     phrase_median_max_adjust_semitones: int = 4
     phrase_median_max_note_sec: float = 0.24
+    phrase_remove_isolated_fragments_enabled: bool = False
+    phrase_isolated_fragment_max_sec: float = 0.16
+    phrase_isolated_fragment_max_confidence: float = 0.58
+    phrase_isolated_fragment_min_jump_semitones: int = 7
+    phrase_sustain_short_gaps_enabled: bool = True
+    phrase_sustain_gap_sec: float = 0.18
+    phrase_sustain_max_pitch_delta_semitones: int = 2
     phrase_max_iterations: int = 2
 
 
@@ -54,7 +61,7 @@ class RuleBasedMelodySelector:
         note_candidates: dict[str, Any] | None,
         pitch_contours: dict[str, Any] | None = None,
     ) -> dict[str, Any] | None:
-        candidates = self._candidate_items(note_candidates, pitch_contours)
+        candidates, input_source = self._candidate_items(note_candidates, pitch_contours)
         if not candidates:
             return None
 
@@ -69,6 +76,7 @@ class RuleBasedMelodySelector:
 
         selected, overlap_rejected = self._resolve_overlaps(selected)
         rejected.extend(overlap_rejected)
+        inherited_reason_counts = Counter(reason for item in selected for reason in item.get("reason_codes", []))
         postprocess_result = self.postprocessor.process_dict_notes(selected)
         selected = [self._selected_from_postprocessed(item) for item in postprocess_result.notes]
         selected.sort(key=lambda item: (item["start_time_sec"], item["end_time_sec"], item["pitch_center_midi"]))
@@ -78,23 +86,29 @@ class RuleBasedMelodySelector:
         selected_conf = [float(item["confidence"]) for item in selected]
         rejected_conf = [float(item["confidence"]) for item in rejected]
         postprocess_diagnostics = postprocess_result.diagnostics()
+        inherited_reason_code_counts = dict(sorted(inherited_reason_counts.items()))
         return {
             "version": "selected_melody_v1",
             "selected_notes": selected,
             "rejected_candidates": rejected,
             "summary": {
                 "input_candidate_count": len(candidates),
+                "input_source": input_source,
                 "pre_postprocess_selected_count": postprocess_result.input_count,
                 "selected_count": len(selected),
                 "rejected_count": len(rejected),
                 "rejection_reason_counts": dict(sorted(reason_counts.items())),
                 "selected_reason_counts": dict(sorted(selected_reason_counts.items())),
+                "inherited_reason_code_counts": inherited_reason_code_counts,
                 "postprocess_action_counts": postprocess_diagnostics["action_counts"],
                 "postprocess_reason_code_counts": postprocess_diagnostics["reason_code_counts"],
                 "mean_selected_confidence": round(mean(selected_conf), 6) if selected_conf else 0.0,
                 "mean_rejected_confidence": round(mean(rejected_conf), 6) if rejected_conf else 0.0,
             },
-            "postprocess": postprocess_diagnostics,
+            "postprocess": {
+                **postprocess_diagnostics,
+                "inherited_reason_code_counts": inherited_reason_code_counts,
+            },
             "config": {
                 "phrase_postprocess_enabled": self.config.phrase_postprocess_enabled,
                 "phrase_max_gap_sec": self.config.phrase_max_gap_sec,
@@ -102,6 +116,9 @@ class RuleBasedMelodySelector:
                 "phrase_short_note_sec": self.config.phrase_short_note_sec,
                 "phrase_octave_jump_semitones": self.config.phrase_octave_jump_semitones,
                 "phrase_median_window": self.config.phrase_median_window,
+                "phrase_remove_isolated_fragments_enabled": self.config.phrase_remove_isolated_fragments_enabled,
+                "phrase_sustain_short_gaps_enabled": self.config.phrase_sustain_short_gaps_enabled,
+                "input_source": input_source,
             },
         }
 
@@ -109,14 +126,14 @@ class RuleBasedMelodySelector:
         self,
         note_candidates: dict[str, Any] | None,
         pitch_contours: dict[str, Any] | None,
-    ) -> list[dict[str, Any]]:
-        raw_notes = _extract_candidate_notes(note_candidates)
+    ) -> tuple[list[dict[str, Any]], str]:
+        raw_notes, input_source = _extract_candidate_notes(note_candidates)
         if raw_notes:
-            return [self._normalize_candidate(note, index) for index, note in enumerate(raw_notes, start=1)]
+            return [self._normalize_candidate(note, index) for index, note in enumerate(raw_notes, start=1)], input_source
         contours = pitch_contours.get("contours") if isinstance(pitch_contours, dict) else None
         if isinstance(contours, list):
-            return [self._candidate_from_contour(contour, index) for index, contour in enumerate(contours, start=1) if isinstance(contour, dict)]
-        return []
+            return [self._candidate_from_contour(contour, index) for index, contour in enumerate(contours, start=1) if isinstance(contour, dict)], "pitch_contours.contours"
+        return [], "none"
 
     def _normalize_candidate(self, note: dict[str, Any], index: int) -> dict[str, Any]:
         start = _safe_float(_first(note, "start_time_sec", "start_time", "onset_sec")) or 0.0
@@ -236,6 +253,13 @@ class RuleBasedMelodySelector:
             median_deviation_semitones=int(self.config.phrase_median_deviation_semitones),
             median_max_adjust_semitones=int(self.config.phrase_median_max_adjust_semitones),
             median_max_note_sec=float(self.config.phrase_median_max_note_sec),
+            remove_isolated_fragments_enabled=bool(self.config.phrase_remove_isolated_fragments_enabled),
+            isolated_fragment_max_sec=float(self.config.phrase_isolated_fragment_max_sec),
+            isolated_fragment_max_confidence=float(self.config.phrase_isolated_fragment_max_confidence),
+            isolated_fragment_min_jump_semitones=int(self.config.phrase_isolated_fragment_min_jump_semitones),
+            sustain_short_gaps_enabled=bool(self.config.phrase_sustain_short_gaps_enabled),
+            sustain_gap_sec=float(self.config.phrase_sustain_gap_sec),
+            sustain_max_pitch_delta_semitones=int(self.config.phrase_sustain_max_pitch_delta_semitones),
             vocal_min_midi=int(self.config.vocal_min_midi),
             vocal_max_midi=int(self.config.vocal_max_midi),
             max_iterations=int(self.config.phrase_max_iterations),
@@ -283,21 +307,24 @@ def selected_notes_to_pitch_notes(selected_melody: dict[str, Any] | None) -> lis
     return notes
 
 
-def _extract_candidate_notes(note_candidates: dict[str, Any] | None) -> list[dict[str, Any]]:
+def _extract_candidate_notes(note_candidates: dict[str, Any] | None) -> tuple[list[dict[str, Any]], str]:
     if not isinstance(note_candidates, dict):
-        return []
-    containers = []
+        return [], "none"
     melody = note_candidates.get("melody_candidates")
-    if isinstance(melody, dict):
-        containers.append(melody)
-    containers.append(note_candidates)
-    for container in containers:
-        notes = container.get("selected_notes") if isinstance(container.get("selected_notes"), list) else None
-        if not notes:
-            notes = container.get("notes") if isinstance(container.get("notes"), list) else None
+    containers = [("melody_candidates", melody), ("note_candidates", note_candidates)]
+    for source, container in containers:
+        if not isinstance(container, dict):
+            continue
+        notes = container.get("notes") if isinstance(container.get("notes"), list) else None
         if notes:
-            return [note for note in notes if isinstance(note, dict)]
-    return []
+            return [note for note in notes if isinstance(note, dict)], f"{source}.notes"
+    for source, container in containers:
+        if not isinstance(container, dict):
+            continue
+        notes = container.get("selected_notes") if isinstance(container.get("selected_notes"), list) else None
+        if notes:
+            return [note for note in notes if isinstance(note, dict)], f"{source}.selected_notes_legacy"
+    return [], "none"
 
 
 def _pitch_center(note: dict[str, Any]) -> float | None:

@@ -22,7 +22,8 @@ from app.modules.alignment import (
     StubAlignmentLLMClient,
 )
 from app.modules.analysis_ir import AnalysisIR, BaselineAnalysisInferencer
-from app.modules.score_ir import AnalysisHints, ScoreIR, ScoreIRBuilder, ScoreIRSerializer, ScoreMeta
+from app.modules.pitch.note_utils import midi_to_note
+from app.modules.score_ir import AnalysisHints, ScoreIR, ScoreIRBuilder, ScoreIRSerializer, ScoreMeasure, ScoreMeta, ScoreNote
 
 from app.services.media_ingest_service import MediaIngestService
 from app.services.melody_transcription_service import MelodyTranscriptionService
@@ -376,6 +377,11 @@ class AudioAnalysisService:
 
         if score_ir_obj is None:
             score_ir_obj = self._build_empty_score_ir(warnings)
+        score_ir_obj = self._replace_lead_notes_from_quantized_artifact(
+            score_ir_obj,
+            quantized_notes_dict=quantized_notes_dict,
+            warnings=warnings,
+        )
 
         if score_data_dict is None:
             try:
@@ -423,6 +429,118 @@ class AudioAnalysisService:
             vocal_activity_dict=vocal_activity_dict,
             warnings=warnings,
         )
+
+    def _replace_lead_notes_from_quantized_artifact(
+        self,
+        score_ir: ScoreIR,
+        *,
+        quantized_notes_dict: dict | None,
+        warnings: list[str],
+    ) -> ScoreIR:
+        if not isinstance(quantized_notes_dict, dict):
+            return score_ir
+        raw_notes = quantized_notes_dict.get("notes")
+        if not isinstance(raw_notes, list) or not raw_notes:
+            return score_ir
+
+        converted_notes: list[ScoreNote] = []
+        measure_note_ids: dict[int, list[str]] = {}
+        for index, raw_note in enumerate(raw_notes, start=1):
+            if not isinstance(raw_note, dict):
+                continue
+            score_note = self._score_note_from_quantized_artifact(raw_note, index)
+            if score_note is None:
+                continue
+            converted_notes.append(score_note)
+            if score_note.measure_num is not None:
+                measure_note_ids.setdefault(int(score_note.measure_num), []).append(score_note.id)
+        if not converted_notes:
+            warnings.append("score_ir_quantized_notes_empty_after_conversion")
+            return score_ir
+
+        score_ir.notes = converted_notes
+        score_ir.measures = self._measures_from_quantized_score_notes(converted_notes, measure_note_ids)
+        score_ir.warnings = self._merge_warnings(
+            list(score_ir.warnings or []),
+            ["score_ir_lead_notes_replaced_from_quantized_notes"],
+        )
+        score_ir.meta.total_measures = len(score_ir.measures)
+        score_ir.meta.duration_sec = max(
+            float(score_ir.meta.duration_sec or 0.0),
+            max(float(note.end_time) for note in converted_notes),
+        )
+        score_ir.meta.analysis_info = dict(score_ir.meta.analysis_info or {})
+        score_ir.meta.analysis_info["lead_note_source"] = "quantized_notes"
+        score_ir.meta.analysis_info["quantizer_backend"] = quantized_notes_dict.get("quantizer_backend")
+        score_ir.analysis_hints.quantize_mode = str(quantized_notes_dict.get("quantizer_backend") or "") or None
+        return score_ir
+
+    def _score_note_from_quantized_artifact(self, raw_note: dict[str, Any], index: int) -> ScoreNote | None:
+        start_time = self._float_from_any(raw_note.get("quantized_start_time_sec"), raw_note.get("start_time_sec"), 0.0)
+        end_time = self._float_from_any(raw_note.get("quantized_end_time_sec"), raw_note.get("end_time_sec"), start_time)
+        if end_time <= start_time:
+            return None
+        pitch_midi = self._optional_int_from_any(raw_note.get("pitch_midi"))
+        pitch = str(raw_note.get("pitch") or "")
+        if not pitch and pitch_midi is not None:
+            pitch = midi_to_note(pitch_midi)
+        if not pitch:
+            return None
+        measure_index = self._optional_int_from_any(raw_note.get("measure_index"))
+        measure_num = self._optional_int_from_any(raw_note.get("measure_num"))
+        if measure_num is None and measure_index is not None:
+            measure_num = measure_index + 1
+        if measure_num is None:
+            measure_num = 1
+        reason_codes = list(raw_note.get("reason_codes") or [])
+        note_id = f"n{index:06d}"
+        return ScoreNote(
+            id=note_id,
+            pitch=pitch,
+            pitch_midi=pitch_midi,
+            start_time=start_time,
+            end_time=end_time,
+            duration_sec=max(0.0, end_time - start_time),
+            duration_beats=self._optional_float_from_any(raw_note.get("duration_beats")),
+            note_type=self._note_type_from_duration_beats(raw_note.get("duration_beats")),
+            measure_num=measure_num,
+            beat_position=self._optional_float_from_any(raw_note.get("beat_in_measure")),
+            confidence=self._float_from_any(raw_note.get("confidence"), 0.0),
+            lyric=None,
+            is_raw=False,
+            is_candidate_ornament=False,
+            tie_candidate=False,
+            source="quantized_notes",
+            source_candidate_id=str(raw_note.get("source_candidate_id") or ""),
+            quantized_note_id=str(raw_note.get("id") or ""),
+            uncertain=bool(raw_note.get("uncertain")) or bool(reason_codes),
+            reason_codes=reason_codes,
+        )
+
+    def _measures_from_quantized_score_notes(
+        self,
+        notes: list[ScoreNote],
+        measure_note_ids: dict[int, list[str]],
+    ) -> list[ScoreMeasure]:
+        measure_nums = sorted(measure_note_ids) or [1]
+        measures: list[ScoreMeasure] = []
+        for measure_num in measure_nums:
+            measure_notes = [note for note in notes if note.measure_num == measure_num]
+            if not measure_notes:
+                continue
+            start_time = min(float(note.start_time) for note in measure_notes)
+            end_time = max(float(note.end_time) for note in measure_notes)
+            measures.append(
+                ScoreMeasure(
+                    measure_num=measure_num,
+                    start_time=start_time,
+                    end_time=end_time,
+                    duration_sec=max(0.0, end_time - start_time),
+                    is_anacrusis=False,
+                    note_ids=list(measure_note_ids.get(measure_num) or []),
+                )
+            )
+        return measures
 
     def _annotate_score_ir_notes(self, score_ir_dict: dict, *, quantized_notes_dict: dict | None) -> dict:
         if not isinstance(score_ir_dict, dict) or not isinstance(quantized_notes_dict, dict):
@@ -782,6 +900,49 @@ class AudioAnalysisService:
                 if text and text not in merged:
                     merged.append(text)
         return merged
+
+    @staticmethod
+    def _float_from_any(*values: Any) -> float:
+        for value in values:
+            try:
+                if value is None:
+                    continue
+                result = float(value)
+            except (TypeError, ValueError):
+                continue
+            if result == result and abs(result) != float("inf"):
+                return result
+        return 0.0
+
+    @classmethod
+    def _optional_float_from_any(cls, value: Any) -> float | None:
+        try:
+            result = float(value)
+        except (TypeError, ValueError):
+            return None
+        return result if result == result and abs(result) != float("inf") else None
+
+    @classmethod
+    def _optional_int_from_any(cls, value: Any) -> int | None:
+        numeric = cls._optional_float_from_any(value)
+        return int(numeric) if numeric is not None else None
+
+    @classmethod
+    def _note_type_from_duration_beats(cls, value: Any) -> str | None:
+        duration = cls._optional_float_from_any(value)
+        if duration is None:
+            return None
+        if duration >= 4.0:
+            return "whole"
+        if duration >= 2.0:
+            return "half"
+        if duration >= 1.0:
+            return "quarter"
+        if duration >= 0.5:
+            return "eighth"
+        if duration >= 0.25:
+            return "sixteenth"
+        return "thirty_second"
 
     def _build_note_candidates_payload(self, semantic_audio_dict: dict | None) -> dict | None:
         if not isinstance(semantic_audio_dict, dict):

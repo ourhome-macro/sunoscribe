@@ -4,11 +4,13 @@ import unittest
 
 from app.modules.pitch.melody_selection_artifact import MelodySelectionConfig, RuleBasedMelodySelector
 from app.modules.pitch.reason_codes import (
+    ISOLATED_FRAGMENT_REMOVED,
     LOW_CONFIDENCE,
     OCTAVE_JUMP_CORRECTED,
     OUTSIDE_VOCAL_RANGE,
     OVERLAPS_STRONGER_CANDIDATE,
     PHRASE_MEDIAN_SMOOTHED,
+    PHRASE_GAP_SUSTAINED,
     SHORT_GAP_BRIDGED,
     SHORT_NOTE_ABSORBED,
     TOO_SHORT,
@@ -16,6 +18,32 @@ from app.modules.pitch.reason_codes import (
 
 
 class TestRuleBasedMelodySelector(unittest.TestCase):
+    def test_raw_notes_are_preferred_over_legacy_selected_notes(self) -> None:
+        result = RuleBasedMelodySelector(MelodySelectionConfig(phrase_postprocess_enabled=False)).select(
+            note_candidates={
+                "melody_candidates": {
+                    "notes": [
+                        {"id": "raw", "start_time": 0.0, "end_time": 0.4, "pitch": "C4", "confidence": 0.9},
+                    ],
+                    "selected_notes": [
+                        {
+                            "id": "legacy",
+                            "start_time": 1.0,
+                            "end_time": 1.4,
+                            "pitch": "D4",
+                            "confidence": 0.9,
+                            "reason_codes": [SHORT_GAP_BRIDGED],
+                        },
+                    ],
+                }
+            }
+        )
+
+        self.assertEqual([note["candidate_id"] for note in result["selected_notes"]], ["raw"])
+        self.assertEqual(result["summary"]["input_source"], "melody_candidates.notes")
+        self.assertEqual(result["config"]["input_source"], "melody_candidates.notes")
+        self.assertEqual(result["summary"]["inherited_reason_code_counts"], {})
+
     def test_rejects_low_confidence_short_and_out_of_range(self) -> None:
         selector = RuleBasedMelodySelector()
         result = selector.select(
@@ -117,8 +145,68 @@ class TestRuleBasedMelodySelector(unittest.TestCase):
         self.assertEqual(result["postprocess"]["output_note_count"], result["postprocess"]["input_note_count"])
         self.assertNotIn(SHORT_GAP_BRIDGED, result["summary"].get("selected_reason_counts", {}))
 
-    def test_phrase_postprocess_absorbs_short_note_and_corrects_octave(self) -> None:
+    def test_phrase_postprocess_removes_weak_isolated_fragment(self) -> None:
+        result = RuleBasedMelodySelector(
+            MelodySelectionConfig(phrase_remove_isolated_fragments_enabled=True)
+        ).select(
+            note_candidates={
+                "melody_candidates": {
+                    "notes": [
+                        {"id": "left", "start_time": 0.00, "end_time": 0.30, "pitch": "C4", "confidence": 0.9},
+                        {"id": "bad", "start_time": 0.34, "end_time": 0.46, "pitch": "C5", "confidence": 0.53},
+                        {"id": "right", "start_time": 0.50, "end_time": 0.82, "pitch": "C4", "confidence": 0.9},
+                    ]
+                }
+            }
+        )
+
+        self.assertEqual([note["candidate_id"] for note in result["selected_notes"]], ["left", "right"])
+        self.assertEqual(result["postprocess"]["action_counts"]["isolated_fragment_remove"], 1)
+        action = [action for action in result["postprocess"]["actions"] if action["action"] == "isolated_fragment_remove"][0]
+        self.assertEqual(action["reason_code"], ISOLATED_FRAGMENT_REMOVED)
+        self.assertEqual(action["note_ids"], ["bad"])
+        self.assertEqual(action["details"]["mode"], "delete_weak_short_local_outlier")
+
+    def test_phrase_postprocess_keeps_confident_isolated_note(self) -> None:
+        result = RuleBasedMelodySelector(
+            MelodySelectionConfig(phrase_remove_isolated_fragments_enabled=True)
+        ).select(
+            note_candidates={
+                "melody_candidates": {
+                    "notes": [
+                        {"id": "left", "start_time": 0.00, "end_time": 0.30, "pitch": "C4", "confidence": 0.9},
+                        {"id": "real", "start_time": 0.34, "end_time": 0.46, "pitch": "C5", "confidence": 0.82},
+                        {"id": "right", "start_time": 0.50, "end_time": 0.82, "pitch": "C4", "confidence": 0.9},
+                    ]
+                }
+            }
+        )
+
+        self.assertIn("real", [note["candidate_id"] for note in result["selected_notes"]])
+        self.assertNotIn(ISOLATED_FRAGMENT_REMOVED, result["postprocess"].get("reason_code_counts", {}))
+
+    def test_phrase_postprocess_sustains_short_phrase_gap_for_playback_continuity(self) -> None:
         result = RuleBasedMelodySelector().select(
+            note_candidates={
+                "melody_candidates": {
+                    "notes": [
+                        {"id": "a", "start_time": 0.00, "end_time": 0.30, "pitch": "C4", "confidence": 0.9},
+                        {"id": "b", "start_time": 0.41, "end_time": 0.72, "pitch": "D4", "confidence": 0.9},
+                    ]
+                }
+            }
+        )
+
+        self.assertEqual(result["summary"]["selected_count"], 2)
+        first = result["selected_notes"][0]
+        self.assertAlmostEqual(first["end_time_sec"], 0.41, places=3)
+        self.assertIn(PHRASE_GAP_SUSTAINED, first["reason_codes"])
+        self.assertEqual(result["postprocess"]["action_counts"]["phrase_gap_sustain"], 1)
+
+    def test_phrase_postprocess_absorbs_short_note_and_corrects_octave(self) -> None:
+        result = RuleBasedMelodySelector(
+            MelodySelectionConfig(phrase_remove_isolated_fragments_enabled=True)
+        ).select(
             note_candidates={
                 "melody_candidates": {
                     "notes": [
@@ -130,19 +218,84 @@ class TestRuleBasedMelodySelector(unittest.TestCase):
             }
         )
 
-        self.assertEqual(result["summary"]["selected_count"], 1)
-        note = result["selected_notes"][0]
-        self.assertEqual(round(note["pitch_center_midi"]), 60)
-        self.assertIn(SHORT_NOTE_ABSORBED, note["reason_codes"])
-        self.assertIn(OCTAVE_JUMP_CORRECTED, result["postprocess"]["reason_code_counts"])
-        self.assertEqual(result["postprocess"]["action_counts"]["short_note_absorb"], 1)
-        absorb_action = [
-            action for action in result["postprocess"]["actions"] if action["action"] == "short_note_absorb"
+        self.assertEqual(result["summary"]["selected_count"], 2)
+        self.assertEqual([note["candidate_id"] for note in result["selected_notes"]], ["left", "right"])
+        self.assertEqual(result["postprocess"]["action_counts"]["isolated_fragment_remove"], 1)
+        remove_action = [
+            action for action in result["postprocess"]["actions"] if action["action"] == "isolated_fragment_remove"
         ][0]
-        self.assertEqual(absorb_action["reason_code"], SHORT_NOTE_ABSORBED)
-        self.assertEqual(absorb_action["details"]["mode"], "merge_short_center_note")
-        self.assertIn("pitch_outlier", absorb_action["details"])
-        self.assertGreater(absorb_action["details"]["neighbor_confidence_max"], absorb_action["details"]["confidence_before"])
+        self.assertEqual(remove_action["reason_code"], ISOLATED_FRAGMENT_REMOVED)
+        self.assertEqual(remove_action["details"]["mode"], "delete_weak_short_local_outlier")
+        self.assertGreater(remove_action["details"]["jump_from_prev_semitones"], 7)
+
+    def test_default_conservative_profile_keeps_weak_isolated_fragment(self) -> None:
+        result = RuleBasedMelodySelector().select(
+            note_candidates={
+                "melody_candidates": {
+                    "notes": [
+                        {"id": "left", "start_time": 0.00, "end_time": 0.30, "pitch": "C4", "confidence": 0.9},
+                        {"id": "bad", "start_time": 0.34, "end_time": 0.46, "pitch": "C5", "confidence": 0.53},
+                        {"id": "right", "start_time": 0.50, "end_time": 0.82, "pitch": "C4", "confidence": 0.9},
+                    ]
+                }
+            }
+        )
+
+        self.assertFalse(result["config"]["phrase_remove_isolated_fragments_enabled"])
+        self.assertNotIn("isolated_fragment_remove", result["postprocess"]["action_counts"])
+        self.assertNotIn(ISOLATED_FRAGMENT_REMOVED, result["postprocess"]["reason_code_counts"])
+
+    def test_raw_notes_are_preferred_over_legacy_selected_notes(self) -> None:
+        result = RuleBasedMelodySelector(MelodySelectionConfig(phrase_postprocess_enabled=False)).select(
+            note_candidates={
+                "melody_candidates": {
+                    "notes": [
+                        {"id": "raw", "start_time": 0.0, "end_time": 0.4, "pitch": "C4", "confidence": 0.9},
+                    ],
+                    "selected_notes": [
+                        {
+                            "id": "legacy",
+                            "start_time": 1.0,
+                            "end_time": 1.4,
+                            "pitch": "D4",
+                            "confidence": 0.9,
+                            "reason_codes": [SHORT_GAP_BRIDGED],
+                        },
+                    ],
+                }
+            }
+        )
+
+        self.assertEqual([note["candidate_id"] for note in result["selected_notes"]], ["raw"])
+        self.assertEqual(result["summary"]["input_source"], "melody_candidates.notes")
+        self.assertEqual(result["summary"]["inherited_reason_code_counts"], {})
+
+    def test_legacy_selected_notes_reason_codes_are_inherited_not_actions(self) -> None:
+        result = RuleBasedMelodySelector(MelodySelectionConfig(phrase_postprocess_enabled=False)).select(
+            note_candidates={
+                "melody_candidates": {
+                    "selected_notes": [
+                        {
+                            "id": "legacy",
+                            "start_time": 1.0,
+                            "end_time": 1.4,
+                            "pitch": "D4",
+                            "confidence": 0.9,
+                            "reason_codes": [SHORT_GAP_BRIDGED],
+                        },
+                    ],
+                }
+            }
+        )
+
+        self.assertEqual(result["summary"]["input_source"], "melody_candidates.selected_notes_legacy")
+        self.assertEqual(result["summary"]["inherited_reason_code_counts"], {SHORT_GAP_BRIDGED: 1})
+        self.assertEqual(result["postprocess"]["inherited_reason_code_counts"], {SHORT_GAP_BRIDGED: 1})
+        self.assertEqual(result["postprocess"]["action_count"], 0)
+        self.assertEqual(result["postprocess"]["action_counts"], {})
+        self.assertEqual(result["postprocess"]["reason_code_counts"], {})
+        self.assertEqual(result["summary"]["postprocess_action_counts"], {})
+        self.assertEqual(result["summary"]["postprocess_reason_code_counts"], {})
 
     def test_phrase_postprocess_median_smooths_inner_outlier(self) -> None:
         result = RuleBasedMelodySelector().select(

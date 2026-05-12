@@ -62,6 +62,41 @@ DEBUG_PACKAGE_FILES = [
     "debug_summary.md",
 ]
 
+INHERITED_POSTPROCESS_REASON_CODES_DETECTED = "inherited_postprocess_reason_codes_detected"
+
+STAGE_CONTINUITY_STAGE_SPECS = [
+    {
+        "stage": "pitch_contours",
+        "label": "pitch_contours",
+        "lineage_source": "pitch_contours.contours",
+        "artifact": "pitch_contours.json",
+    },
+    {
+        "stage": "note_candidates_raw_notes",
+        "label": "note_candidates raw notes",
+        "lineage_source": "note_candidates.melody_candidates.notes",
+        "artifact": "note_candidates.json",
+    },
+    {
+        "stage": "note_candidates_legacy_selected_notes",
+        "label": "note_candidates legacy selected_notes",
+        "lineage_source": "note_candidates.melody_candidates.selected_notes",
+        "artifact": "note_candidates.json",
+    },
+    {
+        "stage": "selected_melody_selected_notes",
+        "label": "selected_melody selected_notes",
+        "lineage_source": "selected_melody.selected_notes",
+        "artifact": "selected_melody.json",
+    },
+    {
+        "stage": "quantized_notes",
+        "label": "quantized_notes",
+        "lineage_source": "quantized_notes.notes",
+        "artifact": "quantized_notes.json",
+    },
+]
+
 
 @dataclass(slots=True)
 class DebugPackageResult:
@@ -512,6 +547,12 @@ def build_derived_diagnostics(
     note_candidates = _derive_note_candidate_diagnostics(note_candidates_path, predicted_note_count=len(predicted_notes))
     selected_melody = _derive_selected_melody_diagnostics(selected_melody_path)
     quantized_notes = _derive_quantized_note_diagnostics(quantized_notes_path)
+    stage_continuity = summarize_stage_continuity_lineage(
+        pitch_contours_path=pitch_contours_path,
+        note_candidates_path=note_candidates_path,
+        selected_melody_path=selected_melody_path,
+        quantized_notes_path=quantized_notes_path,
+    )
     rhythm = _derive_rhythm_diagnostics(rhythm_debug_path, rhythm_candidates_path=rhythm_candidates_path)
     short_note_diagnostics = _derive_short_note_diagnostics(
         expected_notes,
@@ -563,6 +604,7 @@ def build_derived_diagnostics(
     return {
         "notes": notes,
         "continuity": compute_midi_continuity_metrics(predicted_notes).to_dict(),
+        "stage_continuity": stage_continuity,
         "f0": f0,
         "pitch_contours": pitch_contours,
         "vocal_activity": vocal_activity,
@@ -575,6 +617,7 @@ def build_derived_diagnostics(
         "pitch_distribution": pitch_distribution,
         "match": match,
         "reference_alignment": reference_alignment,
+        "diagnostic_warning_codes": stage_continuity.get("diagnostic_warning_codes") or [],
         "coverage": {
             "midi_coverage_ratio": coverage,
             "available": coverage is not None,
@@ -690,6 +733,7 @@ def build_debug_summary_markdown(
     rhythm = derived_diagnostics.get("rhythm") if isinstance(derived_diagnostics, dict) and isinstance(derived_diagnostics.get("rhythm"), dict) else {}
     selected_melody = derived_diagnostics.get("selected_melody") if isinstance(derived_diagnostics, dict) and isinstance(derived_diagnostics.get("selected_melody"), dict) else {}
     postprocess = selected_melody.get("postprocess") if isinstance(selected_melody.get("postprocess"), dict) else {}
+    diagnostic_warning_codes = derived_diagnostics.get("diagnostic_warning_codes") if isinstance(derived_diagnostics, dict) and isinstance(derived_diagnostics.get("diagnostic_warning_codes"), list) else []
     f0_available = "f0_track.json" in found_files
     vocal_activity_available = "vocal_activity.json" in found_files
     note_candidates_available = "note_candidates.json" in found_files
@@ -756,6 +800,8 @@ def build_debug_summary_markdown(
         f"- action_count: {_fmt(postprocess.get('action_count'))}",
         f"- action_counts: {_fmt(postprocess.get('action_counts'))}",
         f"- reason_code_counts: {_fmt(postprocess.get('reason_code_counts'))}",
+        f"- selected_reason_counts: {_fmt(selected_melody.get('selected_reason_counts'))}",
+        f"- warning_codes: {', '.join(str(code) for code in diagnostic_warning_codes) if diagnostic_warning_codes else 'none'}",
         "",
         "## Artifact List",
         "- found files:",
@@ -1817,6 +1863,8 @@ def _derive_selected_melody_diagnostics(selected_melody_path: Path | None) -> di
         "reason_code_counts": postprocess.get("reason_code_counts") if isinstance(postprocess.get("reason_code_counts"), dict) else summary.get("postprocess_reason_code_counts", {}),
         "actions": postprocess.get("actions") if isinstance(postprocess.get("actions"), list) else [],
     }
+    selected_reason_counts = summary.get("selected_reason_counts") if isinstance(summary.get("selected_reason_counts"), dict) else {}
+    warning_codes = _selected_melody_warning_codes(selected_reason_counts=selected_reason_counts, postprocess_payload=postprocess_payload)
     return {
         "available": True,
         "input_candidate_count": summary.get("input_candidate_count", 0),
@@ -1824,10 +1872,11 @@ def _derive_selected_melody_diagnostics(selected_melody_path: Path | None) -> di
         "selected_count": summary.get("selected_count", 0),
         "rejected_count": summary.get("rejected_count", 0),
         "rejection_reason_counts": summary.get("rejection_reason_counts") if isinstance(summary.get("rejection_reason_counts"), dict) else {},
-        "selected_reason_counts": summary.get("selected_reason_counts") if isinstance(summary.get("selected_reason_counts"), dict) else {},
+        "selected_reason_counts": selected_reason_counts,
         "postprocess": postprocess_payload,
         "mean_selected_confidence": summary.get("mean_selected_confidence"),
         "mean_rejected_confidence": summary.get("mean_rejected_confidence"),
+        "warning_codes": warning_codes,
     }
 
 
@@ -2635,6 +2684,12 @@ def _selected_melody_postprocess_payload(selected_melody_path: Path | None) -> d
         "reason_code_counts": postprocess.get("reason_code_counts") if isinstance(postprocess.get("reason_code_counts"), dict) else summary.get("postprocess_reason_code_counts", {}),
         "actions": postprocess.get("actions") if isinstance(postprocess.get("actions"), list) else [],
         "actions_preview": (postprocess.get("actions") if isinstance(postprocess.get("actions"), list) else [])[:20],
+        "warning_codes": _selected_melody_warning_codes(
+            selected_reason_counts=summary.get("selected_reason_counts") if isinstance(summary.get("selected_reason_counts"), dict) else {},
+            postprocess_payload={
+                "action_count": postprocess.get("action_count", 0),
+            },
+        ),
     }
 
 
@@ -3803,6 +3858,7 @@ def _derived_diagnostics_markdown_lines(derived_diagnostics: dict[str, Any] | No
     quantized_notes = derived_diagnostics.get("quantized_notes") if isinstance(derived_diagnostics.get("quantized_notes"), dict) else {}
     rhythm = derived_diagnostics.get("rhythm") if isinstance(derived_diagnostics.get("rhythm"), dict) else {}
     continuity = derived_diagnostics.get("continuity") if isinstance(derived_diagnostics.get("continuity"), dict) else {}
+    stage_continuity = derived_diagnostics.get("stage_continuity") if isinstance(derived_diagnostics.get("stage_continuity"), dict) else {}
     short_note_diagnostics = derived_diagnostics.get("short_note_diagnostics") if isinstance(derived_diagnostics.get("short_note_diagnostics"), dict) else {}
     note_funnel = derived_diagnostics.get("note_funnel") if isinstance(derived_diagnostics.get("note_funnel"), dict) else {}
     note_funnel_layers = note_funnel.get("layers") if isinstance(note_funnel.get("layers"), dict) else {}
@@ -3892,9 +3948,12 @@ def _derived_diagnostics_markdown_lines(derived_diagnostics: dict[str, Any] | No
         f"- selected_count: {_fmt(selected_melody.get('selected_count'))}",
         f"- rejected_count: {_fmt(selected_melody.get('rejected_count'))}",
         f"- rejection_reason_counts: {_fmt(selected_melody.get('rejection_reason_counts'))}",
+        f"- selected_reason_counts: {_fmt(selected_melody.get('selected_reason_counts'))}",
         f"- mean_selected_confidence: {_fmt(selected_melody.get('mean_selected_confidence'))}",
         f"- mean_rejected_confidence: {_fmt(selected_melody.get('mean_rejected_confidence'))}",
+        f"- warning_codes: {', '.join(str(code) for code in selected_melody.get('warning_codes') or []) if isinstance(selected_melody.get('warning_codes'), list) and selected_melody.get('warning_codes') else 'none'}",
         f"- unavailable_reason: {_fmt(selected_melody.get('unavailable_reason')) if not selected_melody.get('available') else 'none'}",
+        *build_stage_continuity_markdown_lines(stage_continuity, heading="### Per-Stage Continuity Lineage"),
         "### Quantization Diagnostics",
         f"- available: {str(bool(quantized_notes.get('available'))).lower()}",
         f"- quantizer_backend: {_fmt(quantized_notes.get('quantizer_backend'))}",
@@ -3990,8 +4049,212 @@ def _derived_diagnostics_markdown_lines(derived_diagnostics: dict[str, Any] | No
         f"- expected_vs_candidates_pitch_overlap: {_fmt(expected_vs_candidates.get('raw_histogram_overlap'))}",
         f"- best_octave_shift evidence: expected_vs_f0 shift={_fmt(expected_vs_f0.get('best_octave_shift'))} overlap={_fmt(expected_vs_f0.get('best_octave_shifted_overlap'))} gain={_fmt(expected_vs_f0.get('octave_shift_overlap_gain'))}",
         "### Rule-Based Stage",
+        f"- diagnostic_warning_codes: {', '.join(str(code) for code in derived_diagnostics.get('diagnostic_warning_codes') or []) if isinstance(derived_diagnostics.get('diagnostic_warning_codes'), list) and derived_diagnostics.get('diagnostic_warning_codes') else 'none'}",
         f"- preliminary_failure_stage_v2: {_fmt(derived_diagnostics.get('preliminary_failure_stage_v2'))}",
     ]
+
+
+def summarize_stage_continuity_lineage(
+    *,
+    pitch_contours_path: Path | None,
+    note_candidates_path: Path | None,
+    selected_melody_path: Path | None,
+    quantized_notes_path: Path | None,
+) -> dict[str, Any]:
+    selected_melody = _derive_selected_melody_diagnostics(selected_melody_path)
+    stages = [
+        _stage_continuity_payload(
+            stage="pitch_contours",
+            label="pitch_contours",
+            lineage_source="pitch_contours.contours",
+            artifact="pitch_contours.json",
+            events=_load_pitch_contour_note_events(pitch_contours_path),
+            unavailable_reason="pitch_contours.json missing or unreadable" if pitch_contours_path is None or not pitch_contours_path.exists() else None,
+        ),
+        _stage_continuity_payload(
+            stage="note_candidates_raw_notes",
+            label="note_candidates raw notes",
+            lineage_source="note_candidates.melody_candidates.notes",
+            artifact="note_candidates.json",
+            events=_load_note_candidate_stage_events(note_candidates_path, source="raw_notes"),
+            unavailable_reason="note_candidates raw notes unavailable" if note_candidates_path is None or not note_candidates_path.exists() else None,
+        ),
+        _stage_continuity_payload(
+            stage="note_candidates_legacy_selected_notes",
+            label="note_candidates legacy selected_notes",
+            lineage_source="note_candidates.melody_candidates.selected_notes",
+            artifact="note_candidates.json",
+            events=_load_note_candidate_stage_events(note_candidates_path, source="legacy_selected_notes"),
+            unavailable_reason="note_candidates legacy selected_notes unavailable" if note_candidates_path is None or not note_candidates_path.exists() else None,
+        ),
+        _stage_continuity_payload(
+            stage="selected_melody_selected_notes",
+            label="selected_melody selected_notes",
+            lineage_source="selected_melody.selected_notes",
+            artifact="selected_melody.json",
+            events=_load_artifact_note_events(selected_melody_path, kind="selected_melody"),
+            unavailable_reason="selected_melody selected_notes unavailable" if selected_melody_path is None or not selected_melody_path.exists() else None,
+        ),
+        _stage_continuity_payload(
+            stage="quantized_notes",
+            label="quantized_notes",
+            lineage_source="quantized_notes.notes",
+            artifact="quantized_notes.json",
+            events=_load_artifact_note_events(quantized_notes_path, kind="quantized_notes"),
+            unavailable_reason="quantized notes unavailable" if quantized_notes_path is None or not quantized_notes_path.exists() else None,
+        ),
+    ]
+    return {
+        "available": any(stage.get("available") for stage in stages),
+        "stage_count": len(stages),
+        "diagnostic_warning_codes": selected_melody.get("warning_codes") or [],
+        "stages": stages,
+    }
+
+
+def build_stage_continuity_markdown_lines(
+    stage_continuity: dict[str, Any] | None,
+    *,
+    heading: str,
+) -> list[str]:
+    if not isinstance(stage_continuity, dict):
+        return [heading, "- available: false"]
+    stages = stage_continuity.get("stages") if isinstance(stage_continuity.get("stages"), list) else []
+    lines = [
+        heading,
+        "| stage | lineage_source | note_count | total_duration | gap50_ratio | big_gap_count | short_note_ratio | large_jump_ratio |",
+        "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |",
+    ]
+    for stage in stages:
+        if not isinstance(stage, dict):
+            continue
+        lines.append(
+            "| {label} | {source} | {note_count} | {total_duration} | {gap50_ratio} | {big_gap_count} | {short_note_ratio} | {large_jump_ratio} |".format(
+                label=_escape_md(str(stage.get("label") or stage.get("stage") or "")),
+                source=_escape_md(str(stage.get("lineage_source") or "")),
+                note_count=_fmt(stage.get("note_count")),
+                total_duration=_fmt(stage.get("total_duration")),
+                gap50_ratio=_fmt(stage.get("gap50_ratio")),
+                big_gap_count=_fmt(stage.get("big_gap_count")),
+                short_note_ratio=_fmt(stage.get("short_note_ratio")),
+                large_jump_ratio=_fmt(stage.get("large_jump_ratio")),
+            )
+        )
+    warning_codes = stage_continuity.get("diagnostic_warning_codes") if isinstance(stage_continuity.get("diagnostic_warning_codes"), list) else []
+    lines.append(
+        "- diagnostic_warning_codes: {codes}".format(
+            codes=", ".join(str(code) for code in warning_codes) if warning_codes else "none"
+        )
+    )
+    return lines
+
+
+def stage_continuity_specs() -> list[dict[str, str]]:
+    return [dict(item) for item in STAGE_CONTINUITY_STAGE_SPECS]
+
+
+def _stage_continuity_payload(
+    *,
+    stage: str,
+    label: str,
+    lineage_source: str,
+    artifact: str,
+    events: list[NoteEvent] | None,
+    unavailable_reason: str | None,
+) -> dict[str, Any]:
+    if events is None:
+        return {
+            "stage": stage,
+            "label": label,
+            "lineage_source": lineage_source,
+            "artifact": artifact,
+            "available": False,
+            "unavailable_reason": unavailable_reason or "artifact unavailable",
+            "note_count": None,
+            "total_duration": None,
+            "gap50_ratio": None,
+            "big_gap_count": None,
+            "short_note_ratio": None,
+            "large_jump_ratio": None,
+        }
+    continuity = compute_midi_continuity_metrics(events).to_dict()
+    return {
+        "stage": stage,
+        "label": label,
+        "lineage_source": lineage_source,
+        "artifact": artifact,
+        "available": True,
+        "unavailable_reason": None,
+        "note_count": continuity.get("note_count"),
+        "total_duration": _round_optional(sum(max(0.0, float(note.duration)) for note in events)),
+        "gap50_ratio": continuity.get("gap50_ratio"),
+        "big_gap_count": continuity.get("big_gap_count"),
+        "short_note_ratio": continuity.get("short_note_ratio"),
+        "large_jump_ratio": continuity.get("large_jump_ratio"),
+    }
+
+
+def _load_pitch_contour_note_events(path: Path | None) -> list[NoteEvent] | None:
+    if path is None or not path.exists():
+        return None
+    payload = _read_json(path)
+    contours = payload.get("contours") if isinstance(payload, dict) and isinstance(payload.get("contours"), list) else None
+    if contours is None:
+        return None
+    events: list[NoteEvent] = []
+    for item in contours:
+        if not isinstance(item, dict):
+            continue
+        event = _artifact_item_to_note_event(item)
+        if event is not None:
+            events.append(event)
+    return events
+
+
+def _load_note_candidate_stage_events(path: Path | None, *, source: str) -> list[NoteEvent] | None:
+    if path is None or not path.exists():
+        return None
+    payload = _read_json(path)
+    if not isinstance(payload, dict):
+        return None
+    melody = payload.get("melody_candidates") if isinstance(payload.get("melody_candidates"), dict) else {}
+    items: list[Any] | None
+    if source == "raw_notes":
+        items = melody.get("notes") if isinstance(melody.get("notes"), list) else payload.get("notes") if isinstance(payload.get("notes"), list) else None
+    elif source == "legacy_selected_notes":
+        items = melody.get("selected_notes") if isinstance(melody.get("selected_notes"), list) else payload.get("selected_notes") if isinstance(payload.get("selected_notes"), list) else None
+    else:
+        items = None
+    if items is None:
+        return None
+    events: list[NoteEvent] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        event = _artifact_item_to_note_event(item)
+        if event is not None:
+            events.append(event)
+    return events
+
+
+def _selected_melody_warning_codes(
+    *,
+    selected_reason_counts: dict[str, Any],
+    postprocess_payload: dict[str, Any],
+) -> list[str]:
+    action_count = _as_int(postprocess_payload.get("action_count")) or 0
+    inherited_phrase_reasons = [
+        str(code)
+        for code in selected_reason_counts.keys()
+        if isinstance(code, str) and code.startswith("phrase_")
+    ]
+    if inherited_phrase_reasons and action_count == 0:
+        return [INHERITED_POSTPROCESS_REASON_CODES_DETECTED]
+    return []
+
+
+def _escape_md(value: str) -> str:
+    return value.replace("|", "\\|").replace("\n", " ")
 
 
 def _metric_value(primary: dict[str, Any], fallback: dict[str, Any], key: str) -> Any:

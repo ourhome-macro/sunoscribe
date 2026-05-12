@@ -7,6 +7,12 @@ export interface PublicArtifactResponse {
   file_size_bytes: number | null
   checksum: string | null
   created_at: string | null
+  metadata?: {
+    export_scope?: string | null
+    quality_gate_status?: string | null
+    quality_failed_checks?: string[]
+    diagnostic_message?: string | null
+  } | null
 }
 
 export interface ArtifactSummaryGroup {

@@ -23,6 +23,7 @@ from .reason_codes import (
 @dataclass(frozen=True)
 class QuantizerArtifactConfig:
     backend: str = "dp_v1"
+    allow_required_fallback: bool = False
     ppqn: int = 480
     grid_division: int = 16
     allowed_durations_beats: list[float] = field(default_factory=lambda: [0.25, 0.5, 1.0, 2.0, 4.0])
@@ -136,12 +137,16 @@ class QuantizedNotesArtifactBuilder:
             if selected_candidates:
                 actual_backend = "dp_v1"
                 notes = [self._note_from_candidate(candidate) for candidate in selected_candidates]
-            else:
+            elif self.config.allow_required_fallback:
                 fallback_used = True
                 fallback_reason = DP_NO_CANDIDATE_PATH
                 actual_backend = "local_snap"
                 notes = self._build_local_snap_notes(selected_notes, beat_grid, fallback_reason=fallback_reason)
+            else:
+                raise ValueError("required quantizer backend dp_v1 failed: no candidate path")
         elif requested_backend == "dp_v1":
+            if not self.config.allow_required_fallback:
+                raise ValueError("required quantizer backend dp_v1 failed: rhythm grid unavailable")
             fallback_used = True
             fallback_reason = RHYTHM_GRID_UNAVAILABLE
             actual_backend = "local_snap"

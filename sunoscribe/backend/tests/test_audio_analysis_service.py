@@ -86,7 +86,14 @@ class _CapturePitchPipeline:
             ),
             semantic_audio=SemanticAudioResult(
                 source_stems=dict(request.source_stems),
-                rhythm_grid=RhythmGrid(source_stem="drums", input_audio_path="drums.wav"),
+                rhythm_grid=RhythmGrid(
+                    source_stem="drums",
+                    input_audio_path="drums.wav",
+                    bpm=120.0,
+                    beat_times=[0.0, 0.5, 1.0, 1.5],
+                    beats_per_bar=4,
+                    beat_unit=4,
+                ),
             ),
         )
 
@@ -276,7 +283,10 @@ class TestAudioAnalysisService(unittest.TestCase):
             self.assertIsNotNone(perception.selected_melody_dict)
             self.assertIn("summary", perception.selected_melody_dict)
             self.assertIsNotNone(perception.quantized_notes_dict)
-            self.assertEqual(perception.quantized_notes_dict["quantizer_backend"], "local_snap")
+            self.assertEqual(perception.quantized_notes_dict["quantizer_backend"], "dp_v1")
+            self.assertEqual(len(perception.score_ir_dict["notes"]), len(perception.quantized_notes_dict["notes"]))
+            self.assertEqual(perception.score_ir_dict["notes"][0]["source"], "quantized_notes")
+            self.assertEqual(perception.score_ir_dict["meta"]["analysis_info"]["lead_note_source"], "quantized_notes")
             self.assertIsNotNone(perception.rhythm_grid_dict)
             self.assertEqual(perception.vocal_activity_dict["segments"][0]["state"], "vocal")
 
