@@ -128,6 +128,8 @@ class ScoreIRBuilder:
                     is_candidate_ornament=self._is_candidate_ornament(duration_beats, confidence),
                     tie_candidate=self._is_tie_candidate(duration_beats, beats_per_measure),
                     source="measure_note",
+                    reason_codes=list(raw_note.get("reason_codes") or []),
+                    uncertain=bool(raw_note.get("reason_codes")),
                 )
                 notes.append(score_note)
                 current_measure_ids.append(note_id)

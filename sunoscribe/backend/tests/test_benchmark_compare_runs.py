@@ -33,6 +33,7 @@ class BenchmarkCompareRunsTests(unittest.TestCase):
                     _result("new", "quality_failed", recall=0.10, f1=0.20, matched=5),
                     _result("improved", "quality_failed", recall=0.40, f1=0.40, matched=20),
                     _result("regressed", "quality_failed", recall=0.50, f1=0.50, matched=30),
+                    _result("mixed", "quality_failed", recall=0.50, f1=0.50, matched=30),
                     _result("diag", "quality_failed", recall=0.30, f1=0.30, matched=10),
                     _result("same", "quality_failed", recall=0.30, f1=0.30, matched=10),
                     _result("missing_candidate", "quality_failed", recall=0.30, f1=0.30, matched=10),
@@ -45,13 +46,54 @@ class BenchmarkCompareRunsTests(unittest.TestCase):
                     _result("new", "success", recall=0.11, f1=0.21, matched=6),
                     _result("improved", "quality_failed", recall=0.43, f1=0.42, matched=31),
                     _result("regressed", "quality_failed", recall=0.47, f1=0.48, matched=19),
+                    _result("mixed", "quality_failed", recall=0.46, f1=0.47, matched=28),
                     _result("diag", "quality_failed", recall=0.30, f1=0.30, matched=10),
                     _result("same", "quality_failed", recall=0.30, f1=0.30, matched=10),
                     _result("missing_baseline", "quality_failed", recall=0.30, f1=0.30, matched=10),
                 ],
             )
-            _write_diagnostics(baseline, "improved", predicted_count=100, short_ratio=0.20, quant_mean=0.010, quant_p95=0.020, quant_max=0.030)
-            _write_diagnostics(candidate, "improved", predicted_count=120, short_ratio=0.25, quant_mean=0.006, quant_p95=0.012, quant_max=0.018)
+            _write_diagnostics(
+                baseline,
+                "improved",
+                predicted_count=100,
+                short_ratio=0.20,
+                gap50_ratio=0.90,
+                large_jump_ratio=0.24,
+                local_large_jump_ratio=0.18,
+                cross_phrase_large_jump_ratio=0.28,
+                quant_mean=0.010,
+                quant_p95=0.020,
+                quant_max=0.030,
+            )
+            _write_diagnostics(
+                candidate,
+                "improved",
+                predicted_count=120,
+                short_ratio=0.25,
+                gap50_ratio=0.80,
+                large_jump_ratio=0.21,
+                local_large_jump_ratio=0.08,
+                cross_phrase_large_jump_ratio=0.26,
+                quant_mean=0.006,
+                quant_p95=0.012,
+                quant_max=0.018,
+            )
+            _write_diagnostics(
+                baseline,
+                "mixed",
+                gap50_ratio=0.40,
+                large_jump_ratio=0.22,
+                local_large_jump_ratio=0.20,
+                fragmentation_risk=0.80,
+            )
+            _write_diagnostics(
+                candidate,
+                "mixed",
+                gap50_ratio=0.55,
+                large_jump_ratio=0.10,
+                local_large_jump_ratio=0.07,
+                fragmentation_risk=0.25,
+            )
             _write_diagnostics(baseline, "diag", stage="selector", pitch_flags=["low_confidence"])
             _write_diagnostics(candidate, "diag", stage="quantizer", pitch_flags=["low_confidence"])
             _write_diagnostics(baseline, "same", stage="selector")
@@ -64,6 +106,7 @@ class BenchmarkCompareRunsTests(unittest.TestCase):
             self.assertEqual(by_id["new"]["group"], GROUP_NEW_SUCCESS)
             self.assertEqual(by_id["improved"]["group"], GROUP_IMPROVED)
             self.assertEqual(by_id["regressed"]["group"], GROUP_REGRESSED)
+            self.assertEqual(by_id["mixed"]["group"], GROUP_REGRESSED)
             self.assertEqual(by_id["diag"]["group"], GROUP_DIAGNOSTICS_CHANGED)
             self.assertEqual(by_id["same"]["group"], GROUP_UNCHANGED)
             self.assertEqual(by_id["missing_baseline"]["group"], GROUP_NEEDS_MANUAL_REVIEW)
@@ -74,12 +117,28 @@ class BenchmarkCompareRunsTests(unittest.TestCase):
             self.assertAlmostEqual(improved["deltas"]["matched"], 11.0)
             self.assertAlmostEqual(improved["deltas"]["coverage"], 0.03)
             self.assertAlmostEqual(improved["deltas"]["first_delay"], -0.03)
+            self.assertAlmostEqual(improved["deltas"]["gap50_ratio"], -0.03)
+            self.assertAlmostEqual(improved["deltas"]["short_note_ratio"], -0.006)
+            self.assertAlmostEqual(improved["deltas"]["large_jump_ratio"], -0.003)
             self.assertEqual(improved["metrics"]["matched"]["old"]["source"], "metrics.matched_note_count")
             self.assertAlmostEqual(improved["deltas"]["predicted_note_count"], 20.0)
             self.assertAlmostEqual(improved["deltas"]["predicted_short_note_ratio"], 0.05)
+            self.assertAlmostEqual(improved["deltas"]["diagnostic_gap50_ratio"], -0.10)
+            self.assertAlmostEqual(improved["deltas"]["diagnostic_large_jump_ratio"], -0.03)
+            self.assertAlmostEqual(improved["deltas"]["diagnostic_local_large_jump_ratio"], -0.10)
+            self.assertAlmostEqual(improved["deltas"]["diagnostic_cross_phrase_large_jump_ratio"], -0.02)
             self.assertAlmostEqual(improved["deltas"]["quantization_mean_error"], -0.004)
             self.assertAlmostEqual(improved["deltas"]["quantization_p95_error"], -0.008)
             self.assertAlmostEqual(improved["deltas"]["quantization_max_error"], -0.012)
+
+            mixed = by_id["mixed"]
+            self.assertTrue(mixed["continuity_tradeoff"]["mixed_result"])
+            self.assertEqual(
+                [item["metric"] for item in mixed["continuity_tradeoff"]["improved"]],
+                ["fragmentation", "diagnostic_large_jump_ratio", "diagnostic_local_large_jump_ratio"],
+            )
+            self.assertEqual([item["metric"] for item in mixed["continuity_tradeoff"]["regressed"]], ["recall", "matched", "gap50_ratio"])
+            self.assertIn("mixed result: improved Fragmentation, Large Jumps, Local Large Jumps; regressed Recall, Matched, Gap50", mixed["continuity_tradeoff"]["summary"])
 
             self.assertEqual(by_id["diag"]["preliminary_failure_stage_v2"], {"old": "selector", "new": "quantizer"})
             self.assertEqual(report["aggregate_counts"][GROUP_LOST_SUCCESS], 1)
@@ -117,7 +176,27 @@ class BenchmarkCompareRunsTests(unittest.TestCase):
             self.assertTrue((output / "ab_report.md").exists())
             payload = json.loads((output / "ab_report.json").read_text(encoding="utf-8"))
             self.assertEqual(payload["per_sample"][0]["sample_id"], "same")
-            self.assertIn("Benchmark A/B Report", (output / "ab_report.md").read_text(encoding="utf-8"))
+            markdown = (output / "ab_report.md").read_text(encoding="utf-8")
+            self.assertIn("Benchmark A/B Report", markdown)
+            self.assertIn("Delta Gap50", markdown)
+            self.assertIn("lower better", markdown)
+
+    def test_markdown_report_calls_out_mixed_continuity_tradeoffs(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            baseline = root / "baseline"
+            candidate = root / "candidate"
+            output = root / "ab_report"
+            _write_run(baseline, [_result("mixed", "quality_failed", recall=0.50, f1=0.50, matched=30)])
+            _write_run(candidate, [_result("mixed", "quality_failed", recall=0.46, f1=0.47, matched=28)])
+            _write_diagnostics(baseline, "mixed", gap50_ratio=0.40, large_jump_ratio=0.22, fragmentation_risk=0.80)
+            _write_diagnostics(candidate, "mixed", gap50_ratio=0.55, large_jump_ratio=0.10, fragmentation_risk=0.25)
+
+            report = compare_benchmark_runs(baseline, candidate)
+            _, markdown_path = write_comparison_report(report, output)
+
+            markdown = markdown_path.read_text(encoding="utf-8")
+            self.assertIn("mixed result: improved Fragmentation, Large Jumps; regressed Recall, Matched, Gap50", markdown)
 
     def test_write_report_helper_creates_output_directory(self) -> None:
         with TemporaryDirectory() as temp_dir:
@@ -163,6 +242,12 @@ def _result(sample_id: str, status: str, *, recall: float, f1: float, matched: i
             "dtw": {"dtw_pitch_match_recall_proxy": recall + 0.2},
         },
         "audibility": {"midi_coverage_ratio": recall + 0.3, "first_note_delay_sec": 2.0 - recall},
+        "continuity": {
+            "gap50_ratio": 1.0 - recall,
+            "big_gap_count": int(100 * (1.0 - recall)),
+            "short_note_ratio": 0.5 - (recall * 0.2),
+            "large_jump_ratio": 0.3 - (recall * 0.1),
+        },
         "quality_gate": {"failed_checks": [] if status == "success" else ["low_recall"]},
     }
 
@@ -175,6 +260,12 @@ def _write_diagnostics(
     pitch_flags: list[str] | None = None,
     predicted_count: int = 10,
     short_ratio: float = 0.1,
+    gap50_ratio: float = 0.8,
+    large_jump_ratio: float = 0.2,
+    local_large_jump_ratio: float = 0.1,
+    cross_phrase_large_jump_ratio: float = 0.2,
+    fragmentation_risk: float = 0.2,
+    overmerge_risk: float = 0.1,
     quant_mean: float = 0.01,
     quant_p95: float = 0.02,
     quant_max: float = 0.03,
@@ -187,13 +278,23 @@ def _write_diagnostics(
         "notes": {
             "predicted_note_count": predicted_count,
             "predicted_short_note_ratio": short_ratio,
+            "predicted_gap50_ratio": gap50_ratio,
+            "predicted_large_jump_ratio": large_jump_ratio,
+            "predicted_local_large_jump_ratio": local_large_jump_ratio,
+            "predicted_cross_phrase_large_jump_ratio": cross_phrase_large_jump_ratio,
+        },
+        "continuity": {
+            "gap50_ratio": gap50_ratio,
+            "large_jump_ratio": large_jump_ratio,
+            "local_large_jump_ratio": local_large_jump_ratio,
+            "cross_phrase_large_jump_ratio": cross_phrase_large_jump_ratio,
         },
         "quantized_notes": {
             "mean_quantize_error_sec": quant_mean,
             "p95_quantize_error_sec": quant_p95,
             "max_quantize_error_sec": quant_max,
-            "fragmentation": {"risk_score": 0.2},
-            "overmerge": {"risk_score": 0.1},
+            "fragmentation": {"risk_score": fragmentation_risk},
+            "overmerge": {"risk_score": overmerge_risk},
         },
     }
     (package / "derived_diagnostics.json").write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")

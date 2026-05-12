@@ -59,6 +59,8 @@ Upload File
 
 当前实现已经覆盖到 `Export Artifacts`，并提供了后续 `Frontend Render/Edit` 与 `CorrectedF0Track`/RVC job spec 的接口雏形；真正的前端 API 对接、OSMD 渲染、外部 RVC 调用和混音产物还没有形成生产闭环。
 
+第一阶段的具体执行步骤见 `docs/lead-vocal-mvp-execution.md`。钢琴弹奏版/伴奏编配不属于本阶段，应按 `docs/post-mvp-development-roadmap.md` 中的 piano arrangement 层单独设计。
+
 ### 1. Upload File -> MediaAsset
 
 输入可以是音频或视频文件。上传 API 会先把文件保存到配置的上传后端，并更新 `projects.audio_path`，同时立即注册 `source_media` artifact。后续音频分析任务启动后，项目工作区还会保存一份原始输入副本，作为 `MediaAsset` 的工作区落点。

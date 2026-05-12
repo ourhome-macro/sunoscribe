@@ -48,6 +48,8 @@ $env:PYTHONPATH='.'
 
 - [正式音频流水线事实源](docs/backend-audio-pipeline.md)
 - [正式 production runtime policy](docs/production-runtime-policy.md)
+- [Lead-Vocal MVP 执行说明](docs/lead-vocal-mvp-execution.md)
+- [后续开发路线](docs/post-mvp-development-roadmap.md)
 - [前端当前实现说明](docs/frontend-current-state.md)
 - [后端说明](backend/README.md)
 - [运行与缓存约定](backend/docs/operations.md)

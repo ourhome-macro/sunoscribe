@@ -77,6 +77,9 @@ class PitchDetectionConfig:
     melody_short_note_min_confidence: float = 0.62
     melody_merge_gap_sec: float = 0.08
     melody_merge_pitch_tolerance_semitones: int = 1
+    melody_bridge_note_retention_enabled: bool = False
+    melody_bridge_note_gap_threshold_sec: float = 0.5
+    melody_bridge_note_small_gap_sec: float = 0.05
     melody_conflict_window_sec: float = 0.10
     melody_large_jump_semitones: int = 12
     melody_isolated_note_max_duration_sec: float = 0.25

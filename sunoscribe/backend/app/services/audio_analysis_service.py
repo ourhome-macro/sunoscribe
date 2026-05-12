@@ -449,7 +449,18 @@ class AudioAnalysisService:
             ]
             annotation = next((annotations.get(candidate) for candidate in candidates if candidate in annotations), None)
             if annotation:
-                updated.update({key: value for key, value in annotation.items() if value is not None})
+                existing_reasons = list(updated.get("reason_codes") or [])
+                annotation_reasons = list(annotation.get("reason_codes") or [])
+                merged_reasons = self._merge_warnings(existing_reasons, annotation_reasons)
+                updated.update(
+                    {
+                        key: value
+                        for key, value in annotation.items()
+                        if value is not None and key not in {"reason_codes", "uncertain"}
+                    }
+                )
+                updated["reason_codes"] = merged_reasons
+                updated["uncertain"] = bool(updated.get("uncertain")) or bool(annotation.get("uncertain")) or bool(merged_reasons)
             notes.append(updated)
         annotated["notes"] = notes
         return annotated

@@ -50,6 +50,7 @@ class NoteQuantizer:
                     beat_position=beat_position,
                     lyric=None,
                     source=getattr(note, "source", None),
+                    reason_codes=list(getattr(note, "reason_codes", []) or []),
                 )
             )
 
@@ -96,6 +97,10 @@ class NoteQuantizer:
                         start_time=float(prev.start_time),
                         end_time=max(float(prev.end_time), float(note.end_time)),
                         confidence=max(float(prev.confidence), float(note.confidence)),
+                        reason_codes=_unique_reason_codes(
+                            list(getattr(prev, "reason_codes", []) or [])
+                            + list(getattr(note, "reason_codes", []) or [])
+                        ),
                     )
                     continue
 
@@ -142,6 +147,7 @@ class NoteQuantizer:
                         start_time=float(prev.start_time),
                         end_time=new_prev_end,
                         confidence=float(prev.confidence),
+                        reason_codes=list(getattr(prev, "reason_codes", []) or []),
                     )
                 else:
                     adjusted_start = min(float(note.end_time), float(prev.end_time) + min_gap)
@@ -150,6 +156,7 @@ class NoteQuantizer:
                         start_time=adjusted_start,
                         end_time=float(note.end_time),
                         confidence=float(note.confidence),
+                        reason_codes=list(getattr(note, "reason_codes", []) or []),
                     )
 
             if note.end_time > note.start_time:
@@ -202,3 +209,14 @@ class NoteQuantizer:
         measure_num = int(elapsed_beats // measure_length_beats) + 1
         beat_position = (elapsed_beats % measure_length_beats) + 1.0
         return measure_num, round(beat_position, 3)
+
+
+def _unique_reason_codes(values: list[str]) -> list[str]:
+    seen: set[str] = set()
+    result: list[str] = []
+    for value in values:
+        text = str(value or "").strip()
+        if text and text not in seen:
+            seen.add(text)
+            result.append(text)
+    return result

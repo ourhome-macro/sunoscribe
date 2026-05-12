@@ -149,6 +149,9 @@ class MidiMetricsTests(unittest.TestCase):
         self.assertEqual(metrics.matched_note_count, 6)
         self.assertEqual(metrics.note_recall, 0.5)
         self.assertEqual(metrics.pitch_accuracy, 1.0)
+        self.assertEqual(metrics.octave_normalized_matched_note_count, 6)
+        self.assertEqual(metrics.octave_normalized_note_recall, 0.5)
+        self.assertEqual(metrics.octave_normalized_pitch_accuracy, 1.0)
 
     def test_alignment_diagnostics_expose_time_shift_improvement(self) -> None:
         expected = [NoteEvent(start=float(index), end=float(index) + 0.5, pitch=60) for index in range(12)]

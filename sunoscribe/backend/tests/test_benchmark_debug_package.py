@@ -6,6 +6,7 @@ from tempfile import TemporaryDirectory
 import unittest
 
 from app.modules.benchmark.debug_package import (
+    build_derived_diagnostics,
     _derive_pitch_distribution_diagnostics,
     build_note_funnel_debug,
     _derive_quantized_note_diagnostics,
@@ -376,6 +377,12 @@ class BenchmarkDebugPackageTests(unittest.TestCase):
             self.assertEqual(derived["notes"]["expected_pitch_range"], [60, 64])
             self.assertEqual(derived["notes"]["predicted_pitch_range"], [60, 62])
             self.assertAlmostEqual(derived["notes"]["pitch_range_overlap_ratio"], 0.5)
+            self.assertIn("continuity", derived)
+            self.assertEqual(derived["continuity"]["note_count"], 2)
+            self.assertEqual(derived["continuity"]["gap50_count"], 1)
+            self.assertAlmostEqual(derived["continuity"]["gap50_ratio"], 1.0)
+            self.assertEqual(derived["notes"]["predicted_gap50_count"], 1)
+            self.assertAlmostEqual(derived["notes"]["predicted_gap50_ratio"], 1.0)
             self.assertEqual(derived["match"]["raw_matched_count"], 2)
             self.assertAlmostEqual(derived["match"]["raw_match_rate_vs_expected"], 2 / 3)
             self.assertEqual(derived["f0"]["f0_frame_count"], 4)
@@ -410,6 +417,9 @@ class BenchmarkDebugPackageTests(unittest.TestCase):
             self.assertIn("Selected Melody Diagnostics", summary)
             self.assertIn("Quantization Diagnostics", summary)
             self.assertIn("Rhythm Diagnostics", summary)
+            self.assertIn("Continuity Diagnostics", summary)
+            self.assertIn("gap50_ratio", summary)
+            self.assertIn("large_jump_ratio", summary)
             self.assertIn("best_diagnostic_candidate_id", summary)
             self.assertIn("Short Note Diagnostics", summary)
             self.assertIn("## Derived Diagnostics", summary)
@@ -994,6 +1004,63 @@ class BenchmarkDebugPackageTests(unittest.TestCase):
 
             self.assertEqual(diagnostics["loss_attribution"]["likely_loss_stage"], "quantizer")
             self.assertEqual(diagnostics["loss_attribution"]["stage_counts"]["quantizer"], 1)
+
+    def test_selected_melody_postprocess_diagnostics_are_reported(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            selected_path = root / "selected_melody.json"
+            selected_path.write_text(
+                json.dumps(
+                    {
+                        "selected_notes": [
+                            {
+                                "candidate_id": "a+b",
+                                "start_time_sec": 0.0,
+                                "end_time_sec": 0.7,
+                                "pitch_center_midi": 60,
+                                "confidence": 0.9,
+                                "reason_codes": ["short_gap_bridged"],
+                            }
+                        ],
+                        "summary": {
+                            "input_candidate_count": 2,
+                            "pre_postprocess_selected_count": 2,
+                            "selected_count": 1,
+                            "rejected_count": 0,
+                            "postprocess_action_counts": {"short_gap_bridge": 1},
+                            "postprocess_reason_code_counts": {"short_gap_bridged": 1},
+                        },
+                        "postprocess": {
+                            "input_note_count": 2,
+                            "output_note_count": 1,
+                            "action_count": 1,
+                            "action_counts": {"short_gap_bridge": 1},
+                            "reason_code_counts": {"short_gap_bridged": 1},
+                            "actions": [{"action": "short_gap_bridge", "reason_code": "short_gap_bridged"}],
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            diagnostics = build_derived_diagnostics(
+                expected_notes=[],
+                predicted_notes=[],
+                f0_track_path=None,
+                vocal_activity_path=None,
+                note_candidates_path=None,
+                selected_melody_path=selected_path,
+                match_debug=None,
+                alignment_debug=None,
+                metrics_payload={},
+            )
+
+            postprocess = diagnostics["selected_melody"]["postprocess"]
+            self.assertEqual(postprocess["action_count"], 1)
+            self.assertEqual(postprocess["action_counts"]["short_gap_bridge"], 1)
+            self.assertEqual(postprocess["reason_code_counts"]["short_gap_bridged"], 1)
+            self.assertEqual(diagnostics["pitch_distribution"]["melody_postprocess"]["action_count"], 1)
+
 
 
 if __name__ == "__main__":

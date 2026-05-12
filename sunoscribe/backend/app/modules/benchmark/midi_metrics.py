@@ -77,6 +77,15 @@ class MidiMetrics:
     expected_median_pitch_raw: float | None
     predicted_median_pitch_raw: float | None
     median_pitch_delta_raw: float | None
+    octave_normalized_matched_note_count: int
+    octave_normalized_note_precision: float
+    octave_normalized_note_recall: float
+    octave_normalized_note_f1: float
+    octave_normalized_pitch_accuracy: float
+    octave_normalized_octave_error_rate: float
+    octave_normalized_mean_abs_pitch_delta: float | None
+    octave_normalized_recall_lift: float
+    octave_normalized_f1_lift: float
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -119,6 +128,13 @@ class MidiContinuityMetrics:
     large_jump_threshold_semitones: int
     large_jump_count: int
     large_jump_ratio: float
+    phrase_gap_threshold_sec: float
+    local_adjacent_pair_count: int
+    local_large_jump_count: int
+    local_large_jump_ratio: float
+    cross_phrase_adjacent_pair_count: int
+    cross_phrase_large_jump_count: int
+    cross_phrase_large_jump_ratio: float
     max_abs_pitch_jump_semitones: int | None
     median_pitch: float | None
     pitch_range: list[int | None]
@@ -527,16 +543,30 @@ def compute_midi_metrics(
             auto_octave_normalize=False,
         )
     matches = _match_notes(expected_notes, evaluated_predicted_notes, config=match_config)
+    octave_matches = _match_notes(expected_notes, evaluated_predicted_notes, config=match_config, octave_equivalent=True)
     matched_count = len(matches)
     precision = _safe_div(matched_count, len(evaluated_predicted_notes))
     recall = _safe_div(matched_count, len(expected_notes))
     note_f1 = _safe_div(2 * precision * recall, precision + recall)
+    octave_matched_count = len(octave_matches)
+    octave_precision = _safe_div(octave_matched_count, len(evaluated_predicted_notes))
+    octave_recall = _safe_div(octave_matched_count, len(expected_notes))
+    octave_f1 = _safe_div(2 * octave_precision * octave_recall, octave_precision + octave_recall)
 
     exact_pitch_matches = sum(1 for expected, predicted in matches if expected.pitch == predicted.pitch)
     semitone_errors = sum(1 for expected, predicted in matches if abs(expected.pitch - predicted.pitch) == 1)
     octave_errors = sum(1 for expected, predicted in matches if abs(expected.pitch - predicted.pitch) == config.octave_tolerance_semitones)
     onset_errors = [abs(expected.start - predicted.start) * 1000.0 for expected, predicted in matches]
     duration_overlaps = [_duration_iou(expected, predicted) for expected, predicted in matches]
+    octave_pitch_class_matches = sum(
+        1 for expected, predicted in octave_matches if _pitch_class_delta(expected.pitch, predicted.pitch) <= config.pitch_tolerance_semitones
+    )
+    octave_equivalent_errors = sum(
+        1
+        for expected, predicted in octave_matches
+        if expected.pitch != predicted.pitch and _pitch_class_delta(expected.pitch, predicted.pitch) <= config.pitch_tolerance_semitones
+    )
+    octave_abs_pitch_deltas = [abs(expected.pitch - predicted.pitch) for expected, predicted in octave_matches]
 
     return MidiMetrics(
         expected_note_count=len(expected_notes),
@@ -557,6 +587,15 @@ def compute_midi_metrics(
         expected_median_pitch_raw=octave_normalization["expected_median_pitch_raw"],
         predicted_median_pitch_raw=octave_normalization["predicted_median_pitch_raw"],
         median_pitch_delta_raw=octave_normalization["median_pitch_delta_raw"],
+        octave_normalized_matched_note_count=octave_matched_count,
+        octave_normalized_note_precision=octave_precision,
+        octave_normalized_note_recall=octave_recall,
+        octave_normalized_note_f1=octave_f1,
+        octave_normalized_pitch_accuracy=_safe_div(octave_pitch_class_matches, octave_matched_count),
+        octave_normalized_octave_error_rate=_safe_div(octave_equivalent_errors, octave_matched_count),
+        octave_normalized_mean_abs_pitch_delta=(sum(octave_abs_pitch_deltas) / len(octave_abs_pitch_deltas)) if octave_abs_pitch_deltas else None,
+        octave_normalized_recall_lift=octave_recall - recall,
+        octave_normalized_f1_lift=octave_f1 - note_f1,
     )
 
 
@@ -598,6 +637,7 @@ def compute_midi_continuity_metrics(
     big_gap_threshold_sec: float = 0.5,
     short_note_threshold_sec: float = 0.18,
     large_jump_threshold_semitones: int = 7,
+    phrase_gap_threshold_sec: float = 0.12,
 ) -> MidiContinuityMetrics:
     ordered_notes = sorted(notes, key=lambda note: (note.start, note.end, note.pitch))
     adjacent_pair_count = max(0, len(ordered_notes) - 1)
@@ -609,6 +649,14 @@ def compute_midi_continuity_metrics(
     big_gap_count = sum(1 for gap in gaps if gap > big_gap_threshold_sec)
     short_note_count = sum(1 for duration in durations if duration < short_note_threshold_sec)
     large_jump_count = sum(1 for jump in pitch_jumps if jump >= large_jump_threshold_semitones)
+    local_pair_indexes = [index for index, gap in enumerate(gaps) if gap <= phrase_gap_threshold_sec]
+    cross_phrase_pair_indexes = [index for index, gap in enumerate(gaps) if gap > phrase_gap_threshold_sec]
+    local_large_jump_count = sum(
+        1 for index in local_pair_indexes if pitch_jumps[index] >= large_jump_threshold_semitones
+    )
+    cross_phrase_large_jump_count = sum(
+        1 for index in cross_phrase_pair_indexes if pitch_jumps[index] >= large_jump_threshold_semitones
+    )
     return MidiContinuityMetrics(
         note_count=len(ordered_notes),
         adjacent_pair_count=adjacent_pair_count,
@@ -626,6 +674,13 @@ def compute_midi_continuity_metrics(
         large_jump_threshold_semitones=int(large_jump_threshold_semitones),
         large_jump_count=large_jump_count,
         large_jump_ratio=_safe_div(large_jump_count, adjacent_pair_count),
+        phrase_gap_threshold_sec=float(phrase_gap_threshold_sec),
+        local_adjacent_pair_count=len(local_pair_indexes),
+        local_large_jump_count=local_large_jump_count,
+        local_large_jump_ratio=_safe_div(local_large_jump_count, len(local_pair_indexes)),
+        cross_phrase_adjacent_pair_count=len(cross_phrase_pair_indexes),
+        cross_phrase_large_jump_count=cross_phrase_large_jump_count,
+        cross_phrase_large_jump_ratio=_safe_div(cross_phrase_large_jump_count, len(cross_phrase_pair_indexes)),
         max_abs_pitch_jump_semitones=max(pitch_jumps) if pitch_jumps else None,
         median_pitch=_median_pitch(ordered_notes),
         pitch_range=_pitch_range(ordered_notes),
@@ -744,6 +799,13 @@ def build_midi_diagnostics(
         "octave_shift_applied": metrics.octave_shift_applied,
         "octave_shift_target": metrics.octave_shift_target,
         "median_pitch_delta_raw": metrics.median_pitch_delta_raw,
+        "octave_normalized_matched_note_count": metrics.octave_normalized_matched_note_count,
+        "octave_normalized_note_f1": metrics.octave_normalized_note_f1,
+        "octave_normalized_note_precision": metrics.octave_normalized_note_precision,
+        "octave_normalized_note_recall": metrics.octave_normalized_note_recall,
+        "octave_normalized_pitch_accuracy": metrics.octave_normalized_pitch_accuracy,
+        "octave_normalized_recall_lift": metrics.octave_normalized_recall_lift,
+        "octave_normalized_f1_lift": metrics.octave_normalized_f1_lift,
         "onset_mae_ms": metrics.onset_mae_ms,
         "audibility": audibility.to_dict(),
     }
@@ -777,9 +839,9 @@ def infer_midi_failure_modes(
         modes.append("leading_silence_too_long")
     if audibility.midi_coverage_ratio < 0.45:
         modes.append("midi_coverage_too_low")
-    if metrics.octave_error_rate > 0.3:
+    if max(metrics.octave_error_rate, metrics.octave_normalized_octave_error_rate) > 0.3:
         modes.append("possible_octave_error")
-    if metrics.pitch_accuracy < 0.2:
+    if metrics.pitch_accuracy < 0.2 and metrics.octave_normalized_pitch_accuracy < 0.2:
         modes.append("pitch_detection_or_reference_mismatch")
     if metrics.pitch_accuracy >= 0.2 and metrics.note_f1 < 0.03:
         modes.append("timing_or_quantization_failure")
@@ -916,6 +978,7 @@ def _match_notes(
     predicted_notes: list[NoteEvent],
     *,
     config: MidiMetricConfig,
+    octave_equivalent: bool = False,
 ) -> list[tuple[NoteEvent, NoteEvent]]:
     candidate_edges: list[tuple[float, int, int]] = []
     for expected_index, expected in enumerate(expected_notes):
@@ -923,12 +986,8 @@ def _match_notes(
             onset_delta = abs(expected.start - predicted.start)
             if onset_delta > config.onset_tolerance_sec:
                 continue
-            pitch_delta = abs(expected.pitch - predicted.pitch)
-            if pitch_delta <= config.pitch_tolerance_semitones:
-                pitch_cost = pitch_delta
-            elif pitch_delta in {1, config.octave_tolerance_semitones}:
-                pitch_cost = pitch_delta + 100
-            else:
+            pitch_cost = _pitch_match_cost(expected.pitch, predicted.pitch, config=config, octave_equivalent=octave_equivalent)
+            if pitch_cost is None:
                 continue
             duration_cost = 1.0 - _duration_iou(expected, predicted)
             cost = onset_delta + pitch_cost + duration_cost * 0.01
@@ -946,6 +1005,30 @@ def _match_notes(
         matches.append((expected_notes[expected_index], predicted_notes[predicted_index]))
     matches.sort(key=lambda pair: (pair[0].start, pair[1].start, pair[0].pitch))
     return matches
+
+
+def _pitch_match_cost(
+    expected_pitch: int,
+    predicted_pitch: int,
+    *,
+    config: MidiMetricConfig,
+    octave_equivalent: bool = False,
+) -> float | None:
+    pitch_delta = abs(int(expected_pitch) - int(predicted_pitch))
+    if pitch_delta <= config.pitch_tolerance_semitones:
+        return float(pitch_delta)
+    if pitch_delta == 1:
+        return float(pitch_delta + 100)
+    if octave_equivalent and _pitch_class_delta(expected_pitch, predicted_pitch) <= config.pitch_tolerance_semitones:
+        return float(100 + pitch_delta * 0.01)
+    if config.octave_tolerance_semitones > 0 and pitch_delta == config.octave_tolerance_semitones:
+        return float(pitch_delta + 100)
+    return None
+
+
+def _pitch_class_delta(expected_pitch: int, predicted_pitch: int) -> int:
+    raw_delta = abs(int(expected_pitch) - int(predicted_pitch)) % 12
+    return min(raw_delta, 12 - raw_delta)
 
 
 def _infer_octave_normalization(
@@ -1030,9 +1113,9 @@ def _compute_smart_onset_alignment_diagnostics(
     max_abs_shift_sec: float = 90.0,
     top_k: int = 30,
 ) -> SmartOnsetAlignmentDiagnostics:
-    raw_recall = float(raw_metrics.note_recall)
-    raw_f1 = float(raw_metrics.note_f1)
-    raw_matched = int(raw_metrics.matched_note_count)
+    raw_recall = float(raw_metrics.octave_normalized_note_recall)
+    raw_f1 = float(raw_metrics.octave_normalized_note_f1)
+    raw_matched = int(raw_metrics.octave_normalized_matched_note_count)
     raw_coverage = _shift_corrected_coverage(predicted_notes, expected_notes)
     empty_result = SmartOnsetAlignmentDiagnostics(
         pred_to_exp_shift_sec=0.0,
@@ -1072,13 +1155,16 @@ def _compute_smart_onset_alignment_diagnostics(
         shifted_notes = _shift_notes(predicted_notes, time_shift=shift)
         shifted_metrics = compute_midi_metrics(expected_notes, shifted_notes, config=strict_config)
         shifted_coverage = _shift_corrected_coverage(shifted_notes, expected_notes)
-        recall_gain = float(shifted_metrics.note_recall) - raw_recall
-        f1_gain = float(shifted_metrics.note_f1) - raw_f1
-        matched_gain = int(shifted_metrics.matched_note_count) - raw_matched
+        shift_recall = float(shifted_metrics.octave_normalized_note_recall)
+        shift_f1 = float(shifted_metrics.octave_normalized_note_f1)
+        shift_matched = int(shifted_metrics.octave_normalized_matched_note_count)
+        recall_gain = shift_recall - raw_recall
+        f1_gain = shift_f1 - raw_f1
+        matched_gain = shift_matched - raw_matched
         diagnosis = _diagnose_smart_onset_alignment(
             shift=shift,
             raw_recall=raw_recall,
-            shift_corrected_recall=float(shifted_metrics.note_recall),
+            shift_corrected_recall=shift_recall,
             shift_recall_gain=recall_gain,
             shift_matched_gain=matched_gain,
             shift_peak_support=support,
@@ -1086,9 +1172,9 @@ def _compute_smart_onset_alignment_diagnostics(
         )
         result = SmartOnsetAlignmentDiagnostics(
             pred_to_exp_shift_sec=shift,
-            shift_corrected_recall=float(shifted_metrics.note_recall),
-            shift_corrected_f1=float(shifted_metrics.note_f1),
-            shift_corrected_matched=int(shifted_metrics.matched_note_count),
+            shift_corrected_recall=shift_recall,
+            shift_corrected_f1=shift_f1,
+            shift_corrected_matched=shift_matched,
             shift_corrected_coverage=shifted_coverage,
             shift_recall_gain=recall_gain,
             shift_f1_gain=f1_gain,
@@ -1098,7 +1184,7 @@ def _compute_smart_onset_alignment_diagnostics(
             shift_candidate_count=len(candidates),
             alignment_diagnosis=diagnosis,
         )
-        evaluated.append(((recall_gain, f1_gain, matched_gain, float(shifted_metrics.note_recall), -abs(shift)), result))
+        evaluated.append(((recall_gain, f1_gain, matched_gain, shift_recall, -abs(shift)), result))
 
     return max(evaluated, key=lambda item: item[0])[1]
 

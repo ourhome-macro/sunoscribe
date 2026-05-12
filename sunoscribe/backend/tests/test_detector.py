@@ -89,12 +89,12 @@ class TestPitchDetector(unittest.TestCase):
             confidence_threshold=0.5,
             rmvpe_sample_rate=16000,
             rmvpe_step_size_ms=10,
-            crepe_vuv_confidence_threshold=0.45,
-            crepe_max_unvoiced_gap_sec=0.02,
-            crepe_pitch_jump_semitones=1.0,
-            crepe_min_note_duration_sec=0.01,
-            crepe_min_voiced_frames=1,
-            crepe_smoothing_window=3,
+            rmvpe_vuv_threshold=0.45,
+            rmvpe_max_unvoiced_gap_sec=0.02,
+            rmvpe_pitch_jump_semitones=1.0,
+            rmvpe_min_note_duration_sec=0.01,
+            rmvpe_min_voiced_frames=1,
+            rmvpe_smoothing_window=3,
         )
         detector = PitchDetector(cfg)
         audio_path = Path(__file__)
@@ -131,6 +131,43 @@ class TestPitchDetector(unittest.TestCase):
         self.assertEqual(detector.last_detection_artifacts["frame_count"], 8)
         self.assertEqual(len(detector.last_detection_artifacts["f0_track"]["frames"]), 8)
         self.assertGreaterEqual(len(detector.last_detection_artifacts["f0_track"]["vocal_activity"]), 1)
+
+    def test_rmvpe_segmentation_uses_rmvpe_thresholds_not_crepe_thresholds(self):
+        cfg = PitchDetectionConfig(
+            pitch_backend="rmvpe",
+            confidence_threshold=0.5,
+            crepe_vuv_confidence_threshold=0.95,
+            crepe_max_unvoiced_gap_sec=0.0,
+            crepe_min_note_duration_sec=0.5,
+            crepe_min_voiced_frames=20,
+            rmvpe_vuv_threshold=0.03,
+            rmvpe_max_unvoiced_gap_sec=0.12,
+            rmvpe_pitch_jump_semitones=3.5,
+            rmvpe_min_note_duration_sec=0.04,
+            rmvpe_min_voiced_frames=3,
+            rmvpe_smoothing_window=3,
+        )
+        detector = PitchDetector(cfg)
+        times = np.arange(16, dtype=float) * 0.01
+        midi_vals = np.array(
+            [60.0, 60.1, 60.0, 0.0, 0.0, 60.2, 60.1, 60.0, 60.1, 60.0, 60.2, 60.1, 60.0, 60.1, 60.0, 60.0],
+            dtype=float,
+        )
+        freqs = np.where(midi_vals > 0.0, 440.0 * (2.0 ** ((midi_vals - 69.0) / 12.0)), 0.0)
+        confs = np.full(times.shape, 0.8, dtype=float)
+
+        notes = detector._frames_to_notes(
+            times=times,
+            frequencies=freqs,
+            confidences=confs,
+            duration_sec=1.0,
+            backend="rmvpe",
+        )
+
+        self.assertEqual(len(notes), 1)
+        self.assertEqual(notes[0].pitch, "C4")
+        self.assertAlmostEqual(notes[0].start_time, 0.0, places=3)
+        self.assertGreater(notes[0].end_time, 0.14)
 
     def test_detect_raises_when_rmvpe_missing(self):
         cfg = PitchDetectionConfig(pitch_backend="rmvpe")

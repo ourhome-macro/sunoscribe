@@ -23,6 +23,10 @@ DP_NO_CANDIDATE_PATH = "dp_no_candidate_path"
 QUANTIZER_BACKEND_UNSUPPORTED = "quantizer_backend_unsupported"
 POSSIBLE_FRAGMENTATION = "possible_fragmentation"
 POSSIBLE_OVERMERGE = "possible_overmerge"
+SHORT_GAP_BRIDGED = "short_gap_bridged"
+SHORT_NOTE_ABSORBED = "short_note_absorbed"
+OCTAVE_JUMP_CORRECTED = "octave_jump_corrected"
+PHRASE_MEDIAN_SMOOTHED = "phrase_median_smoothed"
 FRAGMENTATION_RISK = POSSIBLE_FRAGMENTATION
 OVERMERGE_RISK = POSSIBLE_OVERMERGE
 

@@ -21,6 +21,7 @@ class Note:
     start_time: float
     end_time: float
     confidence: float
+    reason_codes: List[str] = field(default_factory=list, kw_only=True)
 
 
 @dataclass

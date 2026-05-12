@@ -523,6 +523,7 @@ def build_derived_diagnostics(
         predicted_notes=predicted_notes,
         f0_track_path=f0_track_path,
         note_candidates_path=note_candidates_path,
+        selected_melody_path=selected_melody_path,
     )
     match = _derive_match_diagnostics(
         match_debug=match_debug,
@@ -669,6 +670,8 @@ def build_debug_summary_markdown(
     expected_density = _safe_density(expected_note_count, expected_duration)
     matched_density = _safe_density(_as_int(_metric_value(metrics, summary_metrics, "matched_note_count")) or 0, expected_duration)
     rhythm = derived_diagnostics.get("rhythm") if isinstance(derived_diagnostics, dict) and isinstance(derived_diagnostics.get("rhythm"), dict) else {}
+    selected_melody = derived_diagnostics.get("selected_melody") if isinstance(derived_diagnostics, dict) and isinstance(derived_diagnostics.get("selected_melody"), dict) else {}
+    postprocess = selected_melody.get("postprocess") if isinstance(selected_melody.get("postprocess"), dict) else {}
     f0_available = "f0_track.json" in found_files
     vocal_activity_available = "vocal_activity.json" in found_files
     note_candidates_available = "note_candidates.json" in found_files
@@ -729,6 +732,13 @@ def build_debug_summary_markdown(
         f"- best octave recall: {_fmt(alignment.get('best_octave_shift_note_recall'))}",
         f"- dtw_recall: {_fmt(dtw.get('dtw_pitch_match_recall_proxy'))}",
         "",
+        "## Melody Postprocess",
+        f"- available: {str(bool(postprocess.get('available') if 'available' in postprocess else selected_melody.get('available'))).lower()}",
+        f"- input/output: {_fmt(postprocess.get('input_note_count'))} -> {_fmt(postprocess.get('output_note_count'))}",
+        f"- action_count: {_fmt(postprocess.get('action_count'))}",
+        f"- action_counts: {_fmt(postprocess.get('action_counts'))}",
+        f"- reason_code_counts: {_fmt(postprocess.get('reason_code_counts'))}",
+        "",
         "## Artifact List",
         "- found files:",
     ]
@@ -773,6 +783,7 @@ def build_pitch_debug_markdown(
     ]
     pairwise = pitch_distribution.get("pairwise") if isinstance(pitch_distribution.get("pairwise"), dict) else {}
     candidate_funnel = pitch_distribution.get("candidate_funnel") if isinstance(pitch_distribution.get("candidate_funnel"), dict) else {}
+    postprocess = pitch_distribution.get("melody_postprocess") if isinstance(pitch_distribution.get("melody_postprocess"), dict) else {}
     flags = pitch_distribution.get("flags") if isinstance(pitch_distribution.get("flags"), dict) else {}
     triggered = [(name, flag) for name, flag in flags.items() if isinstance(flag, dict) and flag.get("triggered")]
     non_triggered = [name for name, flag in flags.items() if isinstance(flag, dict) and not flag.get("triggered")]
@@ -1776,12 +1787,26 @@ def _derive_selected_melody_diagnostics(selected_melody_path: Path | None) -> di
     if not isinstance(payload, dict):
         return _unavailable("selected melody unavailable")
     summary = payload.get("summary") if isinstance(payload.get("summary"), dict) else {}
+    postprocess = payload.get("postprocess") if isinstance(payload.get("postprocess"), dict) else {}
+    postprocess_payload = {
+        "available": bool(postprocess),
+        "input_note_count": postprocess.get("input_note_count", summary.get("pre_postprocess_selected_count")),
+        "output_note_count": postprocess.get("output_note_count", summary.get("selected_count")),
+        "iteration_count": postprocess.get("iteration_count"),
+        "action_count": postprocess.get("action_count", 0),
+        "action_counts": postprocess.get("action_counts") if isinstance(postprocess.get("action_counts"), dict) else summary.get("postprocess_action_counts", {}),
+        "reason_code_counts": postprocess.get("reason_code_counts") if isinstance(postprocess.get("reason_code_counts"), dict) else summary.get("postprocess_reason_code_counts", {}),
+        "actions": postprocess.get("actions") if isinstance(postprocess.get("actions"), list) else [],
+    }
     return {
         "available": True,
         "input_candidate_count": summary.get("input_candidate_count", 0),
+        "pre_postprocess_selected_count": summary.get("pre_postprocess_selected_count"),
         "selected_count": summary.get("selected_count", 0),
         "rejected_count": summary.get("rejected_count", 0),
         "rejection_reason_counts": summary.get("rejection_reason_counts") if isinstance(summary.get("rejection_reason_counts"), dict) else {},
+        "selected_reason_counts": summary.get("selected_reason_counts") if isinstance(summary.get("selected_reason_counts"), dict) else {},
+        "postprocess": postprocess_payload,
         "mean_selected_confidence": summary.get("mean_selected_confidence"),
         "mean_rejected_confidence": summary.get("mean_rejected_confidence"),
     }
@@ -2475,6 +2500,7 @@ def _derive_pitch_distribution_diagnostics(
     predicted_notes: list[NoteEvent],
     f0_track_path: Path | None,
     note_candidates_path: Path | None,
+    selected_melody_path: Path | None = None,
 ) -> dict[str, Any]:
     expected = _build_pitch_source_distribution(
         _note_events_to_pitch_events(expected_notes),
@@ -2542,6 +2568,7 @@ def _derive_pitch_distribution_diagnostics(
         selected_candidates=note_candidates_selected,
         predicted=predicted,
     )
+    melody_postprocess = _selected_melody_postprocess_payload(selected_melody_path)
     flags = _derive_pitch_distribution_flags(
         sources=sources,
         pairwise=pairwise,
@@ -2562,10 +2589,30 @@ def _derive_pitch_distribution_diagnostics(
         "note_candidates_melody_raw": note_candidates_melody_raw,
         "pairwise": pairwise,
         "candidate_funnel": candidate_funnel,
+        "melody_postprocess": melody_postprocess,
         "flags": flags,
         "triggered_pitch_flags": triggered,
         "preliminary_pitch_diagnosis": preliminary,
         "warnings": warnings,
+    }
+
+
+def _selected_melody_postprocess_payload(selected_melody_path: Path | None) -> dict[str, Any]:
+    if selected_melody_path is None or not selected_melody_path.exists():
+        return {"available": False, "warning": "selected_melody.json missing"}
+    payload = _read_json(selected_melody_path)
+    if not isinstance(payload, dict):
+        return {"available": False, "warning": "selected_melody.json unreadable"}
+    summary = payload.get("summary") if isinstance(payload.get("summary"), dict) else {}
+    postprocess = payload.get("postprocess") if isinstance(payload.get("postprocess"), dict) else {}
+    return {
+        "available": bool(postprocess),
+        "input_note_count": postprocess.get("input_note_count", summary.get("pre_postprocess_selected_count")),
+        "output_note_count": postprocess.get("output_note_count", summary.get("selected_count")),
+        "action_count": postprocess.get("action_count", 0),
+        "action_counts": postprocess.get("action_counts") if isinstance(postprocess.get("action_counts"), dict) else summary.get("postprocess_action_counts", {}),
+        "reason_code_counts": postprocess.get("reason_code_counts") if isinstance(postprocess.get("reason_code_counts"), dict) else summary.get("postprocess_reason_code_counts", {}),
+        "actions_preview": (postprocess.get("actions") if isinstance(postprocess.get("actions"), list) else [])[:20],
     }
 
 

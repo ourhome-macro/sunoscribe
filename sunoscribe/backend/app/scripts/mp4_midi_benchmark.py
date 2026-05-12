@@ -422,6 +422,18 @@ def _quality_gate_stage(*, metrics_payload: dict[str, Any]) -> tuple[StageRecord
     audibility = metrics_payload.get("audibility") or {}
     continuity = metrics_payload.get("continuity") or {}
     coverage_threshold = _effective_midi_coverage_threshold(metrics)
+    note_recall_check = _quality_check_min(
+        name="note_recall",
+        actual=_metric_or_octave_normalized(metrics, "note_recall"),
+        threshold=QUALITY_GATE_THRESHOLDS["note_recall_min"],
+        details=_octave_normalized_check_details(metrics, "note_recall"),
+    )
+    matched_notes_check = _quality_check_min(
+        name="matched_notes",
+        actual=_metric_or_octave_normalized(metrics, "matched_note_count"),
+        threshold=QUALITY_GATE_THRESHOLDS["matched_notes_min"],
+        details=_octave_normalized_check_details(metrics, "matched_note_count"),
+    )
     checks = [
         _quality_check_max(
             name="first_note_delay_sec",
@@ -438,16 +450,8 @@ def _quality_gate_stage(*, metrics_payload: dict[str, Any]) -> tuple[StageRecord
                 "policy": "min(base_threshold, predicted_expected_note_ratio * 0.85)",
             },
         ),
-        _quality_check_min(
-            name="note_recall",
-            actual=metrics.get("note_recall"),
-            threshold=QUALITY_GATE_THRESHOLDS["note_recall_min"],
-        ),
-        _quality_check_min(
-            name="matched_notes",
-            actual=metrics.get("matched_note_count"),
-            threshold=QUALITY_GATE_THRESHOLDS["matched_notes_min"],
-        ),
+        note_recall_check,
+        matched_notes_check,
     ]
     failed_checks = [check for check in checks if not check["passed"]]
     payload = {
@@ -461,6 +465,13 @@ def _quality_gate_stage(*, metrics_payload: dict[str, Any]) -> tuple[StageRecord
             "note_precision": metrics.get("note_precision"),
             "pitch_accuracy": metrics.get("pitch_accuracy"),
             "octave_error_rate": metrics.get("octave_error_rate"),
+            "octave_normalized_note_f1": metrics.get("octave_normalized_note_f1"),
+            "octave_normalized_note_precision": metrics.get("octave_normalized_note_precision"),
+            "octave_normalized_note_recall": metrics.get("octave_normalized_note_recall"),
+            "octave_normalized_matched_note_count": metrics.get("octave_normalized_matched_note_count"),
+            "octave_normalized_pitch_accuracy": metrics.get("octave_normalized_pitch_accuracy"),
+            "octave_normalized_recall_lift": metrics.get("octave_normalized_recall_lift"),
+            "octave_normalized_f1_lift": metrics.get("octave_normalized_f1_lift"),
             "gap50_ratio": continuity.get("gap50_ratio"),
             "big_gap_count": continuity.get("big_gap_count"),
             "short_note_ratio": continuity.get("short_note_ratio"),
@@ -482,6 +493,30 @@ def _quality_gate_stage(*, metrics_payload: dict[str, Any]) -> tuple[StageRecord
         ),
         payload,
     )
+
+
+def _metric_or_octave_normalized(metrics: dict[str, Any], key: str) -> Any:
+    normalized_key = f"octave_normalized_{key}"
+    normalized_value = _as_float(metrics.get(normalized_key))
+    raw_value = _as_float(metrics.get(key))
+    if normalized_value is not None and raw_value is not None and normalized_value > raw_value:
+        return metrics.get(normalized_key)
+    return metrics.get(key)
+
+
+def _octave_normalized_check_details(metrics: dict[str, Any], key: str) -> dict[str, Any]:
+    normalized_key = f"octave_normalized_{key}"
+    raw_value = metrics.get(key)
+    normalized_value = metrics.get(normalized_key)
+    effective_value = _metric_or_octave_normalized(metrics, key)
+    return {
+        "raw_metric": key,
+        "raw_value": raw_value,
+        "octave_normalized_metric": normalized_key,
+        "octave_normalized_value": normalized_value,
+        "effective_value": effective_value,
+        "policy": "use octave-normalized metric only when it improves pitch-equivalent matching",
+    }
 
 
 def _quality_check_min(*, name: str, actual: Any, threshold: float | int, details: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -597,6 +632,13 @@ def _summary_metrics_with_quality_fields(metrics_payload: dict[str, Any]) -> dic
             "big_gap_count",
             "short_note_ratio",
             "large_jump_ratio",
+            "phrase_gap_threshold_sec",
+            "local_adjacent_pair_count",
+            "local_large_jump_count",
+            "local_large_jump_ratio",
+            "cross_phrase_adjacent_pair_count",
+            "cross_phrase_large_jump_count",
+            "cross_phrase_large_jump_ratio",
             "median_pitch",
             "pitch_range",
         ):
@@ -635,6 +677,10 @@ def _reference_review_sample(row: dict[str, Any]) -> dict[str, Any]:
     predicted_count = metrics.get("predicted_note_count")
     expected_duration = audibility.get("expected_duration_sec")
     note_recall = metrics.get("note_recall")
+    octave_normalized_note_recall = metrics.get("octave_normalized_note_recall")
+    octave_normalized_note_f1 = metrics.get("octave_normalized_note_f1")
+    octave_normalized_pitch_accuracy = metrics.get("octave_normalized_pitch_accuracy")
+    octave_normalized_recall_lift = metrics.get("octave_normalized_recall_lift")
     octave_shift_applied = metrics.get("octave_shift_applied")
     octave_shift_target = metrics.get("octave_shift_target")
     median_pitch_delta_raw = metrics.get("median_pitch_delta_raw")
@@ -657,11 +703,15 @@ def _reference_review_sample(row: dict[str, Any]) -> dict[str, Any]:
         and int(predicted_count) >= int(REFERENCE_REVIEW_THRESHOLDS["predicted_note_count_min_for_ratio"])
     ):
         reasons.append("predicted_expected_ratio_too_low")
+    octave_normalized_is_better = _as_float(octave_normalized_recall_lift) is not None and float(octave_normalized_recall_lift) >= 0.02
     if (
-        abs(int(dtw.get("best_dtw_octave_shift_semitones") or 0)) in {12, 24}
-        and dtw_recall is not None
-        and float(dtw_recall) >= float(REFERENCE_REVIEW_THRESHOLDS["dtw_octave_recall_min"])
-        and not _octave_shift_was_applied(octave_shift_applied)
+        (
+            abs(int(dtw.get("best_dtw_octave_shift_semitones") or 0)) in {12, 24}
+            and dtw_recall is not None
+            and float(dtw_recall) >= float(REFERENCE_REVIEW_THRESHOLDS["dtw_octave_recall_min"])
+            and not _octave_shift_was_applied(octave_shift_applied)
+        )
+        or octave_normalized_is_better
     ):
         reasons.append("octave_reference_suspect")
     first_delay = audibility.get("first_note_delay_sec")
@@ -701,6 +751,10 @@ def _reference_review_sample(row: dict[str, Any]) -> dict[str, Any]:
         "expected_note_density_per_sec": expected_note_density,
         "predicted_expected_note_ratio": predicted_expected_ratio,
         "note_recall": note_recall,
+        "octave_normalized_note_recall": octave_normalized_note_recall,
+        "octave_normalized_note_f1": octave_normalized_note_f1,
+        "octave_normalized_pitch_accuracy": octave_normalized_pitch_accuracy,
+        "octave_normalized_recall_lift": octave_normalized_recall_lift,
         "octave_shift_applied": octave_shift_applied,
         "octave_shift_target": octave_shift_target,
         "median_pitch_delta_raw": median_pitch_delta_raw,
@@ -757,22 +811,25 @@ def _summary_markdown(summary: dict[str, Any]) -> str:
         f"- Likely comparable: `{reference_counts.get('likely_comparable', 0)}`",
         f"- Needs manual review: `{reference_counts.get('needs_manual_review', 0)}`",
         "",
-        "| Sample | Status | Reference Status | Reference Reasons | Raw F1 | Raw Recall | Raw Matched | Raw Coverage | Gap50 | Big Gaps | Short Notes | Large Jumps | Shift s | Shift Recall | Shift F1 | Shift Matched | Shift Coverage | Shift Diagnosis | First Delay s | Best Oct Rec | Best Time Rec | DTW Rec | Pitch Acc | Failure Modes | Error |",
-        "| --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- | ---: | ---: | ---: | ---: | ---: | --- | --- |",
+        "| Sample | Status | Reference Status | Reference Reasons | Raw F1 | Raw Recall | Oct F1 | Oct Recall | Raw Matched | Oct Matched | Raw Coverage | Gap50 | Big Gaps | Short Notes | Large Jumps | Shift s | Shift Recall | Shift F1 | Shift Matched | Shift Coverage | Shift Diagnosis | First Delay s | Best Oct Rec | Best Time Rec | DTW Rec | Pitch Acc | Oct Pitch Acc | Failure Modes | Error |",
+        "| --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: | --- | --- |",
     ]
     for result in results:
         metrics = result.get("metrics") or {}
         alignment = result.get("alignment") or {}
         error = result.get("error") or {}
         lines.append(
-            "| {sample} | {status} | {reference_status} | {reference_reasons} | {f1} | {recall} | {matched} | {coverage} | {gap50} | {big_gaps} | {short_notes} | {large_jumps} | {shift} | {shift_recall} | {shift_f1} | {shift_matched} | {shift_coverage} | {shift_diagnosis} | {delay} | {best_oct} | {best_time} | {dtw_rec} | {pitch} | {modes} | {error} |".format(
+            "| {sample} | {status} | {reference_status} | {reference_reasons} | {f1} | {recall} | {oct_f1} | {oct_recall} | {matched} | {oct_matched} | {coverage} | {gap50} | {big_gaps} | {short_notes} | {large_jumps} | {shift} | {shift_recall} | {shift_f1} | {shift_matched} | {shift_coverage} | {shift_diagnosis} | {delay} | {best_oct} | {best_time} | {dtw_rec} | {pitch} | {oct_pitch} | {modes} | {error} |".format(
                 sample=result.get("sample_id"),
                 status=result.get("status"),
                 reference_status=result.get("reference_status") or "",
                 reference_reasons=", ".join(result.get("reference_suspect_reasons") or []),
                 f1=_fmt_metric(metrics.get("note_f1")),
                 recall=_fmt_metric(metrics.get("note_recall")),
+                oct_f1=_fmt_metric(metrics.get("octave_normalized_note_f1")),
+                oct_recall=_fmt_metric(metrics.get("octave_normalized_note_recall")),
                 matched=metrics.get("matched_note_count") if metrics else "",
+                oct_matched=metrics.get("octave_normalized_matched_note_count") if metrics else "",
                 coverage=_fmt_metric(metrics.get("midi_coverage_ratio")),
                 gap50=_fmt_metric(metrics.get("gap50_ratio")),
                 big_gaps=metrics.get("big_gap_count") if metrics else "",
@@ -789,6 +846,7 @@ def _summary_markdown(summary: dict[str, Any]) -> str:
                 best_time=_fmt_metric(alignment.get("best_time_shift_note_recall")),
                 dtw_rec=_fmt_metric((alignment.get("dtw") or {}).get("dtw_pitch_match_recall_proxy")),
                 pitch=_fmt_metric(metrics.get("pitch_accuracy")),
+                oct_pitch=_fmt_metric(metrics.get("octave_normalized_pitch_accuracy")),
                 modes=", ".join(result.get("suspected_failure_modes") or []),
                 error=(error.get("type") or ""),
             )
@@ -828,6 +886,12 @@ def _aggregate_metrics(metrics_values: list[dict[str, Any]], *, metric_payloads:
         "pitch_accuracy",
         "duration_overlap",
         "octave_error_rate",
+        "octave_normalized_note_precision",
+        "octave_normalized_note_recall",
+        "octave_normalized_note_f1",
+        "octave_normalized_pitch_accuracy",
+        "octave_normalized_recall_lift",
+        "octave_normalized_f1_lift",
         "gap50_ratio",
         "short_note_ratio",
         "large_jump_ratio",
@@ -1015,8 +1079,8 @@ def _quality_diagnostics_markdown(payload: dict[str, Any]) -> str:
         "",
         "## Worst By Note F1",
         "",
-        "| Sample | Status | Reference Status | Reference Reasons | Raw F1 | Raw Recall | Raw Matched | Raw Coverage | Gap50 | Big Gaps | Short Notes | Large Jumps | Shift s | Shift Recall | Shift F1 | Shift Diagnosis | First Delay s | Best Oct Rec | Best Time Rec | DTW Rec | Failure Modes |",
-        "| --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- | ---: | ---: | ---: | ---: | --- |",
+        "| Sample | Status | Reference Status | Reference Reasons | Raw F1 | Raw Recall | Oct F1 | Oct Recall | Raw Matched | Oct Matched | Raw Coverage | Gap50 | Big Gaps | Short Notes | Large Jumps | Shift s | Shift Recall | Shift F1 | Shift Diagnosis | First Delay s | Best Oct Rec | Best Time Rec | DTW Rec | Failure Modes |",
+        "| --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- | ---: | ---: | ---: | ---: | --- |",
     ]
     for sample in sorted(metric_samples, key=lambda item: _sort_float((item.get("metrics") or {}).get("note_f1")))[:20]:
         lines.append(_quality_table_row(sample))
@@ -1025,8 +1089,8 @@ def _quality_diagnostics_markdown(payload: dict[str, Any]) -> str:
             "",
             "## Worst By MIDI Coverage",
             "",
-            "| Sample | Status | Reference Status | Reference Reasons | Raw F1 | Raw Recall | Raw Matched | Raw Coverage | Gap50 | Big Gaps | Short Notes | Large Jumps | Shift s | Shift Recall | Shift F1 | Shift Diagnosis | First Delay s | Best Oct Rec | Best Time Rec | DTW Rec | Failure Modes |",
-            "| --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- | ---: | ---: | ---: | ---: | --- |",
+            "| Sample | Status | Reference Status | Reference Reasons | Raw F1 | Raw Recall | Oct F1 | Oct Recall | Raw Matched | Oct Matched | Raw Coverage | Gap50 | Big Gaps | Short Notes | Large Jumps | Shift s | Shift Recall | Shift F1 | Shift Diagnosis | First Delay s | Best Oct Rec | Best Time Rec | DTW Rec | Failure Modes |",
+            "| --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- | ---: | ---: | ---: | ---: | --- |",
         ]
     )
     for sample in sorted(metric_samples, key=lambda item: _sort_float((item.get("metrics") or {}).get("midi_coverage_ratio")))[:20]:
@@ -1036,8 +1100,8 @@ def _quality_diagnostics_markdown(payload: dict[str, Any]) -> str:
             "",
             "## Worst By First-Note Delay",
             "",
-            "| Sample | Status | Reference Status | Reference Reasons | Raw F1 | Raw Recall | Raw Matched | Raw Coverage | Gap50 | Big Gaps | Short Notes | Large Jumps | Shift s | Shift Recall | Shift F1 | Shift Diagnosis | First Delay s | Best Oct Rec | Best Time Rec | DTW Rec | Failure Modes |",
-            "| --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- | ---: | ---: | ---: | ---: | --- |",
+            "| Sample | Status | Reference Status | Reference Reasons | Raw F1 | Raw Recall | Oct F1 | Oct Recall | Raw Matched | Oct Matched | Raw Coverage | Gap50 | Big Gaps | Short Notes | Large Jumps | Shift s | Shift Recall | Shift F1 | Shift Diagnosis | First Delay s | Best Oct Rec | Best Time Rec | DTW Rec | Failure Modes |",
+            "| --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- | ---: | ---: | ---: | ---: | --- |",
         ]
     )
     for sample in sorted(
@@ -1057,14 +1121,17 @@ def _quality_diagnostics_markdown(payload: dict[str, Any]) -> str:
 def _quality_table_row(sample: dict[str, Any]) -> str:
     metrics = sample.get("metrics") or {}
     alignment = sample.get("alignment") or {}
-    return "| {sample_id} | {status} | {reference_status} | {reference_reasons} | {f1} | {recall} | {matched} | {coverage} | {gap50} | {big_gaps} | {short_notes} | {large_jumps} | {shift} | {shift_recall} | {shift_f1} | {shift_diagnosis} | {delay} | {best_oct} | {best_time} | {dtw_rec} | {modes} |".format(
+    return "| {sample_id} | {status} | {reference_status} | {reference_reasons} | {f1} | {recall} | {oct_f1} | {oct_recall} | {matched} | {oct_matched} | {coverage} | {gap50} | {big_gaps} | {short_notes} | {large_jumps} | {shift} | {shift_recall} | {shift_f1} | {shift_diagnosis} | {delay} | {best_oct} | {best_time} | {dtw_rec} | {modes} |".format(
         sample_id=sample.get("sample_id"),
         status=sample.get("status"),
         reference_status=sample.get("reference_status") or "",
         reference_reasons=", ".join(sample.get("reference_suspect_reasons") or []),
         f1=_fmt_metric(metrics.get("note_f1")),
         recall=_fmt_metric(metrics.get("note_recall")),
+        oct_f1=_fmt_metric(metrics.get("octave_normalized_note_f1")),
+        oct_recall=_fmt_metric(metrics.get("octave_normalized_note_recall")),
         matched=metrics.get("matched_note_count"),
+        oct_matched=metrics.get("octave_normalized_matched_note_count"),
         coverage=_fmt_metric(metrics.get("midi_coverage_ratio")),
         gap50=_fmt_metric(metrics.get("gap50_ratio")),
         big_gaps=metrics.get("big_gap_count") if metrics else "",
@@ -1108,13 +1175,13 @@ def _reference_review_markdown(payload: dict[str, Any]) -> str:
             "",
             "## Samples",
             "",
-            "| Sample | Reference Status | Reasons | Expected | Predicted | Density/sec | Pred/Exp | Recall | Oct Shift | Raw Median Δ | DTW Rec | DTW Lift | DTW Shift | First Delay s | Failed Checks |",
-            "| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |",
+            "| Sample | Reference Status | Reasons | Expected | Predicted | Density/sec | Pred/Exp | Raw Recall | Oct Recall | Oct F1 | Oct Pitch Acc | Oct Shift | Raw Median ? | DTW Rec | DTW Lift | DTW Shift | First Delay s | Failed Checks |",
+            "| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |",
         ]
     )
     for sample in sorted(samples, key=lambda item: (item.get("reference_status") != "reference_suspect", item.get("sample_id") or "")):
         lines.append(
-            "| {sample_id} | {status} | {reasons} | {expected} | {predicted} | {density} | {ratio} | {recall} | {oct_shift} | {raw_delta} | {dtw_rec} | {dtw_lift} | {dtw_shift} | {delay} | {checks} |".format(
+            "| {sample_id} | {status} | {reasons} | {expected} | {predicted} | {density} | {ratio} | {recall} | {oct_recall} | {oct_f1} | {oct_pitch} | {oct_shift} | {raw_delta} | {dtw_rec} | {dtw_lift} | {dtw_shift} | {delay} | {checks} |".format(
                 sample_id=sample.get("sample_id"),
                 status=sample.get("reference_status"),
                 reasons=", ".join(sample.get("reference_suspect_reasons") or []),
@@ -1123,6 +1190,9 @@ def _reference_review_markdown(payload: dict[str, Any]) -> str:
                 density=_fmt_metric(sample.get("expected_note_density_per_sec")),
                 ratio=_fmt_metric(sample.get("predicted_expected_note_ratio")),
                 recall=_fmt_metric(sample.get("note_recall")),
+                oct_recall=_fmt_metric(sample.get("octave_normalized_note_recall")),
+                oct_f1=_fmt_metric(sample.get("octave_normalized_note_f1")),
+                oct_pitch=_fmt_metric(sample.get("octave_normalized_pitch_accuracy")),
                 oct_shift=sample.get("octave_shift_applied") if sample.get("octave_shift_applied") is not None else "",
                 raw_delta=_fmt_metric(sample.get("median_pitch_delta_raw")),
                 dtw_rec=_fmt_metric(sample.get("dtw_pitch_match_recall_proxy")),

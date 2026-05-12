@@ -29,6 +29,31 @@ GROUP_ORDER = [
 
 RECALL_DELTA_THRESHOLD = 0.02
 MATCHED_DELTA_THRESHOLD = 10
+DEFAULT_SIGNAL_DELTA_THRESHOLD = 0.001
+
+TRADEOFF_REGRESSION_METRICS = (
+    ("recall", "Recall", "core"),
+    ("matched", "Matched", "core"),
+    ("gap50_ratio", "Gap50", "core"),
+)
+
+TRADEOFF_IMPROVEMENT_METRICS = (
+    ("fragmentation", "Fragmentation", "diagnostic"),
+    ("diagnostic_large_jump_ratio", "Large Jumps", "diagnostic"),
+    ("diagnostic_local_large_jump_ratio", "Local Large Jumps", "diagnostic"),
+)
+
+LOWER_IS_BETTER_METRICS = {
+    "gap50_ratio",
+    "fragmentation",
+    "diagnostic_large_jump_ratio",
+    "diagnostic_local_large_jump_ratio",
+    "diagnostic_cross_phrase_large_jump_ratio",
+    "local_large_jump_ratio",
+    "cross_phrase_large_jump_ratio",
+}
+
+TRADEOFF_SIGNAL_THRESHOLDS = {"matched": 1.0}
 
 
 @dataclass(frozen=True)
@@ -41,12 +66,16 @@ class MetricSpec:
 METRIC_SPECS = (
     MetricSpec("recall", (("metrics", "note_recall"), ("diagnostics", "note_recall"))),
     MetricSpec("f1", (("metrics", "note_f1"), ("diagnostics", "note_f1"))),
+    MetricSpec("octave_normalized_recall", (("metrics", "octave_normalized_note_recall"), ("diagnostics", "octave_normalized_note_recall"))),
+    MetricSpec("octave_normalized_f1", (("metrics", "octave_normalized_note_f1"), ("diagnostics", "octave_normalized_note_f1"))),
+    MetricSpec("octave_normalized_pitch_accuracy", (("metrics", "octave_normalized_pitch_accuracy"), ("diagnostics", "octave_normalized_pitch_accuracy"))),
     MetricSpec(
         "matched",
         (
             ("metrics", "matched_notes"),
             ("metrics", "matched_count"),
             ("metrics", "matched_note_count"),
+            ("metrics", "octave_normalized_matched_note_count"),
             ("alignment", "best_octave_shift_matched_notes"),
             ("alignment", "shift_corrected_matched"),
         ),
@@ -54,6 +83,7 @@ METRIC_SPECS = (
             "metrics.matched_notes",
             "metrics.matched_count",
             "metrics.matched_note_count",
+            "metrics.octave_normalized_matched_note_count",
             "alignment.best_octave_shift_matched_notes",
             "alignment.shift_corrected_matched",
         ),
@@ -66,6 +96,8 @@ METRIC_SPECS = (
     MetricSpec("big_gap_count", (("metrics", "big_gap_count"), ("continuity", "big_gap_count"), ("diagnostics", "continuity", "big_gap_count"))),
     MetricSpec("short_note_ratio", (("metrics", "short_note_ratio"), ("continuity", "short_note_ratio"), ("diagnostics", "continuity", "short_note_ratio"))),
     MetricSpec("large_jump_ratio", (("metrics", "large_jump_ratio"), ("continuity", "large_jump_ratio"), ("diagnostics", "continuity", "large_jump_ratio"))),
+    MetricSpec("local_large_jump_ratio", (("metrics", "local_large_jump_ratio"), ("continuity", "local_large_jump_ratio"), ("diagnostics", "continuity", "local_large_jump_ratio"))),
+    MetricSpec("cross_phrase_large_jump_ratio", (("metrics", "cross_phrase_large_jump_ratio"), ("continuity", "cross_phrase_large_jump_ratio"), ("diagnostics", "continuity", "cross_phrase_large_jump_ratio"))),
 )
 
 DIAGNOSTIC_METRIC_SPECS = (
@@ -73,6 +105,8 @@ DIAGNOSTIC_METRIC_SPECS = (
     MetricSpec("predicted_short_note_ratio", (("notes", "predicted_short_note_ratio"),)),
     MetricSpec("diagnostic_gap50_ratio", (("notes", "predicted_gap50_ratio"), ("continuity", "gap50_ratio"))),
     MetricSpec("diagnostic_large_jump_ratio", (("notes", "predicted_large_jump_ratio"), ("continuity", "large_jump_ratio"))),
+    MetricSpec("diagnostic_local_large_jump_ratio", (("notes", "predicted_local_large_jump_ratio"), ("continuity", "local_large_jump_ratio"))),
+    MetricSpec("diagnostic_cross_phrase_large_jump_ratio", (("notes", "predicted_cross_phrase_large_jump_ratio"), ("continuity", "cross_phrase_large_jump_ratio"))),
     MetricSpec(
         "fragmentation",
         (
@@ -164,20 +198,20 @@ def render_markdown_report(report: dict[str, Any]) -> str:
             continue
         lines.extend(
             [
-                "| Sample | Status | Delta Recall | Delta Matched | Delta Coverage | Delta Gap50 | Delta Short Notes | Delta Large Jumps | Delta First Delay | Notes |",
-                "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |",
+                "| Sample | Status | Delta Recall | Delta Oct Recall | Delta Matched | Delta Coverage | Delta Gap50 (lower better) | Delta Short Notes (lower better) | Delta Large Jumps (lower better) | Delta First Delay | Notes |",
+                "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |",
             ]
         )
         for item in items:
             deltas = item.get("deltas") if isinstance(item.get("deltas"), dict) else {}
-            reasons = item.get("manual_review_reasons") if isinstance(item.get("manual_review_reasons"), list) else []
-            notes = "; ".join(str(reason) for reason in reasons[:3]) or _diagnostic_change_note(item)
+            notes = _report_note(item)
             lines.append(
-                "| {sample} | {old} -> {new} | {recall} | {matched} | {coverage} | {gap50} | {short_notes} | {large_jumps} | {delay} | {notes} |".format(
+                "| {sample} | {old} -> {new} | {recall} | {oct_recall} | {matched} | {coverage} | {gap50} | {short_notes} | {large_jumps} | {delay} | {notes} |".format(
                     sample=_escape_md(str(item.get("sample_id", UNAVAILABLE))),
                     old=_escape_md(str(item.get("old_status", UNAVAILABLE))),
                     new=_escape_md(str(item.get("new_status", UNAVAILABLE))),
                     recall=_format_delta(deltas.get("recall")),
+                    oct_recall=_format_delta(deltas.get("octave_normalized_recall")),
                     matched=_format_delta(deltas.get("matched")),
                     coverage=_format_delta(deltas.get("coverage")),
                     gap50=_format_delta(deltas.get("gap50_ratio")),
@@ -251,6 +285,7 @@ def _compare_sample(sample_id: str, baseline: dict[str, Any], candidate: dict[st
         diagnostics_changed=diagnostics_changed,
         manual_review_reasons=manual_review_reasons,
     )
+    continuity_tradeoff = _build_continuity_tradeoff(metrics)
 
     return {
         "sample_id": sample_id,
@@ -267,6 +302,7 @@ def _compare_sample(sample_id: str, baseline: dict[str, Any], candidate: dict[st
             "pitch": {"old": old_pitch_flags, "new": new_pitch_flags},
             "rhythm": {"old": old_rhythm_flags, "new": new_rhythm_flags},
         },
+        "continuity_tradeoff": continuity_tradeoff,
         "diagnostics_changed": diagnostics_changed,
         "manual_review_reasons": manual_review_reasons,
         "debug_diagnostics": {
@@ -510,6 +546,87 @@ def _format_delta(value: Any) -> str:
     if number is None:
         return UNAVAILABLE
     return f"{number:+.4f}"
+
+
+def _build_continuity_tradeoff(metrics: dict[str, Any]) -> dict[str, Any]:
+    improved: list[dict[str, Any]] = []
+    regressed: list[dict[str, Any]] = []
+    for metric_name, label, category in TRADEOFF_IMPROVEMENT_METRICS:
+        metric = metrics.get(metric_name)
+        if not isinstance(metric, dict):
+            continue
+        signal = _metric_signal(metric_name, metric.get("delta"))
+        if signal != "improved":
+            continue
+        improved.append(_tradeoff_entry(metric_name, label, category, metric))
+    for metric_name, label, category in TRADEOFF_REGRESSION_METRICS:
+        metric = metrics.get(metric_name)
+        if not isinstance(metric, dict):
+            continue
+        signal = _metric_signal(metric_name, metric.get("delta"))
+        if signal != "regressed":
+            continue
+        regressed.append(_tradeoff_entry(metric_name, label, category, metric))
+    summary = _continuity_tradeoff_summary(improved, regressed)
+    return {
+        "mixed_result": bool(summary),
+        "improved": improved,
+        "regressed": regressed,
+        "summary": summary,
+    }
+
+
+def _tradeoff_entry(metric_name: str, label: str, category: str, metric: dict[str, Any]) -> dict[str, Any]:
+    old_payload = metric.get("old") if isinstance(metric.get("old"), dict) else {}
+    new_payload = metric.get("new") if isinstance(metric.get("new"), dict) else {}
+    return {
+        "metric": metric_name,
+        "label": label,
+        "category": category,
+        "delta": metric.get("delta"),
+        "old": old_payload.get("value", UNAVAILABLE),
+        "new": new_payload.get("value", UNAVAILABLE),
+    }
+
+
+def _metric_signal(metric_name: str, delta: Any) -> str | None:
+    number = _number_or_none(delta)
+    if number is None:
+        return None
+    threshold = TRADEOFF_SIGNAL_THRESHOLDS.get(metric_name, DEFAULT_SIGNAL_DELTA_THRESHOLD)
+    if abs(number) < threshold:
+        return None
+    if metric_name in LOWER_IS_BETTER_METRICS:
+        return "improved" if number < 0 else "regressed"
+    return "improved" if number > 0 else "regressed"
+
+
+def _continuity_tradeoff_summary(improved: list[dict[str, Any]], regressed: list[dict[str, Any]]) -> str:
+    if not improved or not regressed:
+        return ""
+    improved_labels = ", ".join(str(item.get("label")) for item in improved[:3])
+    regressed_labels = ", ".join(str(item.get("label")) for item in regressed[:3])
+    improved_extra = len(improved) - 3
+    regressed_extra = len(regressed) - 3
+    if improved_extra > 0:
+        improved_labels = f"{improved_labels}, +{improved_extra} more"
+    if regressed_extra > 0:
+        regressed_labels = f"{regressed_labels}, +{regressed_extra} more"
+    return f"mixed result: improved {improved_labels}; regressed {regressed_labels}"
+
+
+def _report_note(item: dict[str, Any]) -> str:
+    notes: list[str] = []
+    reasons = item.get("manual_review_reasons") if isinstance(item.get("manual_review_reasons"), list) else []
+    notes.extend(str(reason) for reason in reasons[:3])
+    tradeoff = item.get("continuity_tradeoff") if isinstance(item.get("continuity_tradeoff"), dict) else {}
+    tradeoff_summary = tradeoff.get("summary")
+    if isinstance(tradeoff_summary, str) and tradeoff_summary:
+        notes.append(tradeoff_summary)
+    diagnostic_note = _diagnostic_change_note(item)
+    if diagnostic_note:
+        notes.append(diagnostic_note)
+    return "; ".join(notes)
 
 
 def _diagnostic_change_note(item: dict[str, Any]) -> str:

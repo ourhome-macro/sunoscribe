@@ -7,6 +7,7 @@ from statistics import mean
 from typing import Any
 
 from .note_utils import midi_to_note, note_to_midi
+from .phrase_postprocessor import PhraseAwarePostprocessor, PhrasePostprocessConfig
 from .reason_codes import (
     LOW_CONFIDENCE,
     LOW_VOICED_RATIO,
@@ -27,11 +28,25 @@ class MelodySelectionConfig:
     vocal_min_midi: float = 48.0
     vocal_max_midi: float = 84.0
     overlap_window_sec: float = 0.02
+    phrase_postprocess_enabled: bool = True
+    phrase_max_gap_sec: float = 0.12
+    phrase_short_gap_sec: float = 0.08
+    phrase_same_pitch_tolerance_semitones: int = 1
+    phrase_short_note_sec: float = 0.18
+    phrase_short_note_neighbor_min_sec: float = 0.12
+    phrase_octave_jump_semitones: int = 9
+    phrase_octave_neighbor_tolerance_semitones: int = 2
+    phrase_median_window: int = 5
+    phrase_median_deviation_semitones: int = 2
+    phrase_median_max_adjust_semitones: int = 4
+    phrase_median_max_note_sec: float = 0.24
+    phrase_max_iterations: int = 2
 
 
 class RuleBasedMelodySelector:
     def __init__(self, config: MelodySelectionConfig | None = None) -> None:
         self.config = config or MelodySelectionConfig()
+        self.postprocessor = PhraseAwarePostprocessor(self._postprocess_config())
 
     def select(
         self,
@@ -54,22 +69,39 @@ class RuleBasedMelodySelector:
 
         selected, overlap_rejected = self._resolve_overlaps(selected)
         rejected.extend(overlap_rejected)
+        postprocess_result = self.postprocessor.process_dict_notes(selected)
+        selected = [self._selected_from_postprocessed(item) for item in postprocess_result.notes]
         selected.sort(key=lambda item: (item["start_time_sec"], item["end_time_sec"], item["pitch_center_midi"]))
         rejected.sort(key=lambda item: (item["start_time_sec"], item["end_time_sec"], str(item["candidate_id"])))
         reason_counts = Counter(reason for item in rejected for reason in item.get("reason_codes", []))
+        selected_reason_counts = Counter(reason for item in selected for reason in item.get("reason_codes", []))
         selected_conf = [float(item["confidence"]) for item in selected]
         rejected_conf = [float(item["confidence"]) for item in rejected]
+        postprocess_diagnostics = postprocess_result.diagnostics()
         return {
             "version": "selected_melody_v1",
             "selected_notes": selected,
             "rejected_candidates": rejected,
             "summary": {
                 "input_candidate_count": len(candidates),
+                "pre_postprocess_selected_count": postprocess_result.input_count,
                 "selected_count": len(selected),
                 "rejected_count": len(rejected),
                 "rejection_reason_counts": dict(sorted(reason_counts.items())),
+                "selected_reason_counts": dict(sorted(selected_reason_counts.items())),
+                "postprocess_action_counts": postprocess_diagnostics["action_counts"],
+                "postprocess_reason_code_counts": postprocess_diagnostics["reason_code_counts"],
                 "mean_selected_confidence": round(mean(selected_conf), 6) if selected_conf else 0.0,
                 "mean_rejected_confidence": round(mean(rejected_conf), 6) if rejected_conf else 0.0,
+            },
+            "postprocess": postprocess_diagnostics,
+            "config": {
+                "phrase_postprocess_enabled": self.config.phrase_postprocess_enabled,
+                "phrase_max_gap_sec": self.config.phrase_max_gap_sec,
+                "phrase_short_gap_sec": self.config.phrase_short_gap_sec,
+                "phrase_short_note_sec": self.config.phrase_short_note_sec,
+                "phrase_octave_jump_semitones": self.config.phrase_octave_jump_semitones,
+                "phrase_median_window": self.config.phrase_median_window,
             },
         }
 
@@ -99,6 +131,7 @@ class RuleBasedMelodySelector:
         if confidence is None:
             confidence = _safe_float(note.get("mean_confidence")) or 0.0
         source_contours = note.get("source_contours") or note.get("source_contour_ids") or []
+        source_candidate_ids = note.get("source_candidate_ids") or []
         return {
             "candidate_id": str(note.get("id") or note.get("candidate_id") or f"cand_{index:05d}"),
             "start_time_sec": float(start),
@@ -109,6 +142,8 @@ class RuleBasedMelodySelector:
             "voiced_ratio": _safe_float(note.get("voiced_ratio")),
             "stability": _safe_float(note.get("stability")),
             "source_contour_ids": [str(item) for item in source_contours] if isinstance(source_contours, list) else [],
+            "source_candidate_ids": [str(item) for item in source_candidate_ids] if isinstance(source_candidate_ids, list) else [],
+            "reason_codes": _unique([str(item) for item in note.get("reason_codes") or []]),
         }
 
     def _candidate_from_contour(self, contour: dict[str, Any], index: int) -> dict[str, Any]:
@@ -169,8 +204,42 @@ class RuleBasedMelodySelector:
             "pitch_center_midi": round(float(candidate["pitch_center_midi"]), 6) if candidate.get("pitch_center_midi") is not None else None,
             "confidence": round(float(candidate["confidence"]), 6),
             "source_contour_ids": list(candidate.get("source_contour_ids") or []),
-            "reason_codes": [],
+            "source_candidate_ids": list(candidate.get("source_candidate_ids") or []),
+            "reason_codes": list(candidate.get("reason_codes") or []),
         }
+
+    @staticmethod
+    def _selected_from_postprocessed(candidate: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "candidate_id": candidate["candidate_id"],
+            "start_time_sec": round(float(candidate["start_time_sec"]), 6),
+            "end_time_sec": round(float(candidate["end_time_sec"]), 6),
+            "duration_sec": round(max(0.0, float(candidate["end_time_sec"]) - float(candidate["start_time_sec"])), 6),
+            "pitch_center_midi": round(float(candidate["pitch_center_midi"]), 6) if candidate.get("pitch_center_midi") is not None else None,
+            "confidence": round(float(candidate["confidence"]), 6),
+            "source_contour_ids": list(candidate.get("source_contour_ids") or []),
+            "source_candidate_ids": list(candidate.get("source_candidate_ids") or []),
+            "reason_codes": list(candidate.get("reason_codes") or []),
+        }
+
+    def _postprocess_config(self) -> PhrasePostprocessConfig:
+        return PhrasePostprocessConfig(
+            enabled=bool(self.config.phrase_postprocess_enabled),
+            max_phrase_gap_sec=float(self.config.phrase_max_gap_sec),
+            short_gap_sec=float(self.config.phrase_short_gap_sec),
+            same_pitch_tolerance_semitones=int(self.config.phrase_same_pitch_tolerance_semitones),
+            short_note_sec=float(self.config.phrase_short_note_sec),
+            short_note_neighbor_min_sec=float(self.config.phrase_short_note_neighbor_min_sec),
+            octave_jump_semitones=int(self.config.phrase_octave_jump_semitones),
+            octave_neighbor_tolerance_semitones=int(self.config.phrase_octave_neighbor_tolerance_semitones),
+            median_window=int(self.config.phrase_median_window),
+            median_deviation_semitones=int(self.config.phrase_median_deviation_semitones),
+            median_max_adjust_semitones=int(self.config.phrase_median_max_adjust_semitones),
+            median_max_note_sec=float(self.config.phrase_median_max_note_sec),
+            vocal_min_midi=int(self.config.vocal_min_midi),
+            vocal_max_midi=int(self.config.vocal_max_midi),
+            max_iterations=int(self.config.phrase_max_iterations),
+        )
 
     @staticmethod
     def _rejected(candidate: dict[str, Any], reasons: list[str]) -> dict[str, Any]:
@@ -206,6 +275,7 @@ def selected_notes_to_pitch_notes(selected_melody: dict[str, Any] | None) -> lis
                 "end_time": item.get("end_time_sec"),
                 "confidence": item.get("confidence", 0.0),
                 "source_candidate_id": item.get("candidate_id"),
+                "source_candidate_ids": item.get("source_candidate_ids") or [],
                 "source_contours": item.get("source_contour_ids") or [],
                 "reason_codes": item.get("reason_codes") or [],
             }

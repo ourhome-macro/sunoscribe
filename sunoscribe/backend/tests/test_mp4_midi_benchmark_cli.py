@@ -224,6 +224,62 @@ class Mp4MidiBenchmarkCliTests(unittest.TestCase):
         self.assertAlmostEqual(coverage_check["threshold"], (169 / 408) * 0.85)
         self.assertEqual(payload["effective_thresholds"]["midi_coverage_ratio_min"], coverage_check["threshold"])
 
+
+    def test_quality_gate_uses_octave_normalized_pitch_match_metrics(self) -> None:
+        _, payload = _quality_gate_stage(
+            metrics_payload={
+                "produced_midi": "produced.mid",
+                "metrics": {
+                    "expected_note_count": 12,
+                    "predicted_note_count": 12,
+                    "note_recall": 0.0,
+                    "note_f1": 0.0,
+                    "matched_note_count": 0,
+                    "pitch_accuracy": 0.0,
+                    "octave_normalized_note_recall": 1.0,
+                    "octave_normalized_note_f1": 1.0,
+                    "octave_normalized_matched_note_count": 12,
+                    "octave_normalized_pitch_accuracy": 1.0,
+                },
+                "audibility": {"first_note_delay_sec": 0.0, "midi_coverage_ratio": 1.0},
+                "suspected_failure_modes": [],
+            }
+        )
+
+        self.assertEqual(payload["status"], "success")
+        recall_check = next(check for check in payload["checks"] if check["name"] == "note_recall")
+        matched_check = next(check for check in payload["checks"] if check["name"] == "matched_notes")
+        self.assertTrue(recall_check["passed"])
+        self.assertEqual(recall_check["actual"], 1.0)
+        self.assertEqual(recall_check["details"]["raw_value"], 0.0)
+        self.assertTrue(matched_check["passed"])
+        self.assertEqual(matched_check["actual"], 12)
+        self.assertEqual(matched_check["details"]["raw_value"], 0)
+
+    def test_quality_gate_keeps_timing_failures_despite_octave_normalized_pitch(self) -> None:
+        _, payload = _quality_gate_stage(
+            metrics_payload={
+                "produced_midi": "produced.mid",
+                "metrics": {
+                    "expected_note_count": 12,
+                    "predicted_note_count": 12,
+                    "note_recall": 0.0,
+                    "note_f1": 0.0,
+                    "matched_note_count": 0,
+                    "pitch_accuracy": 0.0,
+                    "octave_normalized_note_recall": 1.0,
+                    "octave_normalized_note_f1": 1.0,
+                    "octave_normalized_matched_note_count": 12,
+                    "octave_normalized_pitch_accuracy": 1.0,
+                },
+                "audibility": {"first_note_delay_sec": 30.0, "midi_coverage_ratio": 1.0},
+                "suspected_failure_modes": [],
+            }
+        )
+
+        self.assertEqual(payload["status"], "quality_failed")
+        self.assertEqual([check["name"] for check in payload["failed_checks"]], ["first_note_delay_sec"])
+
     def test_validate_writes_dataset_and_summary(self) -> None:
         with TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -414,7 +470,31 @@ class Mp4MidiBenchmarkCliTests(unittest.TestCase):
         self.assertEqual(payload["metrics"]["octave_shift_applied"], 12)
         self.assertEqual(payload["metrics"]["octave_shift_target"], "predicted")
         self.assertEqual(payload["metrics"]["note_recall"], 0.5)
+        self.assertEqual(payload["metrics"]["octave_normalized_note_recall"], 0.5)
+        self.assertEqual(payload["metrics"]["octave_normalized_matched_note_count"], 6)
         self.assertEqual(payload["diagnostics"]["octave_shift_applied"], 12)
+        self.assertEqual(payload["diagnostics"]["octave_normalized_note_recall"], 0.5)
+
+    def test_quality_gate_uses_octave_normalized_matched_notes_for_diagnostics(self) -> None:
+        _, payload = _quality_gate_stage(
+            metrics_payload={
+                "metrics": {
+                    "note_recall": 0.01,
+                    "octave_normalized_note_recall": 0.08,
+                    "matched_note_count": 1,
+                    "octave_normalized_matched_note_count": 12,
+                },
+                "audibility": {"first_note_delay_sec": 0.0, "midi_coverage_ratio": 0.5},
+                "continuity": {},
+            }
+        )
+
+        self.assertEqual(payload["status"], "success")
+        checks = {check["name"]: check for check in payload["checks"]}
+        self.assertEqual(checks["note_recall"]["actual"], 0.08)
+        self.assertEqual(checks["matched_notes"]["actual"], 12)
+        self.assertEqual(checks["matched_notes"]["details"]["raw_value"], 1)
+        self.assertEqual(checks["matched_notes"]["details"]["octave_normalized_value"], 12)
 
     def test_run_marks_quality_failed_with_exit_2_and_keeps_workspace(self) -> None:
         with TemporaryDirectory() as temp_dir:
@@ -445,6 +525,7 @@ class Mp4MidiBenchmarkCliTests(unittest.TestCase):
             summary = json.loads((run_root / "summary.json").read_text(encoding="utf-8"))
             summary_markdown = (run_root / "summary.md").read_text(encoding="utf-8")
             stage_status = json.loads((run_root / "song" / "stage_status.json").read_text(encoding="utf-8"))
+            metrics_payload = json.loads((run_root / "song" / "metrics.json").read_text(encoding="utf-8"))
             quality_gate = json.loads((run_root / "song" / "quality_gate.json").read_text(encoding="utf-8"))
             quality_diagnostics = json.loads((run_root / "quality_diagnostics.json").read_text(encoding="utf-8"))
             reference_review = json.loads((run_root / "reference_review.json").read_text(encoding="utf-8"))
@@ -460,6 +541,9 @@ class Mp4MidiBenchmarkCliTests(unittest.TestCase):
             self.assertIn("shift_corrected_coverage", summary["results"][0]["alignment"])
             self.assertIn("alignment_diagnosis", summary["results"][0]["alignment"])
             self.assertIn("Raw F1", summary_markdown)
+            self.assertIn("Gap50", summary_markdown)
+            self.assertIn("Short Notes", summary_markdown)
+            self.assertIn("Large Jumps", summary_markdown)
             self.assertIn("Shift Recall", summary_markdown)
             self.assertIn("Shift Diagnosis", summary_markdown)
             self.assertIn("reference_status", summary["results"][0])
@@ -472,6 +556,11 @@ class Mp4MidiBenchmarkCliTests(unittest.TestCase):
             self.assertTrue((run_root / "reference_review.md").exists())
             self.assertEqual(reference_review["samples"][0]["sample_id"], "song")
             self.assertEqual(quality_gate["status"], "quality_failed")
+            self.assertIn("continuity", metrics_payload)
+            self.assertIn("gap50_ratio", metrics_payload["continuity"])
+            self.assertIn("gap50_ratio", metrics_payload["diagnostics"]["continuity"])
+            self.assertIn("gap50_ratio", quality_gate["diagnostic_only"])
+            self.assertNotIn("gap50_ratio", [check["name"] for check in quality_gate["failed_checks"]])
             self.assertNotIn("reference_status", quality_gate)
             self.assertNotIn("reference_suspect_reasons", quality_gate)
             self.assertFalse((run_root / "song" / "error.json").exists())
@@ -625,6 +714,14 @@ class Mp4MidiBenchmarkCliTests(unittest.TestCase):
                         "midi_coverage_ratio": 0.36379859079787524,
                         "first_note_delay_sec": 31.54450561818182,
                     },
+                    "continuity": {
+                        "gap50_ratio": 0.8392857142857143,
+                        "big_gap_count": 51,
+                        "short_note_ratio": 0.21301775147928995,
+                        "large_jump_ratio": 0.13095238095238096,
+                        "median_pitch": 62.0,
+                        "pitch_range": [50, 74],
+                    },
                     "alignment": {},
                     "suspected_failure_modes": [],
                 },
@@ -651,8 +748,17 @@ class Mp4MidiBenchmarkCliTests(unittest.TestCase):
 
             self.assertEqual(metrics["midi_coverage_ratio"], 0.36379859079787524)
             self.assertEqual(metrics["first_note_delay_sec"], 31.54450561818182)
+            self.assertEqual(metrics["gap50_ratio"], 0.8392857142857143)
+            self.assertEqual(metrics["big_gap_count"], 51)
+            self.assertEqual(metrics["short_note_ratio"], 0.21301775147928995)
+            self.assertEqual(metrics["large_jump_ratio"], 0.13095238095238096)
+            self.assertEqual(metrics["median_pitch"], 62.0)
+            self.assertEqual(metrics["pitch_range"], [50, 74])
             self.assertIn("0.3638", markdown)
             self.assertIn("31.5445", markdown)
+            self.assertIn("0.8393", markdown)
+            self.assertIn("0.2130", markdown)
+            self.assertIn("0.1310", markdown)
 
 
 if __name__ == "__main__":

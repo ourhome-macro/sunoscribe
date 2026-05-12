@@ -250,7 +250,7 @@ class QuantizedNotesArtifactBuilder:
             duration_error_beats = None
             duration_error_sec = 0.0
 
-        reason_codes: list[str] = []
+        reason_codes: list[str] = list(note.get("reason_codes") or [])
         if fallback_reason:
             reason_codes.extend([DP_FALLBACK, fallback_reason])
         if quantize_error_sec > self.config.high_error_sec:
@@ -411,7 +411,7 @@ class QuantizedNotesArtifactBuilder:
         duration_tick = max(1, int(round(candidate.duration_beats * self.config.ppqn)))
         measure_index = int(candidate.start_beat // 4) if candidate.start_beat >= 0 else None
         beat_in_measure = (candidate.start_beat % 4.0) + 1.0 if candidate.start_beat >= 0 else None
-        reason_codes: list[str] = []
+        reason_codes: list[str] = list(raw_note.source_note.get("reason_codes") or [])
         if candidate.onset_error_sec > self.config.high_error_sec:
             reason_codes.append(HIGH_QUANTIZE_ERROR)
         if candidate.duration_beats < self.config.min_duration_beats:

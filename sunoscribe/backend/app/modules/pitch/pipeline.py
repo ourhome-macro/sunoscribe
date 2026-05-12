@@ -150,6 +150,7 @@ class PitchPipeline:
                         "beat_position": round(float(beat_position), 3),
                         "lyric": note.lyric,
                         "confidence": note.confidence,
+                        "reason_codes": list(getattr(note, "reason_codes", []) or []),
                     }
                 )
 
@@ -806,6 +807,9 @@ class PitchPipeline:
                 "melody_selector_removed_conflict": melody_selection.removed_conflict,
                 "melody_selector_removed_big_leap": melody_selection.removed_big_leap,
                 "melody_selector_merged": melody_selection.merged_count,
+                "melody_postprocess_action_counts": dict(melody_selection.postprocess_action_counts or {}),
+                "melody_postprocess_reason_code_counts": dict(melody_selection.postprocess_reason_code_counts or {}),
+                "melody_postprocess_actions": list(melody_selection.postprocess_actions or [])[:200],
                 "raw_notes_semantics": "detected_candidates",
                 "lead_notes_semantics": "selected_lead_melody",
                 "lead_selection_authoritative": True,

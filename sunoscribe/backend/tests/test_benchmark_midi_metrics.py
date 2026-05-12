@@ -6,6 +6,7 @@ import unittest
 
 from app.modules.benchmark.midi_metrics import (
     MidiMetricConfig,
+    compute_midi_continuity_metrics,
     compute_midi_metrics,
     read_midi_notes,
     read_midi_track_info,
@@ -79,6 +80,85 @@ class BenchmarkMidiMetricsTests(unittest.TestCase):
         self.assertEqual(metrics.matched_note_count, 3)
         self.assertAlmostEqual(metrics.note_recall, 1.0)
         self.assertAlmostEqual(metrics.pitch_accuracy, 1.0)
+        self.assertEqual(metrics.octave_normalized_matched_note_count, 3)
+        self.assertAlmostEqual(metrics.octave_normalized_note_recall, 1.0)
+        self.assertAlmostEqual(metrics.octave_normalized_pitch_accuracy, 1.0)
+
+
+    def test_octave_equivalent_metrics_preserve_input_notes_and_report_pitch_equivalence(self) -> None:
+        expected = [
+            _note(0.0, 0.5, 72),
+            _note(1.0, 1.5, 74),
+            _note(2.0, 2.5, 76),
+        ]
+        predicted = [
+            _note(0.0, 0.5, 60),
+            _note(1.0, 1.5, 62),
+            _note(2.0, 2.5, 64),
+        ]
+
+        metrics = compute_midi_metrics(expected, predicted, config=MidiMetricConfig(onset_tolerance_sec=0.12))
+
+        self.assertEqual(metrics.matched_note_count, 3)
+        self.assertEqual(metrics.note_recall, 1.0)
+        self.assertEqual(metrics.pitch_accuracy, 1.0)
+        self.assertEqual(metrics.octave_normalized_matched_note_count, 3)
+        self.assertEqual(metrics.octave_normalized_note_recall, 1.0)
+        self.assertEqual(metrics.octave_normalized_note_f1, 1.0)
+        self.assertEqual(metrics.octave_normalized_pitch_accuracy, 1.0)
+        self.assertEqual([note.pitch for note in predicted], [60, 62, 64])
+
+    def test_octave_equivalent_metrics_do_not_rescue_timing_mismatch(self) -> None:
+        expected = [_note(float(index), float(index) + 0.5, 72) for index in range(3)]
+        predicted = [_note(float(index) + 5.0, float(index) + 5.5, 60) for index in range(3)]
+
+        metrics = compute_midi_metrics(expected, predicted, config=MidiMetricConfig(onset_tolerance_sec=0.12))
+
+        self.assertEqual(metrics.matched_note_count, 0)
+        self.assertEqual(metrics.octave_normalized_matched_note_count, 0)
+        self.assertEqual(metrics.octave_normalized_note_recall, 0.0)
+
+    def test_compute_continuity_metrics_tracks_gaps_short_notes_and_jumps(self) -> None:
+        notes = [
+            _note(0.0, 0.10, 60),
+            _note(0.20, 0.70, 67),
+            _note(1.30, 1.45, 55),
+        ]
+
+        metrics = compute_midi_continuity_metrics(notes)
+
+        self.assertEqual(metrics.note_count, 3)
+        self.assertEqual(metrics.gap50_count, 2)
+        self.assertAlmostEqual(metrics.gap50_ratio, 1.0)
+        self.assertEqual(metrics.big_gap_count, 1)
+        self.assertEqual(metrics.short_note_count, 2)
+        self.assertAlmostEqual(metrics.short_note_ratio, 2 / 3)
+        self.assertEqual(metrics.large_jump_count, 2)
+        self.assertAlmostEqual(metrics.large_jump_ratio, 1.0)
+        self.assertEqual(metrics.local_adjacent_pair_count, 1)
+        self.assertEqual(metrics.local_large_jump_count, 1)
+        self.assertAlmostEqual(metrics.local_large_jump_ratio, 1.0)
+        self.assertEqual(metrics.cross_phrase_adjacent_pair_count, 1)
+        self.assertEqual(metrics.cross_phrase_large_jump_count, 1)
+        self.assertAlmostEqual(metrics.cross_phrase_large_jump_ratio, 1.0)
+        self.assertEqual(metrics.max_abs_pitch_jump_semitones, 12)
+        self.assertEqual(metrics.pitch_range, [55, 67])
+
+    def test_compute_continuity_metrics_splits_phrase_local_and_cross_phrase_jumps(self) -> None:
+        notes = [
+            _note(0.0, 0.30, 60),
+            _note(0.36, 0.66, 72),
+            _note(1.40, 1.70, 55),
+        ]
+
+        metrics = compute_midi_continuity_metrics(notes, phrase_gap_threshold_sec=0.12)
+
+        self.assertEqual(metrics.large_jump_count, 2)
+        self.assertEqual(metrics.local_adjacent_pair_count, 1)
+        self.assertEqual(metrics.local_large_jump_count, 1)
+        self.assertEqual(metrics.cross_phrase_adjacent_pair_count, 1)
+        self.assertEqual(metrics.cross_phrase_large_jump_count, 1)
+
 
 
 def _note(start: float, end: float, pitch: int):

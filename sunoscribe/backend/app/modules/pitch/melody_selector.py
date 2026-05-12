@@ -5,6 +5,8 @@ from typing import List
 
 from .config import PitchDetectionConfig
 from .note_utils import midi_to_note, note_to_midi
+from .phrase_postprocessor import PhraseAwarePostprocessor, PhrasePostprocessConfig
+from .reason_codes import SHORT_GAP_BRIDGED
 from .types import Note
 
 
@@ -19,6 +21,9 @@ class MelodySelectionResult:
     removed_conflict: int = 0
     removed_big_leap: int = 0
     merged_count: int = 0
+    postprocess_action_counts: dict[str, int] | None = None
+    postprocess_reason_code_counts: dict[str, int] | None = None
+    postprocess_actions: list[dict[str, object]] | None = None
 
 
 class MelodySelector:
@@ -26,6 +31,7 @@ class MelodySelector:
 
     def __init__(self, config: PitchDetectionConfig | None = None) -> None:
         self.config = config or PitchDetectionConfig()
+        self.postprocessor = PhraseAwarePostprocessor(self._postprocess_config())
 
     def select(self, notes: List[Note]) -> MelodySelectionResult:
         if not notes:
@@ -79,15 +85,24 @@ class MelodySelector:
                     start_time=float(note.start_time),
                     end_time=float(note.end_time),
                     confidence=confidence,
+                    reason_codes=list(getattr(note, "reason_codes", []) or []),
                 )
             )
 
         merged_notes, merged_count_a = self._merge_adjacent(prepared)
-        repaired_notes = self._repair_phrase_notes(merged_notes)
-        resolved_notes, removed_conflict = self._resolve_conflicts(repaired_notes)
+        postprocessed_notes, postprocess_result = self.postprocessor.process_notes(merged_notes)
+        resolved_notes, removed_conflict = self._resolve_conflicts(postprocessed_notes)
         cleaned_notes, removed_big_leap = self._remove_isolated_big_leaps(resolved_notes)
         final_notes, merged_count_b = self._merge_adjacent(cleaned_notes)
-        final_notes = self._drop_remaining_short_notes(final_notes)
+        final_notes, bridge_retention_actions = self._drop_remaining_short_notes(final_notes)
+
+        action_counts = dict(postprocess_result.action_counts)
+        reason_counts = dict(postprocess_result.reason_counts)
+        if bridge_retention_actions:
+            action_counts["bridge_note_retention"] = action_counts.get("bridge_note_retention", 0) + len(bridge_retention_actions)
+            reason_counts[SHORT_GAP_BRIDGED] = reason_counts.get(SHORT_GAP_BRIDGED, 0) + len(bridge_retention_actions)
+        postprocess_actions = [action.to_dict() for action in postprocess_result.actions] + bridge_retention_actions
+        legacy_big_leap_repairs = int(action_counts.get("octave_jump_correction", 0))
 
         return MelodySelectionResult(
             notes=final_notes,
@@ -97,8 +112,31 @@ class MelodySelector:
             removed_low_confidence=removed_low_confidence,
             removed_short=removed_short,
             removed_conflict=removed_conflict,
-            removed_big_leap=removed_big_leap,
+            removed_big_leap=removed_big_leap + legacy_big_leap_repairs,
             merged_count=merged_count_a + merged_count_b,
+            postprocess_action_counts=action_counts,
+            postprocess_reason_code_counts=reason_counts,
+            postprocess_actions=postprocess_actions,
+        )
+
+    def _postprocess_config(self) -> PhrasePostprocessConfig:
+        return PhrasePostprocessConfig(
+            enabled=True,
+            max_phrase_gap_sec=max(float(self.config.melody_merge_gap_sec), 0.12),
+            short_gap_sec=float(self.config.melody_merge_gap_sec),
+            same_pitch_tolerance_semitones=int(self.config.melody_merge_pitch_tolerance_semitones),
+            short_note_sec=float(self.config.melody_short_note_sec),
+            short_note_neighbor_min_sec=float(self.config.melody_min_duration_sec),
+            octave_jump_semitones=max(7, int(self.config.melody_large_jump_semitones) - 3),
+            octave_neighbor_tolerance_semitones=max(1, int(self.config.melody_merge_pitch_tolerance_semitones) + 1),
+            median_window=5,
+            median_deviation_semitones=2,
+            median_max_adjust_semitones=4,
+            median_max_note_sec=max(float(self.config.melody_short_note_sec), float(self.config.melody_isolated_note_max_duration_sec)),
+            min_confidence_for_mutation=0.0,
+            vocal_min_midi=int(self.config.melody_pitch_min_midi),
+            vocal_max_midi=int(self.config.melody_pitch_max_midi),
+            max_iterations=2,
         )
 
     def _repair_phrase_notes(self, notes: List[Note]) -> list[Note]:
@@ -138,6 +176,11 @@ class MelodySelector:
                     start_time=float(current.start_time),
                     end_time=max(float(current.end_time), float(nxt.end_time)),
                     confidence=max(float(current.confidence), float(nxt.confidence)),
+                    reason_codes=self._unique_reason_codes(
+                        list(getattr(current, "reason_codes", []) or [])
+                        + list(getattr(nxt, "reason_codes", []) or [])
+                        + [SHORT_GAP_BRIDGED]
+                    ),
                 )
                 continue
 
@@ -223,7 +266,7 @@ class MelodySelector:
                 and leap_next >= leap_limit
                 and (duration <= max_duration or confidence < min_conf)
             )
-            if is_isolated:
+            if is_isolated and not self._should_retain_bridge_note(prev_note, cur_note, next_note):
                 removed += 1
                 continue
             kept.append(cur_note)
@@ -304,13 +347,72 @@ class MelodySelector:
                 start_time=float(cur_note.start_time),
                 end_time=float(cur_note.end_time),
                 confidence=cur_confidence,
+                reason_codes=list(getattr(cur_note, "reason_codes", []) or []),
             )
 
         return repaired
 
-    def _drop_remaining_short_notes(self, notes: List[Note]) -> list[Note]:
+    def _drop_remaining_short_notes(self, notes: List[Note]) -> tuple[list[Note], list[dict[str, object]]]:
+        if not notes:
+            return [], []
         min_duration = float(self.config.melody_min_duration_sec)
-        return [note for note in notes if self._duration_sec(note) >= min_duration]
+        sorted_notes = sorted(notes, key=lambda note: (float(note.start_time), float(note.end_time), str(note.pitch)))
+        retained: list[Note] = []
+        actions: list[dict[str, object]] = []
+        for idx, note in enumerate(sorted_notes):
+            if self._duration_sec(note) >= min_duration:
+                retained.append(note)
+                continue
+            prev_note = sorted_notes[idx - 1] if idx > 0 else None
+            next_note = sorted_notes[idx + 1] if idx + 1 < len(sorted_notes) else None
+            if self._should_retain_bridge_note(prev_note, note, next_note):
+                retained_note = Note(
+                    pitch=str(note.pitch),
+                    start_time=float(note.start_time),
+                    end_time=float(note.end_time),
+                    confidence=float(note.confidence),
+                    reason_codes=self._unique_reason_codes(list(getattr(note, "reason_codes", []) or []) + [SHORT_GAP_BRIDGED]),
+                )
+                retained.append(retained_note)
+                actions.append(
+                    {
+                        "action": "bridge_note_retention",
+                        "reason_code": SHORT_GAP_BRIDGED,
+                        "note_ids": [],
+                        "output_note_id": None,
+                        "start_time_sec": round(float(note.start_time), 6),
+                        "end_time_sec": round(float(note.end_time), 6),
+                        "pitch_before_midi": self._to_midi(note.pitch),
+                        "pitch_after_midi": self._to_midi(note.pitch),
+                        "details": {
+                            "duration_sec": round(self._duration_sec(note), 6),
+                            "prev_gap_sec": round(float(note.start_time) - float(prev_note.end_time), 6) if prev_note else None,
+                            "next_gap_sec": round(float(next_note.start_time) - float(note.end_time), 6) if next_note else None,
+                            "collapsed_gap_sec": round(float(next_note.start_time) - float(prev_note.end_time), 6) if prev_note and next_note else None,
+                        },
+                    }
+                )
+        return retained, actions
+
+    def _should_retain_bridge_note(self, prev_note: Note | None, cur_note: Note, next_note: Note | None) -> bool:
+        if not bool(self.config.melody_bridge_note_retention_enabled):
+            return False
+        if prev_note is None or next_note is None:
+            return False
+        if float(cur_note.confidence) < float(self.config.melody_min_confidence):
+            return False
+        prev_gap = float(cur_note.start_time) - float(prev_note.end_time)
+        next_gap = float(next_note.start_time) - float(cur_note.end_time)
+        collapsed_gap = float(next_note.start_time) - float(prev_note.end_time)
+        if prev_gap < 0.0 or next_gap < 0.0 or collapsed_gap <= 0.0:
+            return False
+        big_gap = max(0.0, float(self.config.melody_bridge_note_gap_threshold_sec))
+        small_gap = max(0.0, float(self.config.melody_bridge_note_small_gap_sec))
+        if collapsed_gap > big_gap and (prev_gap <= big_gap or next_gap <= big_gap):
+            return True
+        if collapsed_gap > small_gap and (prev_gap <= small_gap or next_gap <= small_gap):
+            return True
+        return False
 
     def _smooth_phrase_outliers(self, notes: List[Note]) -> list[Note]:
         if len(notes) <= 2:
@@ -362,6 +464,7 @@ class MelodySelector:
                 start_time=float(cur_note.start_time),
                 end_time=float(cur_note.end_time),
                 confidence=cur_confidence,
+                reason_codes=list(getattr(cur_note, "reason_codes", []) or []),
             )
 
         return repaired
@@ -409,6 +512,11 @@ class MelodySelector:
                     start_time=float(prev_note.start_time),
                     end_time=max(float(prev_note.end_time), float(next_note.end_time)),
                     confidence=max(float(prev_note.confidence), cur_confidence, float(next_note.confidence)),
+                    reason_codes=self._unique_reason_codes(
+                        list(getattr(prev_note, "reason_codes", []) or [])
+                        + list(getattr(cur_note, "reason_codes", []) or [])
+                        + list(getattr(next_note, "reason_codes", []) or [])
+                    ),
                 )
                 idx += 2
                 continue
@@ -428,6 +536,7 @@ class MelodySelector:
             start_time=float(note.start_time),
             end_time=float(note.end_time),
             confidence=float(note.confidence),
+            reason_codes=list(getattr(note, "reason_codes", []) or []),
         )
 
     @staticmethod
@@ -453,6 +562,17 @@ class MelodySelector:
         prev_score = (float(prev_note.confidence), prev_duration)
         next_score = (float(next_note.confidence), next_duration)
         return prev_midi if prev_score >= next_score else next_midi
+
+    @staticmethod
+    def _unique_reason_codes(values: list[str]) -> list[str]:
+        seen: set[str] = set()
+        result: list[str] = []
+        for value in values:
+            text = str(value or "").strip()
+            if text and text not in seen:
+                seen.add(text)
+                result.append(text)
+        return result
 
     @staticmethod
     def _to_midi(pitch: str) -> int | None:
