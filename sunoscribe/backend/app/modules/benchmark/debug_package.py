@@ -1808,6 +1808,7 @@ def _derive_selected_melody_diagnostics(selected_melody_path: Path | None) -> di
     postprocess = payload.get("postprocess") if isinstance(payload.get("postprocess"), dict) else {}
     postprocess_payload = {
         "available": bool(postprocess),
+        "enabled": postprocess.get("enabled") if "enabled" in postprocess else bool(postprocess),
         "input_note_count": postprocess.get("input_note_count", summary.get("pre_postprocess_selected_count")),
         "output_note_count": postprocess.get("output_note_count", summary.get("selected_count")),
         "iteration_count": postprocess.get("iteration_count"),
@@ -2625,11 +2626,14 @@ def _selected_melody_postprocess_payload(selected_melody_path: Path | None) -> d
     postprocess = payload.get("postprocess") if isinstance(payload.get("postprocess"), dict) else {}
     return {
         "available": bool(postprocess),
+        "enabled": postprocess.get("enabled") if "enabled" in postprocess else bool(postprocess),
         "input_note_count": postprocess.get("input_note_count", summary.get("pre_postprocess_selected_count")),
         "output_note_count": postprocess.get("output_note_count", summary.get("selected_count")),
+        "iteration_count": postprocess.get("iteration_count"),
         "action_count": postprocess.get("action_count", 0),
         "action_counts": postprocess.get("action_counts") if isinstance(postprocess.get("action_counts"), dict) else summary.get("postprocess_action_counts", {}),
         "reason_code_counts": postprocess.get("reason_code_counts") if isinstance(postprocess.get("reason_code_counts"), dict) else summary.get("postprocess_reason_code_counts", {}),
+        "actions": postprocess.get("actions") if isinstance(postprocess.get("actions"), list) else [],
         "actions_preview": (postprocess.get("actions") if isinstance(postprocess.get("actions"), list) else [])[:20],
     }
 

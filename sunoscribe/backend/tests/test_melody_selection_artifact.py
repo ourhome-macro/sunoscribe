@@ -2,7 +2,7 @@
 
 import unittest
 
-from app.modules.pitch.melody_selection_artifact import RuleBasedMelodySelector
+from app.modules.pitch.melody_selection_artifact import MelodySelectionConfig, RuleBasedMelodySelector
 from app.modules.pitch.reason_codes import (
     LOW_CONFIDENCE,
     OCTAVE_JUMP_CORRECTED,
@@ -69,7 +69,53 @@ class TestRuleBasedMelodySelector(unittest.TestCase):
         self.assertAlmostEqual(note["start_time_sec"], 0.0, places=3)
         self.assertAlmostEqual(note["end_time_sec"], 0.7, places=3)
         self.assertIn(SHORT_GAP_BRIDGED, note["reason_codes"])
+        self.assertEqual(result["postprocess"]["enabled"], True)
+        self.assertEqual(result["postprocess"]["input_note_count"], 2)
+        self.assertEqual(result["postprocess"]["output_note_count"], 1)
         self.assertEqual(result["postprocess"]["action_counts"]["short_gap_bridge"], 1)
+        action = result["postprocess"]["actions"][0]
+        self.assertEqual(action["action"], "short_gap_bridge")
+        self.assertEqual(action["reason_code"], SHORT_GAP_BRIDGED)
+        self.assertEqual(action["note_ids"], ["a", "b"])
+        self.assertEqual(action["output_note_id"], "a+b")
+        self.assertEqual(action["details"]["mode"], "merge_no_insert")
+
+    def test_phrase_postprocess_disabled_keeps_candidates_and_reports_disabled(self) -> None:
+        result = RuleBasedMelodySelector(
+            MelodySelectionConfig(phrase_postprocess_enabled=False)
+        ).select(
+            note_candidates={
+                "melody_candidates": {
+                    "notes": [
+                        {"id": "a", "start_time": 0.0, "end_time": 0.30, "pitch": "C4", "confidence": 0.9},
+                        {"id": "b", "start_time": 0.35, "end_time": 0.70, "pitch": "C4", "confidence": 0.88},
+                    ]
+                }
+            }
+        )
+
+        self.assertEqual(result["summary"]["selected_count"], 2)
+        self.assertEqual(result["postprocess"]["enabled"], False)
+        self.assertEqual(result["postprocess"]["input_note_count"], 2)
+        self.assertEqual(result["postprocess"]["output_note_count"], 2)
+        self.assertEqual(result["postprocess"]["action_count"], 0)
+
+    def test_phrase_postprocess_does_not_insert_bridge_note_between_distant_pitches(self) -> None:
+        result = RuleBasedMelodySelector().select(
+            note_candidates={
+                "melody_candidates": {
+                    "notes": [
+                        {"id": "a", "start_time": 0.0, "end_time": 0.30, "pitch": "C4", "confidence": 0.9},
+                        {"id": "b", "start_time": 0.35, "end_time": 0.70, "pitch": "E4", "confidence": 0.9},
+                    ]
+                }
+            }
+        )
+
+        self.assertEqual(result["summary"]["selected_count"], 2)
+        self.assertEqual([note["candidate_id"] for note in result["selected_notes"]], ["a", "b"])
+        self.assertEqual(result["postprocess"]["output_note_count"], result["postprocess"]["input_note_count"])
+        self.assertNotIn(SHORT_GAP_BRIDGED, result["summary"].get("selected_reason_counts", {}))
 
     def test_phrase_postprocess_absorbs_short_note_and_corrects_octave(self) -> None:
         result = RuleBasedMelodySelector().select(
@@ -90,6 +136,13 @@ class TestRuleBasedMelodySelector(unittest.TestCase):
         self.assertIn(SHORT_NOTE_ABSORBED, note["reason_codes"])
         self.assertIn(OCTAVE_JUMP_CORRECTED, result["postprocess"]["reason_code_counts"])
         self.assertEqual(result["postprocess"]["action_counts"]["short_note_absorb"], 1)
+        absorb_action = [
+            action for action in result["postprocess"]["actions"] if action["action"] == "short_note_absorb"
+        ][0]
+        self.assertEqual(absorb_action["reason_code"], SHORT_NOTE_ABSORBED)
+        self.assertEqual(absorb_action["details"]["mode"], "merge_short_center_note")
+        self.assertIn("pitch_outlier", absorb_action["details"])
+        self.assertGreater(absorb_action["details"]["neighbor_confidence_max"], absorb_action["details"]["confidence_before"])
 
     def test_phrase_postprocess_median_smooths_inner_outlier(self) -> None:
         result = RuleBasedMelodySelector().select(

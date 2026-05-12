@@ -17,6 +17,8 @@ export function DiagnosticsPage() {
   const shortNoteRisk = (data?.short_notes.too_short_count ?? 0) + (data?.short_notes.suspected_vibrato_count ?? 0)
   const continuity = data?.continuity
   const referenceAlignment = data?.reference_alignment
+  const selectedMelody = data?.selected_melody
+  const postprocess = selectedMelody?.postprocess
   const gapRisk = (continuity?.gap50_ratio ?? 0) > 0.8 || (continuity?.big_gap_count ?? 0) > 40
   const localJumpRisk = (continuity?.local_large_jump_ratio ?? 0) > 0.08
   const referenceSuspect = Boolean(referenceAlignment?.reference_suspect)
@@ -130,6 +132,50 @@ export function DiagnosticsPage() {
           </CardContent>
         </Card>
 
+
+        <Card className="xl:col-span-2">
+          <CardHeader>
+            <div className="flex items-center justify-between gap-3">
+              <CardTitle>Phrase-aware postprocess</CardTitle>
+              <StatusBadge status={postprocess?.enabled ? 'success' : 'partial'} />
+            </div>
+            <CardDescription>Readonly NoteCandidateSet cleanup evidence. These actions explain merged gaps, absorbed fragments, and local pitch repairs before ScoreRevision export.</CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            <div className="grid gap-3 md:grid-cols-4">
+              <Metric label="Enabled" value={postprocess?.enabled ? 'yes' : 'no'} />
+              <Metric label="Input -> output" value={formatInputOutput(postprocess?.input_note_count, postprocess?.output_note_count)} />
+              <Metric label="Iterations" value={postprocess?.iteration_count ?? '?'} />
+              <Metric label="Actions" value={postprocess?.action_count ?? '?'} />
+            </div>
+            <div className="grid gap-3 md:grid-cols-2">
+              <ReasonList title="Action counts" values={postprocess?.action_counts} formatter={formatPostprocessLabel} />
+              <ReasonList title="Reason code counts" values={postprocess?.reason_code_counts} formatter={formatPostprocessLabel} />
+            </div>
+            <div>
+              <div className="mb-2 text-xs text-muted-foreground">Recent actions</div>
+              <div className="grid gap-2">
+                {(postprocess?.actions.length ? postprocess.actions.slice(0, 3) : []).map((action, index) => (
+                  <div key={`${action.action}-${index}`} className="rounded-lg border bg-muted/30 p-3 text-sm">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <Badge variant="secondary">{formatPostprocessLabel(action.action)}</Badge>
+                      <Badge variant="warning">{formatPostprocessLabel(action.reason_code)}</Badge>
+                      <span className="font-mono text-xs text-muted-foreground">{`${formatSeconds(action.start_time_sec)} -> ${formatSeconds(action.end_time_sec)}`}</span>
+                    </div>
+                    <div className="mt-2 grid gap-2 md:grid-cols-3">
+                      <Metric label="Note ids" value={action.note_ids.length ? action.note_ids.join(', ') : '?'} />
+                      <Metric label="Output note" value={action.output_note_id ?? '?'} />
+                      <Metric label="Pitch before -> after" value={formatPitchChange(action.pitch_before_midi, action.pitch_after_midi)} />
+                    </div>
+                    <p className="mt-2 break-all font-mono text-xs text-muted-foreground">{formatDetails(action.details)}</p>
+                  </div>
+                ))}
+                {!postprocess?.actions.length ? <p className="text-sm text-muted-foreground">No postprocess actions are recorded.</p> : null}
+              </div>
+            </div>
+          </CardContent>
+        </Card>
+
         <Card className="xl:col-span-2">
           <CardHeader>
             <CardTitle>Failure reason</CardTitle>
@@ -194,12 +240,41 @@ function formatSemitones(value: number | null | undefined) {
 
 function formatCountRatio(count: number | null | undefined, total: number | null | undefined, ratio: number | null | undefined) {
   if (count === null || count === undefined || total === null || total === undefined) return '?'
-  return `${count}/${total} ? ${formatPercent(ratio)}`
+  return `${count}/${total} (${formatPercent(ratio)})`
 }
 
 function formatPitchRange(range: [number | null, number | null] | null | undefined) {
   if (!range || range[0] === null || range[1] === null) return '?'
-  return `${range[0]}?${range[1]}`
+  return `${range[0]} -> ${range[1]}`
+}
+
+function formatInputOutput(input: number | null | undefined, output: number | null | undefined) {
+  if (input === null || input === undefined || output === null || output === undefined) return '?'
+  return `${input} -> ${output}`
+}
+
+function formatPitchChange(before: number | null | undefined, after: number | null | undefined) {
+  if (before === null || before === undefined || after === null || after === undefined) return '?'
+  return `${before.toFixed(0)} -> ${after.toFixed(0)}`
+}
+
+function formatDetails(details: Record<string, unknown> | null | undefined) {
+  if (!details || Object.keys(details).length === 0) return 'details: {}'
+  return `details: ${JSON.stringify(details)}`
+}
+
+function ReasonList({ title, values, formatter }: { title: string; values: Record<string, number> | undefined; formatter: (value: string) => string }) {
+  const entries = Object.entries(values ?? {})
+  return (
+    <div className="rounded-lg border bg-muted/30 p-3">
+      <div className="mb-2 text-xs text-muted-foreground">{title}</div>
+      <div className="flex flex-wrap gap-2">
+        {entries.length ? entries.map(([key, value]) => (
+          <Badge key={key} variant="secondary">{formatter(key)}: {value}</Badge>
+        )) : <Badge variant="secondary">none</Badge>}
+      </div>
+    </div>
+  )
 }
 
 const diagnosticReasonLabels: Record<string, string> = {
@@ -213,6 +288,21 @@ const diagnosticReasonLabels: Record<string, string> = {
   dtw_sequence_alignment_suspect: 'DTW sequence alignment suspect',
   possible_wrong_reference_track_or_pitch_source: 'possible wrong reference track/pitch source',
   none: 'none',
+}
+
+const postprocessReasonLabels: Record<string, string> = {
+  short_gap_bridge: 'short gap bridge',
+  short_note_absorb: 'short note absorb',
+  octave_jump_correction: 'octave jump correction',
+  median_smoothing: 'median smoothing',
+  short_gap_bridged: 'short gap bridged',
+  short_note_absorbed: 'short note absorbed',
+  octave_jump_corrected: 'octave jump corrected',
+  phrase_median_smoothed: 'phrase median smoothed',
+}
+
+function formatPostprocessLabel(value: string) {
+  return postprocessReasonLabels[value] ?? value
 }
 
 function formatDiagnosticReason(reason: string) {

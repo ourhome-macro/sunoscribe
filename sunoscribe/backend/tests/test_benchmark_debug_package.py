@@ -1072,12 +1072,26 @@ class BenchmarkDebugPackageTests(unittest.TestCase):
                             "postprocess_reason_code_counts": {"short_gap_bridged": 1},
                         },
                         "postprocess": {
+                            "enabled": True,
                             "input_note_count": 2,
                             "output_note_count": 1,
+                            "iteration_count": 1,
                             "action_count": 1,
                             "action_counts": {"short_gap_bridge": 1},
                             "reason_code_counts": {"short_gap_bridged": 1},
-                            "actions": [{"action": "short_gap_bridge", "reason_code": "short_gap_bridged"}],
+                            "actions": [
+                                {
+                                    "action": "short_gap_bridge",
+                                    "reason_code": "short_gap_bridged",
+                                    "note_ids": ["a", "b"],
+                                    "output_note_id": "a+b",
+                                    "start_time_sec": 0.0,
+                                    "end_time_sec": 0.7,
+                                    "pitch_before_midi": 60,
+                                    "pitch_after_midi": 60,
+                                    "details": {"mode": "merge_no_insert"},
+                                }
+                            ],
                         },
                     }
                 ),
@@ -1097,10 +1111,14 @@ class BenchmarkDebugPackageTests(unittest.TestCase):
             )
 
             postprocess = diagnostics["selected_melody"]["postprocess"]
+            self.assertTrue(postprocess["enabled"])
             self.assertEqual(postprocess["action_count"], 1)
             self.assertEqual(postprocess["action_counts"]["short_gap_bridge"], 1)
             self.assertEqual(postprocess["reason_code_counts"]["short_gap_bridged"], 1)
+            self.assertEqual(postprocess["actions"][0]["details"]["mode"], "merge_no_insert")
             self.assertEqual(diagnostics["pitch_distribution"]["melody_postprocess"]["action_count"], 1)
+            self.assertTrue(diagnostics["pitch_distribution"]["melody_postprocess"]["enabled"])
+            self.assertEqual(diagnostics["pitch_distribution"]["melody_postprocess"]["actions"][0]["note_ids"], ["a", "b"])
 
 
 

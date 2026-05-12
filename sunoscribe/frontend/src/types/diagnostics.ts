@@ -60,6 +60,43 @@ export interface ReferenceAlignmentDiagnostics {
   raw_match_rate_vs_expected: number | null
   expected_predicted_time_overlap_ratio: number | null
 }
+export interface PhrasePostprocessAction {
+  action: string
+  reason_code: string
+  note_ids: string[]
+  output_note_id: string | null
+  start_time_sec: number | null
+  end_time_sec: number | null
+  pitch_before_midi: number | null
+  pitch_after_midi: number | null
+  details: Record<string, unknown>
+}
+
+export interface PhrasePostprocessDiagnostics {
+  available: boolean
+  enabled: boolean
+  input_note_count: number | null
+  output_note_count: number | null
+  iteration_count: number | null
+  action_count: number
+  action_counts: Record<string, number>
+  reason_code_counts: Record<string, number>
+  actions: PhrasePostprocessAction[]
+}
+
+export interface SelectedMelodyDiagnostics {
+  available: boolean
+  input_candidate_count: number
+  pre_postprocess_selected_count: number | null
+  selected_count: number
+  rejected_count: number
+  rejection_reason_counts: Record<string, number>
+  selected_reason_counts: Record<string, number>
+  postprocess: PhrasePostprocessDiagnostics
+  mean_selected_confidence: number | null
+  mean_rejected_confidence: number | null
+}
+
 
 export interface StageFailureReason {
   stage: string
@@ -74,5 +111,6 @@ export interface DiagnosticsResponse {
   short_notes: ShortNoteDiagnostics
   continuity: ContinuityDiagnostics
   reference_alignment: ReferenceAlignmentDiagnostics
+  selected_melody: SelectedMelodyDiagnostics
   stage_failure_reason: StageFailureReason | null
 }

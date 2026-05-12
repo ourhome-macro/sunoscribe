@@ -68,6 +68,7 @@ class PhrasePostprocessResult:
     input_count: int = 0
     output_count: int = 0
     iteration_count: int = 0
+    enabled: bool = True
 
     @property
     def action_counts(self) -> dict[str, int]:
@@ -85,7 +86,7 @@ class PhrasePostprocessResult:
 
     def diagnostics(self) -> dict[str, Any]:
         return {
-            "enabled": True,
+            "enabled": bool(self.enabled),
             "input_note_count": int(self.input_count),
             "output_note_count": int(self.output_count),
             "iteration_count": int(self.iteration_count),
@@ -122,6 +123,7 @@ class PhraseAwarePostprocessor:
                 input_count=len(input_notes),
                 output_count=len(notes),
                 iteration_count=0,
+                enabled=bool(self.config.enabled),
             )
 
         max_iterations = max(1, int(self.config.max_iterations))
@@ -146,6 +148,7 @@ class PhraseAwarePostprocessor:
             input_count=len(input_notes),
             output_count=len(notes),
             iteration_count=iteration_count,
+            enabled=bool(self.config.enabled),
         )
 
     def _bridge_short_gaps(
@@ -188,7 +191,12 @@ class PhraseAwarePostprocessor:
                         end_time_sec=float(nxt["end_time_sec"]),
                         pitch_before_midi=cur_midi,
                         pitch_after_midi=_pitch_midi(merged),
-                        details={"gap_sec": round(gap, 6), "mode": "merge"},
+                        details={
+                            "mode": "merge_no_insert",
+                            "gap_sec": round(gap, 6),
+                            "pitch_delta_semitones": round(abs(cur_midi - nxt_midi), 6),
+                            "pitch_tolerance_semitones": tolerance,
+                        },
                     )
                 )
                 current = merged
@@ -251,7 +259,18 @@ class PhraseAwarePostprocessor:
                         end_time_sec=float(next_note["end_time_sec"]),
                         pitch_before_midi=cur_midi,
                         pitch_after_midi=_pitch_midi(merged),
-                        details={"absorbed_duration_sec": round(cur_duration, 6)},
+                        details={
+                            "mode": "merge_short_center_note",
+                            "absorbed_duration_sec": round(cur_duration, 6),
+                            "prev_duration_sec": round(prev_duration, 6),
+                            "next_duration_sec": round(next_duration, 6),
+                            "gap_prev_sec": round(float(cur_note["start_time_sec"]) - float(prev_note["end_time_sec"]), 6),
+                            "gap_next_sec": round(float(next_note["start_time_sec"]) - float(cur_note["end_time_sec"]), 6),
+                            "confidence_before": round(cur_confidence, 6),
+                            "neighbor_confidence_max": round(max(prev_confidence, next_confidence), 6),
+                            "same_neighbor_pitch": bool(same_neighbor_pitch),
+                            "pitch_outlier": bool(pitch_outlier),
+                        },
                     )
                 )
                 resolved[-1] = merged
@@ -352,10 +371,15 @@ class PhraseAwarePostprocessor:
                     pitch_before_midi=cur_midi,
                     pitch_after_midi=best_pitch,
                     details={
+                        "mode": "local_isolated_jump",
                         "semitone_shift": int(round(best_shift)),
                         "anchor_count": len(anchors),
+                        "anchor_pitches_midi": [round(float(pitch), 6) for pitch in anchor_pitches],
+                        "anchor_gaps_sec": [round(float(gap), 6) for _, gap in anchors],
                         "score_before": round(current_score, 6),
                         "score_after": round(best_score, 6),
+                        "anchor_max_before": round(current_anchor_max, 6),
+                        "anchor_max_after": round(best_anchor_max, 6),
                     },
                 )
             )
@@ -437,7 +461,9 @@ class PhraseAwarePostprocessor:
                         "mode": "short_octave_island",
                         "island_note_count": island_len,
                         "semitone_shift": int(round(shift)),
+                        "score_before": round(current_score, 6),
                         "score_after": round(shifted_score, 6),
+                        "edge_max_before": round(raw_edge_max, 6),
                         "edge_max_after": round(shifted_edge_max, 6),
                     },
                 )
@@ -491,7 +517,14 @@ class PhraseAwarePostprocessor:
                     end_time_sec=float(cur_note["end_time_sec"]),
                     pitch_before_midi=cur_midi,
                     pitch_after_midi=center,
-                    details={"window_note_count": len(window_notes), "deviation_semitones": int(round(deviation))},
+                    details={
+                        "mode": "short_local_outlier",
+                        "window_note_count": len(window_notes),
+                        "center_pitch_midi": center,
+                        "deviation_semitones": int(round(deviation)),
+                        "max_adjust_semitones": max_adjust,
+                        "max_note_duration_sec": round(max_duration, 6),
+                    },
                 )
             )
         return repaired
