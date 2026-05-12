@@ -35,27 +35,33 @@ export const apiClient = {
     })
   },
 
-  listProjectRevisions(_projectId: string) {
+  listProjectRevisions(projectId: string) {
+    void projectId
     return wait(clone([mockRevision]))
   },
 
-  getRevision(_revisionId: string) {
+  getRevision(revisionId: string) {
+    void revisionId
     return wait(clone(mockRevision))
   },
 
-  listArtifacts(_projectId: string) {
+  listArtifacts(projectId: string) {
+    void projectId
     return wait(clone(mockArtifacts))
   },
 
-  diagnoseRevision(_revisionId: string) {
+  diagnoseRevision(revisionId: string) {
+    void revisionId
     return wait(clone(mockDiagnosis))
   },
 
-  getDiagnostics(_projectId: string) {
+  getDiagnostics(projectId: string) {
+    void projectId
     return wait(clone(mockDiagnostics))
   },
 
-  applyScorePatch(_revisionId: string, request: ApplyAgentScorePatchRequest): Promise<ApplyAgentScorePatchResponse> {
+  applyScorePatch(revisionId: string, request: ApplyAgentScorePatchRequest): Promise<ApplyAgentScorePatchResponse> {
+    void revisionId
     const operationNames = request.operations.map((operation) => operation.op)
     const changedIds = request.operations
       .map((operation) => ('note_id' in operation ? operation.note_id : null))
