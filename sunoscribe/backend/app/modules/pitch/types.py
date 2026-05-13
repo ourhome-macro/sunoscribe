@@ -22,6 +22,13 @@ class Note:
     end_time: float
     confidence: float
     reason_codes: List[str] = field(default_factory=list, kw_only=True)
+    candidate_id: Optional[str] = field(default=None, kw_only=True)
+    source_candidate_id: Optional[str] = field(default=None, kw_only=True)
+    source_candidate_ids: List[str] = field(default_factory=list, kw_only=True)
+    source_contour_ids: List[str] = field(default_factory=list, kw_only=True)
+    candidate_origin: Optional[str] = field(default=None, kw_only=True)
+    contour_bridge_evidence: Dict[str, Any] = field(default_factory=dict, kw_only=True)
+    contour_bridge_guard_reason_codes: List[str] = field(default_factory=list, kw_only=True)
 
 
 @dataclass

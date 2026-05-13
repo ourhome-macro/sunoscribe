@@ -17,8 +17,14 @@ UNCERTAIN = "uncertain"
 SUSPECTED_VIBRATO = "suspected_vibrato"
 SUSPECTED_GLIDE = "suspected_glide"
 POST_F0_CONTOUR_BRIDGE = "post_f0_contour_bridge"
+CONTOUR_TO_CANDIDATE_BRIDGE = "contour_to_candidate_bridge"
+BRIDGE_FROM_F0_CONTOUR = "bridge_from_f0_contour"
 BRIDGE_FROM_VOICED_CONTOUR = "bridge_from_voiced_contour"
 BRIDGE_CONFIDENCE_GUARDED = "bridge_confidence_guarded"
+CONTOUR_CANDIDATE_CONTEXT_GUARDED = "contour_candidate_context_guarded"
+CONTOUR_CANDIDATE_NO_RAW_GAP = "contour_candidate_no_raw_gap"
+CONTOUR_CANDIDATE_NO_LOCAL_CONTEXT = "contour_candidate_no_local_context"
+CONTOUR_CANDIDATE_SPLITS_BIG_GAP = "contour_candidate_splits_big_gap"
 BRIDGE_UNSTABLE_CONTOUR_GUARDED = "bridge_unstable_contour_guarded"
 BRIDGE_LOW_CONFIDENCE_LONG_CONTOUR = "bridge_low_confidence_long_contour"
 BRIDGE_NO_SELECTED_GAP = "bridge_no_selected_gap"
@@ -58,6 +64,9 @@ REJECTION_REASON_CODES = {
     SILENCE_OR_BREATH_REGION,
     BRIDGE_NO_SELECTED_GAP,
     BRIDGE_LOW_CONFIDENCE_LONG_CONTOUR,
+    CONTOUR_CANDIDATE_NO_RAW_GAP,
+    CONTOUR_CANDIDATE_NO_LOCAL_CONTEXT,
+    CONTOUR_CANDIDATE_SPLITS_BIG_GAP,
     BRIDGE_VOCAL_ACTIVITY_UNSUPPORTED,
     BRIDGE_OVERLAPS_RAW_CANDIDATE,
     BRIDGE_OVERLAPS_SELECTED_NOTE,

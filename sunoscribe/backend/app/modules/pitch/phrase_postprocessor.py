@@ -812,6 +812,15 @@ class PhraseAwarePostprocessor:
         note["pitch_center_midi"] = round(float(pitch), 6)
         note["confidence"] = round(float(confidence), 6)
         note["source_contour_ids"] = list(raw.get("source_contour_ids") or raw.get("source_contours") or [])
+        note["source_candidate_ids"] = list(raw.get("source_candidate_ids") or [])
+        if raw.get("source_candidate_id") is not None:
+            note["source_candidate_id"] = str(raw.get("source_candidate_id"))
+        if raw.get("candidate_origin") is not None:
+            note["candidate_origin"] = str(raw.get("candidate_origin"))
+        if isinstance(raw.get("contour_bridge_evidence"), dict):
+            note["contour_bridge_evidence"] = dict(raw["contour_bridge_evidence"])
+        if "contour_bridge_guard_reason_codes" in raw:
+            note["contour_bridge_guard_reason_codes"] = list(raw.get("contour_bridge_guard_reason_codes") or [])
         note["reason_codes"] = _unique([str(value) for value in raw.get("reason_codes") or [] if str(value).strip()])
         return note
 
@@ -823,6 +832,12 @@ class PhraseAwarePostprocessor:
             "duration_sec": round(max(0.0, float(note.end_time) - float(note.start_time)), 6),
             "pitch_center_midi": float(note_to_midi(str(note.pitch))),
             "confidence": round(float(note.confidence), 6),
+            "source_candidate_id": getattr(note, "source_candidate_id", None),
+            "source_candidate_ids": list(getattr(note, "source_candidate_ids", []) or []),
+            "source_contour_ids": list(getattr(note, "source_contour_ids", []) or []),
+            "candidate_origin": getattr(note, "candidate_origin", None),
+            "contour_bridge_evidence": dict(getattr(note, "contour_bridge_evidence", {}) or {}),
+            "contour_bridge_guard_reason_codes": list(getattr(note, "contour_bridge_guard_reason_codes", []) or []),
             "reason_codes": list(getattr(note, "reason_codes", []) or []),
         }
 
@@ -835,12 +850,23 @@ class PhraseAwarePostprocessor:
             end_time=float(note["end_time_sec"]),
             confidence=float(note.get("confidence") or 0.0),
             reason_codes=reason_codes,
+            candidate_id=str(note.get("candidate_id")) if note.get("candidate_id") is not None else None,
+            source_candidate_id=str(note.get("source_candidate_id")) if note.get("source_candidate_id") is not None else None,
+            source_candidate_ids=[str(item) for item in note.get("source_candidate_ids") or []],
+            source_contour_ids=[str(item) for item in note.get("source_contour_ids") or []],
+            candidate_origin=str(note.get("candidate_origin")) if note.get("candidate_origin") is not None else None,
+            contour_bridge_evidence=dict(note.get("contour_bridge_evidence") or {}),
+            contour_bridge_guard_reason_codes=[str(item) for item in note.get("contour_bridge_guard_reason_codes") or []],
         )
 
     def _clone_note(self, note: dict[str, Any]) -> dict[str, Any]:
         cloned = dict(note)
         cloned["source_contour_ids"] = list(note.get("source_contour_ids") or [])
         cloned["source_candidate_ids"] = list(note.get("source_candidate_ids") or [])
+        if isinstance(note.get("contour_bridge_evidence"), dict):
+            cloned["contour_bridge_evidence"] = dict(note["contour_bridge_evidence"])
+        if "contour_bridge_guard_reason_codes" in note:
+            cloned["contour_bridge_guard_reason_codes"] = list(note.get("contour_bridge_guard_reason_codes") or [])
         cloned["reason_codes"] = list(note.get("reason_codes") or [])
         return cloned
 

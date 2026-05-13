@@ -6,6 +6,7 @@ import numpy as np
 from app.modules.pitch.config import PitchDetectionConfig
 from app.modules.pitch.detector import PitchDetector
 from app.modules.pitch.pipeline import PitchPipeline
+from app.modules.pitch.reason_codes import CONTOUR_TO_CANDIDATE_BRIDGE
 from app.modules.pitch.types import ArrangementDecision, ArrangementSegmentDecision, Note, PitchPipelineRequest
 
 
@@ -106,6 +107,92 @@ class TestPitchPipeline(unittest.TestCase):
         self.assertEqual(result.f0_track.backend, "rmvpe")
         self.assertEqual(len(result.f0_track.frames), 2)
         self.assertEqual(len(result.semantic_audio.f0_track.vocal_activity), 1)
+
+    def test_contour_to_candidate_bridge_runs_before_melody_selector_and_raw_artifact(self):
+        pipeline = PitchPipeline()
+
+        mock_notes = [
+            Note(pitch="C4", start_time=0.00, end_time=0.35, confidence=0.92, candidate_id="left"),
+            Note(pitch="E4", start_time=1.00, end_time=1.35, confidence=0.90, candidate_id="right"),
+        ]
+
+        class _BeatResult:
+            bpm = 120.0
+            beat_times = [0.0, 0.5, 1.0, 1.5]
+            confidence = 0.93
+
+        class _KeyResult:
+            key = "C Major"
+            confidence = 0.89
+            method = "librosa"
+
+        class _DownbeatResult:
+            downbeat_times = [0.0]
+            method = "librosa"
+            confidence = 0.8
+            beats_per_bar = 4
+
+        def _detect(_path):
+            frames = [
+                {"time_sec": 0.05, "frequency_hz": 261.63, "confidence": 0.92, "voiced": True, "pitch_midi": 60.0},
+                {"time_sec": 0.40, "frequency_hz": 0.0, "confidence": 0.0, "voiced": False, "pitch_midi": None},
+                {"time_sec": 0.60, "frequency_hz": 293.66, "confidence": 0.88, "voiced": True, "pitch_midi": 62.0},
+                {"time_sec": 0.61, "frequency_hz": 293.66, "confidence": 0.88, "voiced": True, "pitch_midi": 62.0},
+                {"time_sec": 0.62, "frequency_hz": 293.66, "confidence": 0.88, "voiced": True, "pitch_midi": 62.0},
+                {"time_sec": 0.63, "frequency_hz": 293.66, "confidence": 0.88, "voiced": True, "pitch_midi": 62.0},
+                {"time_sec": 0.64, "frequency_hz": 293.66, "confidence": 0.88, "voiced": True, "pitch_midi": 62.0},
+                {"time_sec": 0.65, "frequency_hz": 293.66, "confidence": 0.88, "voiced": True, "pitch_midi": 62.0},
+                {"time_sec": 0.66, "frequency_hz": 293.66, "confidence": 0.88, "voiced": True, "pitch_midi": 62.0},
+                {"time_sec": 0.67, "frequency_hz": 293.66, "confidence": 0.88, "voiced": True, "pitch_midi": 62.0},
+                {"time_sec": 0.68, "frequency_hz": 293.66, "confidence": 0.88, "voiced": True, "pitch_midi": 62.0},
+                {"time_sec": 0.69, "frequency_hz": 293.66, "confidence": 0.88, "voiced": True, "pitch_midi": 62.0},
+                {"time_sec": 0.70, "frequency_hz": 293.66, "confidence": 0.88, "voiced": True, "pitch_midi": 62.0},
+                {"time_sec": 0.71, "frequency_hz": 293.66, "confidence": 0.88, "voiced": True, "pitch_midi": 62.0},
+                {"time_sec": 0.72, "frequency_hz": 293.66, "confidence": 0.88, "voiced": True, "pitch_midi": 62.0},
+                {"time_sec": 0.73, "frequency_hz": 293.66, "confidence": 0.88, "voiced": True, "pitch_midi": 62.0},
+                {"time_sec": 0.74, "frequency_hz": 293.66, "confidence": 0.88, "voiced": True, "pitch_midi": 62.0},
+                {"time_sec": 0.75, "frequency_hz": 293.66, "confidence": 0.88, "voiced": True, "pitch_midi": 62.0},
+                {"time_sec": 0.76, "frequency_hz": 293.66, "confidence": 0.88, "voiced": True, "pitch_midi": 62.0},
+                {"time_sec": 0.77, "frequency_hz": 293.66, "confidence": 0.88, "voiced": True, "pitch_midi": 62.0},
+                {"time_sec": 0.78, "frequency_hz": 293.66, "confidence": 0.88, "voiced": True, "pitch_midi": 62.0},
+                {"time_sec": 0.79, "frequency_hz": 293.66, "confidence": 0.88, "voiced": True, "pitch_midi": 62.0},
+                {"time_sec": 0.85, "frequency_hz": 0.0, "confidence": 0.0, "voiced": False, "pitch_midi": None},
+                {"time_sec": 1.05, "frequency_hz": 329.63, "confidence": 0.90, "voiced": True, "pitch_midi": 64.0},
+            ]
+            pipeline.detector.last_detection_artifacts = {
+                "backend": "rmvpe",
+                "input_audio_path": "dummy.wav",
+                "frame_count": len(frames),
+                "f0_track": {
+                    "input_audio_path": "dummy.wav",
+                    "backend": "rmvpe",
+                    "frames": frames,
+                    "vocal_activity": [
+                        {"start_time": 0.0, "end_time": 1.4, "state": "vocal", "voiced_ratio": 1.0, "mean_confidence": 0.88}
+                    ],
+                    "analysis_info": {"frame_hop_sec": 0.01},
+                },
+                "warnings": [],
+            }
+            return mock_notes
+
+        with patch.object(pipeline.detector, "detect", side_effect=_detect), patch.object(
+            pipeline.beat_tracker, "track", return_value=_BeatResult()
+        ), patch.object(pipeline.key_analyzer, "analyze", return_value=_KeyResult()), patch.object(
+            pipeline.downbeat_tracker, "track", return_value=_DownbeatResult()
+        ), patch(
+            "app.modules.pitch.pipeline.get_audio_duration", return_value=2.0
+        ):
+            result = pipeline.run("dummy.wav")
+
+        bridged_raw = [note for note in result.raw_notes if note.candidate_origin == CONTOUR_TO_CANDIDATE_BRIDGE]
+        self.assertEqual(len(bridged_raw), 1)
+        self.assertIn(CONTOUR_TO_CANDIDATE_BRIDGE, bridged_raw[0].reason_codes)
+        self.assertEqual(bridged_raw[0].contour_bridge_evidence["raw_overlap_duration_sec"], 0.0)
+        bridge_summary = result.semantic_audio.melody_candidates.analysis_info["contour_to_candidate_bridge"]
+        self.assertEqual(bridge_summary["accepted_count"], 1)
+        self.assertEqual(result.semantic_audio.melody_candidates.analysis_info["contour_bridge_candidate_count"], 1)
+        self.assertTrue(any(CONTOUR_TO_CANDIDATE_BRIDGE in note.reason_codes for note in result.lead_notes))
 
     def test_time_signature_and_anacrusis_with_downbeats(self):
         cfg = PitchDetectionConfig(beats_per_bar=3, beat_unit=8)

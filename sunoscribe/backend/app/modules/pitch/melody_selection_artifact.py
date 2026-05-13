@@ -10,6 +10,7 @@ from .note_utils import midi_to_note, note_to_midi
 from .phrase_postprocessor import PhraseAwarePostprocessor, PhrasePostprocessConfig
 from .reason_codes import (
     BRIDGE_CONFIDENCE_GUARDED,
+    BRIDGE_FROM_F0_CONTOUR,
     BRIDGE_FROM_VOICED_CONTOUR,
     BRIDGE_LOW_CONFIDENCE_LONG_CONTOUR,
     BRIDGE_NO_SELECTED_GAP,
@@ -17,6 +18,7 @@ from .reason_codes import (
     BRIDGE_OVERLAPS_SELECTED_NOTE,
     BRIDGE_UNSTABLE_CONTOUR_GUARDED,
     BRIDGE_VOCAL_ACTIVITY_UNSUPPORTED,
+    CONTOUR_TO_CANDIDATE_BRIDGE,
     LOW_CONFIDENCE,
     LOW_VOICED_RATIO,
     OUTSIDE_VOCAL_RANGE,
@@ -206,7 +208,7 @@ class RuleBasedMelodySelector:
             confidence = _safe_float(note.get("mean_confidence")) or 0.0
         source_contours = note.get("source_contours") or note.get("source_contour_ids") or []
         source_candidate_ids = note.get("source_candidate_ids") or []
-        return {
+        normalized = {
             "candidate_id": str(note.get("id") or note.get("candidate_id") or f"cand_{index:05d}"),
             "start_time_sec": float(start),
             "end_time_sec": float(end),
@@ -219,6 +221,15 @@ class RuleBasedMelodySelector:
             "source_candidate_ids": [str(item) for item in source_candidate_ids] if isinstance(source_candidate_ids, list) else [],
             "reason_codes": _unique([str(item) for item in note.get("reason_codes") or []]),
         }
+        if note.get("source_candidate_id") is not None and not normalized["source_candidate_ids"]:
+            normalized["source_candidate_ids"] = [str(note.get("source_candidate_id"))]
+        if note.get("candidate_origin") is not None:
+            normalized["candidate_origin"] = str(note.get("candidate_origin"))
+        if isinstance(note.get("contour_bridge_evidence"), dict):
+            normalized["contour_bridge_evidence"] = dict(note["contour_bridge_evidence"])
+        if "contour_bridge_guard_reason_codes" in note:
+            normalized["contour_bridge_guard_reason_codes"] = list(note.get("contour_bridge_guard_reason_codes") or [])
+        return normalized
 
     def _candidate_from_contour(self, contour: dict[str, Any], index: int) -> dict[str, Any]:
         return self._normalize_candidate(
@@ -535,6 +546,12 @@ class RuleBasedMelodySelector:
             selected["bridge_evidence"] = dict(candidate["bridge_evidence"])
         if "bridge_guard_reason_codes" in candidate:
             selected["bridge_guard_reason_codes"] = list(candidate.get("bridge_guard_reason_codes") or [])
+        if isinstance(candidate.get("contour_bridge_evidence"), dict):
+            selected["contour_bridge_evidence"] = dict(candidate["contour_bridge_evidence"])
+        if "contour_bridge_guard_reason_codes" in candidate:
+            selected["contour_bridge_guard_reason_codes"] = list(candidate.get("contour_bridge_guard_reason_codes") or [])
+        if candidate.get("candidate_origin") is not None:
+            selected["candidate_origin"] = candidate.get("candidate_origin")
         return selected
 
     @staticmethod
@@ -554,6 +571,12 @@ class RuleBasedMelodySelector:
             selected["bridge_evidence"] = dict(candidate["bridge_evidence"])
         if "bridge_guard_reason_codes" in candidate:
             selected["bridge_guard_reason_codes"] = list(candidate.get("bridge_guard_reason_codes") or [])
+        if isinstance(candidate.get("contour_bridge_evidence"), dict):
+            selected["contour_bridge_evidence"] = dict(candidate["contour_bridge_evidence"])
+        if "contour_bridge_guard_reason_codes" in candidate:
+            selected["contour_bridge_guard_reason_codes"] = list(candidate.get("contour_bridge_guard_reason_codes") or [])
+        if candidate.get("candidate_origin") is not None:
+            selected["candidate_origin"] = candidate.get("candidate_origin")
         return selected
 
     def _postprocess_config(self) -> PhrasePostprocessConfig:
@@ -643,12 +666,16 @@ def _extract_candidate_notes(
     melody = note_candidates.get("melody_candidates")
     containers = [("melody_candidates", melody), ("note_candidates", note_candidates)]
     if prefer_preselected_notes:
+        bridge_notes = _bridge_raw_candidate_notes(containers)
         for source, container in containers:
             if not isinstance(container, dict):
                 continue
             notes = container.get("selected_notes") if isinstance(container.get("selected_notes"), list) else None
             if notes:
-                return [note for note in notes if isinstance(note, dict)], f"{source}.selected_notes_preselected"
+                selected = [note for note in notes if isinstance(note, dict)]
+                if bridge_notes:
+                    return _merge_note_records(selected, bridge_notes), f"{source}.selected_notes_preselected+contour_bridge_raw_notes"
+                return selected, f"{source}.selected_notes_preselected"
     for source, container in containers:
         if not isinstance(container, dict):
             continue
@@ -662,6 +689,44 @@ def _extract_candidate_notes(
         if notes:
             return [note for note in notes if isinstance(note, dict)], f"{source}.selected_notes_legacy_fallback"
     return [], "none"
+
+
+def _bridge_raw_candidate_notes(containers: list[tuple[str, Any]]) -> list[dict[str, Any]]:
+    result: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for _source, container in containers:
+        if not isinstance(container, dict):
+            continue
+        notes = container.get("notes") if isinstance(container.get("notes"), list) else None
+        if not notes:
+            continue
+        for note in notes:
+            if not isinstance(note, dict):
+                continue
+            reasons = [str(item) for item in note.get("reason_codes") or []]
+            if CONTOUR_TO_CANDIDATE_BRIDGE not in reasons and BRIDGE_FROM_F0_CONTOUR not in reasons:
+                continue
+            key = str(note.get("candidate_id") or note.get("id") or f"{note.get('pitch')}:{note.get('start_time')}:{note.get('end_time')}")
+            if key in seen:
+                continue
+            seen.add(key)
+            result.append(note)
+    return result
+
+
+def _merge_note_records(primary: list[dict[str, Any]], extra: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    merged = list(primary)
+    seen = {
+        str(note.get("candidate_id") or note.get("id") or f"{note.get('pitch')}:{note.get('start_time')}:{note.get('end_time')}")
+        for note in merged
+    }
+    for note in extra:
+        key = str(note.get("candidate_id") or note.get("id") or f"{note.get('pitch')}:{note.get('start_time')}:{note.get('end_time')}")
+        if key in seen:
+            continue
+        seen.add(key)
+        merged.append(note)
+    return merged
 
 
 def _extract_raw_candidate_notes(note_candidates: dict[str, Any] | None) -> list[dict[str, Any]]:

@@ -9,12 +9,14 @@ import numpy as np
 from .audio_utils import get_audio_duration
 from .beat_tracker import BeatTracker
 from .config import PitchDetectionConfig
+from .contour_candidate_bridge import ContourToCandidateBridge, ContourToCandidateBridgeConfig
 from .detector import PitchDetector
 from .downbeat_tracker import DownbeatTracker
 from .exceptions import DownbeatTrackingError
 from .key_analyzer import KeyAnalysisResult, KeyAnalyzer
 from .melody_selector import MelodySelector
 from .melody_source_arbitrator import MelodySourceArbitrator
+from .pitch_contours import PitchContourBuilder
 from .midi_exporter import MidiExporter
 from .quantizer import NoteQuantizer
 from .rhythm_analyzer import RhythmAnalyzer
@@ -56,6 +58,8 @@ class PitchPipeline:
         self.key_analyzer = KeyAnalyzer(self.config)
         self.melody_selector = MelodySelector(self.config)
         self.melody_arbitrator = MelodySourceArbitrator(self.config)
+        self.pitch_contour_builder = PitchContourBuilder()
+        self.contour_candidate_bridge = ContourToCandidateBridge(self._contour_bridge_config())
         self.quantizer = NoteQuantizer(self.config)
         self.rhythm_analyzer = RhythmAnalyzer()
         self.midi_exporter = MidiExporter()
@@ -69,6 +73,15 @@ class PitchPipeline:
         if boundaries[-1] < duration_sec:
             boundaries.append(duration_sec)
         return boundaries
+
+    def _contour_bridge_config(self) -> ContourToCandidateBridgeConfig:
+        return ContourToCandidateBridgeConfig(
+            vocal_min_midi=float(self.config.melody_pitch_min_midi),
+            vocal_max_midi=float(self.config.melody_pitch_max_midi),
+            context_gap_sec=float(self.config.melody_low_octave_rescue_context_gap_sec),
+            big_gap_sec=float(self.config.melody_low_octave_rescue_big_gap_sec),
+            low_octave_context_tolerance_semitones=int(self.config.melody_low_octave_rescue_context_tolerance_semitones),
+        )
 
     def _recompute_quantized_positions(
         self,
@@ -306,10 +319,7 @@ class PitchPipeline:
             input_audio_path=str(audio_path) if audio_path else None,
             notes=list(notes or []),
             selected_notes=list(selected_notes or []),
-            analysis_info={
-                "candidate_count": len(notes or []),
-                "selected_count": len(selected_notes or []),
-            },
+            analysis_info=self._candidate_set_analysis_info(notes=list(notes or []), selected_notes=list(selected_notes or [])),
         )
 
     def _build_f0_track(
@@ -366,6 +376,52 @@ class PitchPipeline:
             vocal_activity=vocal_activity,
             analysis_info=dict(raw_track.get("analysis_info") or {}),
         )
+
+    def _candidate_set_analysis_info(self, *, notes: list[Note], selected_notes: list[Note] | None) -> dict[str, object]:
+        return {
+            "candidate_count": len(notes or []),
+            "selected_count": len(selected_notes or []),
+            "contour_bridge_candidate_count": sum(
+                1
+                for note in notes or []
+                if getattr(note, "candidate_origin", None) == "contour_to_candidate_bridge"
+            ),
+        }
+
+    def _build_pitch_contours_payload(self, f0_track: F0Track | None) -> dict[str, object] | None:
+        if f0_track is None:
+            return None
+        return self.pitch_contour_builder.build(json_safe_clone_dict(self._f0_track_payload(f0_track)))
+
+    @staticmethod
+    def _f0_track_payload(f0_track: F0Track) -> dict[str, object]:
+        return {
+            "input_audio_path": f0_track.input_audio_path,
+            "backend": f0_track.backend,
+            "frames": [
+                {
+                    "time_sec": float(frame.time_sec),
+                    "frequency_hz": float(frame.frequency_hz),
+                    "confidence": float(frame.confidence),
+                    "voiced": bool(frame.voiced),
+                    "pitch_midi": frame.pitch_midi,
+                }
+                for frame in f0_track.frames
+            ],
+            "vocal_activity": [
+                {
+                    "start_time": float(segment.start_time),
+                    "end_time": float(segment.end_time),
+                    "state": str(segment.state),
+                    "voiced_ratio": float(segment.voiced_ratio),
+                    "mean_confidence": float(segment.mean_confidence),
+                    "source_stem": segment.source_stem,
+                    "analysis_info": dict(segment.analysis_info or {}),
+                }
+                for segment in f0_track.vocal_activity
+            ],
+            "analysis_info": dict(f0_track.analysis_info or {}),
+        }
 
     def _source_id(self, *, backend: str, source_stem: str | None) -> str:
         source = str(source_stem or "unknown").strip() or "unknown"
@@ -688,6 +744,13 @@ class PitchPipeline:
             raw_artifacts=detector_artifact_cache.get(f"{self.detector.backend_name}:{str(lead_audio_path)}"),
             source_stem=self._infer_source_stem(lead_audio_path, path_stem_index, fallback="lead"),
         )
+        pitch_contours_payload = self._build_pitch_contours_payload(lead_f0_track)
+        contour_bridge_result = self.contour_candidate_bridge.bridge(
+            contours=pitch_contours_payload.get("contours") if isinstance(pitch_contours_payload, dict) else None,
+            raw_candidates=detected_notes,
+            vocal_activity=lead_f0_track.vocal_activity if lead_f0_track is not None else None,
+        )
+        detected_notes = contour_bridge_result.notes
         lead_source_stem = self._infer_source_stem(lead_audio_path, path_stem_index, fallback="lead")
         support_source_stem = self._infer_source_stem(support_audio_path, path_stem_index, fallback="mix")
         arrangement_decision = self.melody_arbitrator.decide(
@@ -787,6 +850,7 @@ class PitchPipeline:
             rhythm_grid=rhythm_grid,
         )
         semantic_audio.melody_candidates.analysis_info["arrangement_decision"] = arrangement_summary
+        semantic_audio.melody_candidates.analysis_info["contour_to_candidate_bridge"] = contour_bridge_result.summary
         semantic_audio.harmony_candidates.analysis_info["arrangement_decision"] = arrangement_summary
         semantic_audio.harmony_candidates.analysis_info["selected_support_count"] = len(
             arrangement_decision.selected_support_notes
@@ -810,6 +874,7 @@ class PitchPipeline:
                 "melody_postprocess_action_counts": dict(melody_selection.postprocess_action_counts or {}),
                 "melody_postprocess_reason_code_counts": dict(melody_selection.postprocess_reason_code_counts or {}),
                 "melody_postprocess_actions": list(melody_selection.postprocess_actions or [])[:200],
+                "contour_to_candidate_bridge": contour_bridge_result.summary,
                 "raw_notes_semantics": "detected_candidates",
                 "lead_notes_semantics": "selected_lead_melody",
                 "lead_selection_authoritative": True,

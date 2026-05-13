@@ -5,6 +5,7 @@ import unittest
 from app.modules.pitch.melody_selection_artifact import MelodySelectionConfig, RuleBasedMelodySelector
 from app.modules.pitch.reason_codes import (
     BRIDGE_CONFIDENCE_GUARDED,
+    BRIDGE_FROM_F0_CONTOUR,
     BRIDGE_FROM_VOICED_CONTOUR,
     BRIDGE_LOW_CONFIDENCE_LONG_CONTOUR,
     BRIDGE_NO_SELECTED_GAP,
@@ -12,6 +13,8 @@ from app.modules.pitch.reason_codes import (
     BRIDGE_OVERLAPS_SELECTED_NOTE,
     BRIDGE_VOCAL_ACTIVITY_UNSUPPORTED,
     BRIDGE_UNSTABLE_CONTOUR_GUARDED,
+    CONTOUR_CANDIDATE_CONTEXT_GUARDED,
+    CONTOUR_TO_CANDIDATE_BRIDGE,
     ISOLATED_FRAGMENT_REMOVED,
     LOW_CONFIDENCE,
     OCTAVE_JUMP_CORRECTED,
@@ -88,6 +91,50 @@ class TestRuleBasedMelodySelector(unittest.TestCase):
         self.assertEqual(result["summary"]["selected_count"], 1)
         self.assertEqual(result["summary"]["rejected_count"], 1)
         self.assertIn(OVERLAPS_STRONGER_CANDIDATE, result["rejected_candidates"][0]["reason_codes"])
+
+    def test_contour_bridge_raw_candidate_is_considered_with_preselected_notes_and_keeps_evidence(self) -> None:
+        result = RuleBasedMelodySelector(MelodySelectionConfig(phrase_postprocess_enabled=False)).select(
+            note_candidates={
+                "melody_candidates": {
+                    "notes": [
+                        {"id": "raw_left", "start_time": 0.0, "end_time": 0.4, "pitch": "C4", "confidence": 0.9},
+                        {
+                            "candidate_id": "contour_bridge:pc_1",
+                            "start_time": 0.7,
+                            "end_time": 1.0,
+                            "pitch": "D4",
+                            "confidence": 0.88,
+                            "reason_codes": [
+                                CONTOUR_TO_CANDIDATE_BRIDGE,
+                                BRIDGE_FROM_F0_CONTOUR,
+                                CONTOUR_CANDIDATE_CONTEXT_GUARDED,
+                            ],
+                            "source_contour_ids": ["pc_1"],
+                            "contour_bridge_guard_reason_codes": [],
+                            "contour_bridge_evidence": {
+                                "source_contour_id": "pc_1",
+                                "raw_overlap_duration_sec": 0.0,
+                                "nearest_raw_gap": {"start_time_sec": 0.4, "end_time_sec": 1.2, "duration_sec": 0.8},
+                            },
+                        },
+                    ],
+                    "selected_notes": [
+                        {"id": "legacy_left", "start_time": 0.0, "end_time": 0.4, "pitch": "C4", "confidence": 0.9},
+                        {"id": "legacy_right", "start_time": 1.2, "end_time": 1.6, "pitch": "E4", "confidence": 0.9},
+                    ],
+                }
+            }
+        )
+
+        ids = [note["candidate_id"] for note in result["selected_notes"]]
+        self.assertIn("legacy_left", ids)
+        self.assertIn("legacy_right", ids)
+        self.assertIn("contour_bridge:pc_1", ids)
+        bridged = next(note for note in result["selected_notes"] if note["candidate_id"] == "contour_bridge:pc_1")
+        self.assertIn(CONTOUR_TO_CANDIDATE_BRIDGE, bridged["reason_codes"])
+        self.assertEqual(bridged["contour_bridge_evidence"]["source_contour_id"], "pc_1")
+        self.assertEqual(bridged["contour_bridge_guard_reason_codes"], [])
+        self.assertEqual(result["summary"]["input_source"], "melody_candidates.selected_notes_preselected+contour_bridge_raw_notes")
 
 
     def test_post_f0_contour_bridge_creates_missing_high_confidence_contour(self) -> None:

@@ -90,6 +90,13 @@ class MelodySelector:
                     end_time=float(note.end_time),
                     confidence=confidence,
                     reason_codes=list(getattr(note, "reason_codes", []) or []),
+                    candidate_id=getattr(note, "candidate_id", None),
+                    source_candidate_id=getattr(note, "source_candidate_id", None),
+                    source_candidate_ids=list(getattr(note, "source_candidate_ids", []) or []),
+                    source_contour_ids=list(getattr(note, "source_contour_ids", []) or []),
+                    candidate_origin=getattr(note, "candidate_origin", None),
+                    contour_bridge_evidence=dict(getattr(note, "contour_bridge_evidence", {}) or {}),
+                    contour_bridge_guard_reason_codes=list(getattr(note, "contour_bridge_guard_reason_codes", []) or []),
                 )
             )
 
@@ -203,6 +210,13 @@ class MelodySelector:
                 list(getattr(note, "reason_codes", []) or [])
                 + [OCTAVE_OUTLIER, PRESELECTOR_LOW_OCTAVE_CORRECTED]
             ),
+            candidate_id=getattr(note, "candidate_id", None),
+            source_candidate_id=getattr(note, "source_candidate_id", None),
+            source_candidate_ids=list(getattr(note, "source_candidate_ids", []) or []),
+            source_contour_ids=list(getattr(note, "source_contour_ids", []) or []),
+            candidate_origin=getattr(note, "candidate_origin", None),
+            contour_bridge_evidence=dict(getattr(note, "contour_bridge_evidence", {}) or {}),
+            contour_bridge_guard_reason_codes=list(getattr(note, "contour_bridge_guard_reason_codes", []) or []),
         )
 
     def _low_octave_rescue_preserves_gap_continuity(
@@ -296,6 +310,15 @@ class MelodySelector:
                         list(getattr(current, "reason_codes", []) or [])
                         + list(getattr(nxt, "reason_codes", []) or [])
                         + [SHORT_GAP_BRIDGED]
+                    ),
+                    source_candidate_ids=self._unique_reason_codes(
+                        list(getattr(current, "source_candidate_ids", []) or [])
+                        + list(getattr(nxt, "source_candidate_ids", []) or [])
+                        + [str(item) for item in (getattr(current, "candidate_id", None), getattr(nxt, "candidate_id", None)) if item]
+                    ),
+                    source_contour_ids=self._unique_reason_codes(
+                        list(getattr(current, "source_contour_ids", []) or [])
+                        + list(getattr(nxt, "source_contour_ids", []) or [])
                     ),
                 )
                 continue
@@ -464,6 +487,13 @@ class MelodySelector:
                 end_time=float(cur_note.end_time),
                 confidence=cur_confidence,
                 reason_codes=list(getattr(cur_note, "reason_codes", []) or []),
+                candidate_id=getattr(cur_note, "candidate_id", None),
+                source_candidate_id=getattr(cur_note, "source_candidate_id", None),
+                source_candidate_ids=list(getattr(cur_note, "source_candidate_ids", []) or []),
+                source_contour_ids=list(getattr(cur_note, "source_contour_ids", []) or []),
+                candidate_origin=getattr(cur_note, "candidate_origin", None),
+                contour_bridge_evidence=dict(getattr(cur_note, "contour_bridge_evidence", {}) or {}),
+                contour_bridge_guard_reason_codes=list(getattr(cur_note, "contour_bridge_guard_reason_codes", []) or []),
             )
 
         return repaired
@@ -488,6 +518,13 @@ class MelodySelector:
                     end_time=float(note.end_time),
                     confidence=float(note.confidence),
                     reason_codes=self._unique_reason_codes(list(getattr(note, "reason_codes", []) or []) + [SHORT_GAP_BRIDGED]),
+                    candidate_id=getattr(note, "candidate_id", None),
+                    source_candidate_id=getattr(note, "source_candidate_id", None),
+                    source_candidate_ids=list(getattr(note, "source_candidate_ids", []) or []),
+                    source_contour_ids=list(getattr(note, "source_contour_ids", []) or []),
+                    candidate_origin=getattr(note, "candidate_origin", None),
+                    contour_bridge_evidence=dict(getattr(note, "contour_bridge_evidence", {}) or {}),
+                    contour_bridge_guard_reason_codes=list(getattr(note, "contour_bridge_guard_reason_codes", []) or []),
                 )
                 retained.append(retained_note)
                 actions.append(
@@ -581,6 +618,13 @@ class MelodySelector:
                 end_time=float(cur_note.end_time),
                 confidence=cur_confidence,
                 reason_codes=list(getattr(cur_note, "reason_codes", []) or []),
+                candidate_id=getattr(cur_note, "candidate_id", None),
+                source_candidate_id=getattr(cur_note, "source_candidate_id", None),
+                source_candidate_ids=list(getattr(cur_note, "source_candidate_ids", []) or []),
+                source_contour_ids=list(getattr(cur_note, "source_contour_ids", []) or []),
+                candidate_origin=getattr(cur_note, "candidate_origin", None),
+                contour_bridge_evidence=dict(getattr(cur_note, "contour_bridge_evidence", {}) or {}),
+                contour_bridge_guard_reason_codes=list(getattr(cur_note, "contour_bridge_guard_reason_codes", []) or []),
             )
 
         return repaired
@@ -633,6 +677,25 @@ class MelodySelector:
                         + list(getattr(cur_note, "reason_codes", []) or [])
                         + list(getattr(next_note, "reason_codes", []) or [])
                     ),
+                    source_candidate_ids=self._unique_reason_codes(
+                        list(getattr(prev_note, "source_candidate_ids", []) or [])
+                        + list(getattr(cur_note, "source_candidate_ids", []) or [])
+                        + list(getattr(next_note, "source_candidate_ids", []) or [])
+                        + [
+                            str(item)
+                            for item in (
+                                getattr(prev_note, "candidate_id", None),
+                                getattr(cur_note, "candidate_id", None),
+                                getattr(next_note, "candidate_id", None),
+                            )
+                            if item
+                        ]
+                    ),
+                    source_contour_ids=self._unique_reason_codes(
+                        list(getattr(prev_note, "source_contour_ids", []) or [])
+                        + list(getattr(cur_note, "source_contour_ids", []) or [])
+                        + list(getattr(next_note, "source_contour_ids", []) or [])
+                    ),
                 )
                 idx += 2
                 continue
@@ -653,6 +716,13 @@ class MelodySelector:
             end_time=float(note.end_time),
             confidence=float(note.confidence),
             reason_codes=list(getattr(note, "reason_codes", []) or []),
+            candidate_id=getattr(note, "candidate_id", None),
+            source_candidate_id=getattr(note, "source_candidate_id", None),
+            source_candidate_ids=list(getattr(note, "source_candidate_ids", []) or []),
+            source_contour_ids=list(getattr(note, "source_contour_ids", []) or []),
+            candidate_origin=getattr(note, "candidate_origin", None),
+            contour_bridge_evidence=dict(getattr(note, "contour_bridge_evidence", {}) or {}),
+            contour_bridge_guard_reason_codes=list(getattr(note, "contour_bridge_guard_reason_codes", []) or []),
         )
 
     @staticmethod
