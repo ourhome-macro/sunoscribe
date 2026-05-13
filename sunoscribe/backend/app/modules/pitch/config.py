@@ -75,6 +75,10 @@ class PitchDetectionConfig:
     melody_min_duration_sec: float = 0.12
     melody_short_note_sec: float = 0.18
     melody_short_note_min_confidence: float = 0.62
+    melody_low_octave_rescue_enabled: bool = True
+    melody_low_octave_rescue_context_gap_sec: float = 4.0
+    melody_low_octave_rescue_context_tolerance_semitones: int = 4
+    melody_low_octave_rescue_big_gap_sec: float = 0.5
     melody_merge_gap_sec: float = 0.08
     melody_merge_pitch_tolerance_semitones: int = 1
     melody_bridge_note_retention_enabled: bool = False

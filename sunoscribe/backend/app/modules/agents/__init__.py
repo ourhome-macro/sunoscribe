@@ -1,3 +1,4 @@
+from .audio_analysis_agent import AudioAnalysisAgent
 from .diagnosis_agent import DiagnosisAgent
 from .rvc_prepare_agent import RvcPrepareAgent
 from .score_patch_agent import ScorePatchAgent
@@ -33,6 +34,7 @@ __all__ = [
     "AgentSkillContext",
     "AgentSkillRegistry",
     "ArtifactReference",
+    "AudioAnalysisAgent",
     "DiagnosisAction",
     "DiagnosisAgent",
     "DiagnosisIssue",

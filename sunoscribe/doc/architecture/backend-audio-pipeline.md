@@ -366,7 +366,10 @@ save input copy
   -> score build
   -> create/select ScoreRevision
   -> revision-scoped exports
+  -> optional post-revision plugins, e.g. audio_analysis report
 ```
+
+`audio_analysis` 是当前的可选 post-`ScoreRevision` 插件：它只读取 typed artifacts 与可选歌词，生成 `audio_analysis_report` JSON artifact，用于解释音高、音域、滑音/颤音、节奏和歌词情绪推断。它不属于 required transcription pipeline，不应修改 `ScoreRevision`、不应生成 MIDI/MusicXML，也不应把缺歌词或缺可选证据升级为主流程失败。
 
 ## 维护建议
 
@@ -377,6 +380,7 @@ save input copy
 - 是否把 required stage 的失败显式暴露出来，而不是追加 warning 后继续“成功完成”。
 - 是否把 RMVPE 保持为 production F0 profile，而不是引入未标记的替代后端。
 - 是否让导出工件始终绑定到明确 `ScoreRevision`。
+- 是否把音频分析、诊断、RVC prepare 等解释/外部工作保持在 post-revision plugin 边界内。
 - 是否继续通过 `ProjectWorkspace` 统一路径，而不是让服务各自写随机文件。
 
 ## 代码入口索引

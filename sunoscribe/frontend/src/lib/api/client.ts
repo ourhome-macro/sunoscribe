@@ -1,10 +1,11 @@
 import type { AgentDiagnoseResponse, ApplyAgentScorePatchRequest, ApplyAgentScorePatchResponse } from '@/types/agents'
 import type { PublicArtifactResponse } from '@/types/artifact'
+import type { AudioAnalysisReportResponse } from '@/types/audio-analysis'
 import type { DiagnosticsResponse } from '@/types/diagnostics'
 import type { ProjectDetail, ProjectStatus, ProjectSummary, StageProgressItem } from '@/types/project'
 import type { ScoreRevisionSummary } from '@/types/revision'
 
-import { mockArtifacts, mockDashboard, mockDiagnosis, mockDiagnostics, mockProjectDetail, mockProjects, mockRevision } from './mock-data'
+import { mockArtifacts, mockAudioAnalysisReport, mockDashboard, mockDiagnosis, mockDiagnostics, mockProjectDetail, mockProjects, mockRevision } from './mock-data'
 
 const apiBaseUrl = (import.meta.env.VITE_API_BASE_URL as string | undefined)?.replace(/\/$/, '') ?? ''
 const apiMode = (import.meta.env.VITE_API_MODE ?? 'backend').toLowerCase()
@@ -418,6 +419,8 @@ function mockClient() {
     getRevision: async () => clone(mockRevision),
     listArtifacts: async () => clone(mockArtifacts),
     diagnoseRevision: async () => clone(mockDiagnosis),
+    getAudioAnalysisReport: async () => clone(mockAudioAnalysisReport),
+    generateAudioAnalysisReport: async () => clone(mockAudioAnalysisReport),
     getDiagnostics: async () => clone(mockDiagnostics),
     applyScorePatch: async (_revisionId: string, request: ApplyAgentScorePatchRequest): Promise<ApplyAgentScorePatchResponse> => {
       const operationNames = request.operations.map((operation) => operation.op)
@@ -515,6 +518,19 @@ const backendClient = {
 
   async diagnoseRevision(revisionId: string): Promise<AgentDiagnoseResponse> {
     return request<AgentDiagnoseResponse>(`/api/score-revisions/${revisionId}/agent/diagnose`, { method: 'POST' })
+  },
+
+  async getAudioAnalysisReport(revisionId: string): Promise<AudioAnalysisReportResponse | null> {
+    try {
+      return await request<AudioAnalysisReportResponse>(`/api/score-revisions/${revisionId}/audio-analysis`)
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 404) return null
+      throw error
+    }
+  },
+
+  async generateAudioAnalysisReport(revisionId: string): Promise<AudioAnalysisReportResponse> {
+    return request<AudioAnalysisReportResponse>(`/api/score-revisions/${revisionId}/audio-analysis`, { method: 'POST' })
   },
 
   async getDiagnostics(projectId: string): Promise<DiagnosticsResponse> {

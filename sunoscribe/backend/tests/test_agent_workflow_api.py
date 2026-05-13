@@ -18,6 +18,15 @@ from app.modules.agents.types import (
     DiagnosisSectionFinding,
     UncertainNoteDiagnosis,
 )
+from app.schemas.audio_analysis import (
+    AudioAnalysisExpression,
+    AudioAnalysisLyrics,
+    AudioAnalysisPitch,
+    AudioAnalysisRange,
+    AudioAnalysisReport,
+    AudioAnalysisRhythm,
+    AudioAnalysisSummary,
+)
 from app.utils.dependencies import get_current_user
 
 
@@ -88,6 +97,29 @@ class TestAgentWorkflowApi(unittest.TestCase):
         self.assertEqual(payload["data"]["uncertain_notes"][0]["note_id"], "n1")
         self.assertEqual(payload["data"]["uncertain_notes"][0]["reason_codes"], ["low_confidence", "uncertain"])
         service.diagnose_transcription.assert_called_once_with(
+            self.db,
+            user=self.user,
+            revision_id=REVISION_ID,
+        )
+
+    def test_audio_analysis_post_endpoint_returns_report_and_public_artifact(self) -> None:
+        service = MagicMock()
+        artifact_id = uuid.uuid4()
+        service.run_audio_analysis.return_value = (
+            _sample_audio_analysis_report(),
+            SimpleNamespace(id=artifact_id, status="available", created_at=None),
+        )
+
+        with self._patched_workflow_service(service):
+            response = self.client.post(f"/api/score-revisions/{REVISION_ID}/audio-analysis")
+
+        self.assertEqual(response.status_code, 200, response.text)
+        payload = response.json()
+        self.assertTrue(payload["success"])
+        self.assertEqual(payload["data"]["artifact_id"], str(artifact_id))
+        self.assertEqual(payload["data"]["report"]["revision_id"], REVISION_ID)
+        self.assertEqual(payload["data"]["report"]["summary"]["headline"], "主旋律音域约为 C4 到 G4。")
+        service.run_audio_analysis.assert_called_once_with(
             self.db,
             user=self.user,
             revision_id=REVISION_ID,
@@ -288,6 +320,42 @@ class TestAgentWorkflowApi(unittest.TestCase):
     def _patched_workflow_service(self, service: MagicMock):
         module = importlib.import_module("app.api.agents")
         return patch.object(module, "agent_workflow_service", service)
+
+
+def _sample_audio_analysis_report() -> AudioAnalysisReport:
+    return AudioAnalysisReport(
+        version="audio_analysis_report_v1",
+        project_id=PROJECT_ID,
+        revision_id=REVISION_ID,
+        status="ok",
+        pitch=AudioAnalysisPitch(
+            available=True,
+            note_count=3,
+            pitch_class_histogram={"C": 1, "E": 1, "G": 1},
+            most_common_pitch_classes=["C", "E", "G"],
+            melodic_direction="ascending_bias",
+            evidence="score_ir_notes",
+        ),
+        expression=AudioAnalysisExpression(available=True, vibrato_segment_count=1, evidence="f0_track_frames"),
+        range=AudioAnalysisRange(
+            available=True,
+            lowest_pitch="C4",
+            highest_pitch="G4",
+            lowest_pitch_midi=60,
+            highest_pitch_midi=67,
+            span_semitones=7,
+            evidence="score_ir_notes",
+        ),
+        rhythm=AudioAnalysisRhythm(available=True, bpm=120.0, evidence="rhythm_grid"),
+        lyrics=AudioAnalysisLyrics(available=False, status="missing_lyrics", evidence="lyrics_not_provided"),
+        summary=AudioAnalysisSummary(
+            headline="主旋律音域约为 C4 到 G4。",
+            highlights=["主旋律音域约为 C4 到 G4。"],
+            confidence=0.8,
+            evidence_count=4,
+        ),
+        warnings=[],
+    )
 
 
 if __name__ == "__main__":

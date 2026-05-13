@@ -1,5 +1,6 @@
 import type { AgentDiagnoseResponse } from '@/types/agents'
 import type { PublicArtifactResponse } from '@/types/artifact'
+import type { AudioAnalysisReportResponse } from '@/types/audio-analysis'
 import type { DiagnosticsResponse } from '@/types/diagnostics'
 import type { ProjectDetail, ProjectSummary, StageProgressItem } from '@/types/project'
 import type { ScoreRevisionSummary } from '@/types/revision'
@@ -185,7 +186,104 @@ export const mockArtifacts: PublicArtifactResponse[] = [
       diagnostic_message: 'MIDI is available for listening review, but the melody is sparse/fragmented and should not be treated as a clean transcription.',
     },
   },
+  {
+    id: '3e6c8921-e0b7-4a3c-a6a1-1c4d4f2f0101',
+    artifact_type: 'audio_analysis_report',
+    status: 'available',
+    filename: 'audio_analysis_report.json',
+    mime_type: 'application/json',
+    file_size_bytes: 12400,
+    checksum: 'sha256:mock-audio-analysis-report',
+    created_at: '2026-05-08T20:35:00+08:00',
+    metadata: {
+      kind: 'audio_analysis_report',
+      report_status: 'partial',
+    },
+  },
 ]
+
+export const mockAudioAnalysisReport: AudioAnalysisReportResponse = {
+  artifact_id: '3e6c8921-e0b7-4a3c-a6a1-1c4d4f2f0101',
+  artifact_status: 'available',
+  artifact_created_at: '2026-05-08T20:35:00+08:00',
+  report: {
+    version: 'audio_analysis_report_v1',
+    project_id: mockRevision.project_id,
+    revision_id: mockRevision.id,
+    status: 'partial',
+    pitch: {
+      available: true,
+      note_count: 128,
+      voiced_frame_count: 4200,
+      pitch_class_histogram: { C: 18, D: 15, E: 22, G: 20, A: 14 },
+      most_common_pitch_classes: ['E', 'G', 'C', 'D', 'A'],
+      melodic_direction: 'balanced',
+      ascending_interval_count: 46,
+      descending_interval_count: 42,
+      repeated_interval_count: 39,
+      average_note_confidence: 0.82,
+      evidence: 'score_ir_notes',
+    },
+    expression: {
+      available: true,
+      vibrato_segment_count: 9,
+      slide_segment_count: 6,
+      long_note_stability: 0.78,
+      vibrato_segments: [],
+      slide_segments: [],
+      suspicious_pitch_note_ids: ['n-018', 'n-077'],
+      evidence: 'f0_track_frames_and_score_ir_notes',
+    },
+    range: {
+      available: true,
+      lowest_pitch: 'A3',
+      highest_pitch: 'E5',
+      lowest_pitch_midi: 57,
+      highest_pitch_midi: 76,
+      span_semitones: 19,
+      tessitura_low_midi: 60,
+      tessitura_high_midi: 72,
+      tessitura_low: 'C4',
+      tessitura_high: 'C5',
+      highest_note_locations: [{ note_id: 'n-021', pitch: 'E5', measure_num: 6 }],
+      section_ranges: [{ label: 'Chorus', lowest_pitch: 'D4', highest_pitch: 'E5', span_semitones: 14, note_count: 32 }],
+      evidence: 'score_ir_notes',
+    },
+    rhythm: {
+      available: true,
+      bpm: 120,
+      bpm_confidence: 0.84,
+      rhythm_type: 'stable',
+      stability_score: 0.88,
+      beat_count: 96,
+      average_grid_offset_sec: 0.032,
+      median_grid_offset_sec: 0.021,
+      syncopation_note_count: 18,
+      weak_beat_start_count: 44,
+      average_duration_beats: 0.82,
+      evidence: 'rhythm_grid_and_score_ir_notes',
+    },
+    lyrics: {
+      available: false,
+      status: 'missing_lyrics',
+      line_count: 0,
+      keyword_candidates: [],
+      sentiment_label: null,
+      sentiment_score: null,
+      positive_keyword_hits: [],
+      negative_keyword_hits: [],
+      emotion_curve: [],
+      evidence: 'lyrics_not_provided',
+    },
+    summary: {
+      headline: '主旋律音域约为 A3 到 E5，跨度 19 个半音。',
+      highlights: ['主旋律音域约为 A3 到 E5，跨度 19 个半音。', '检测到 9 个疑似颤音长音片段。', '节奏约 120 BPM，稳定性较稳定。'],
+      confidence: 0.82,
+      evidence_count: 4,
+    },
+    warnings: ['missing_lyrics'],
+  },
+}
 
 export const mockProjectDetail: ProjectDetail = {
   ...mockProjects[0],

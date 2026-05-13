@@ -82,7 +82,7 @@ $env:PYTHONPATH='.'
 - Projects：`POST/GET /api/projects`、`GET/PUT/DELETE /api/projects/{project_id}`
 - Upload：`POST /api/upload/audio`、`POST /api/upload/video`
 - Scores：`GET/POST /api/projects/{project_id}/score`、`PUT /api/scores/{score_id}`、`GET /api/scores/{score_id}/export`
-- Agent workflows：`POST /api/score-revisions/{revision_id}/agent/diagnose`、`POST /api/score-revisions/{revision_id}/agent/patch/propose`、`POST /api/score-revisions/{revision_id}/agent/patch/apply`、`POST /api/score-revisions/{revision_id}/agent/rvc/prepare`、`POST /api/score-revisions/{revision_id}/exports/regenerate`
+- Agent workflows：`GET/POST /api/score-revisions/{revision_id}/audio-analysis`、`POST /api/score-revisions/{revision_id}/agent/diagnose`、`POST /api/score-revisions/{revision_id}/agent/patch/propose`、`POST /api/score-revisions/{revision_id}/agent/patch/apply`、`POST /api/score-revisions/{revision_id}/agent/rvc/prepare`、`POST /api/score-revisions/{revision_id}/exports/regenerate`
 - Lyrics：`GET /api/projects/{project_id}/lyrics`、`PUT /api/lyrics/{lyrics_id}`
 - Tasks：`GET /api/tasks/{task_id}`、`POST /api/tasks/{task_id}/retry`
 - Health：`GET /api/health`、`GET /api/health/pitch`
@@ -98,6 +98,8 @@ $env:PYTHONPATH='.'
 5. 生成 `ScoreRevision` 与 `Artifact`，并从选定 revision 派生 MIDI / MusicXML / score view 导出。
 
 当前还包含受约束 agent workflow：agent 只能读取 `ScoreRevision` 与 typed artifacts，诊断或提出小型 `ScorePatch`，patch 必须经 validator 后才会创建新的 user revision；RVC prepare 目前准备 job spec，不直接调用外部 RVC。
+
+音频分析 MVP 已作为 post-`ScoreRevision` 插件接入：`audio_analysis` 插件读取 `ScoreIR`、`F0Track`、`NoteCandidateSet`、`RhythmGrid` 与可选歌词，生成 `AudioAnalysisReport`，并保存为 revision-scoped `audio_analysis_report` JSON artifact。该报告包含 `pitch`、`expression`、`range`、`rhythm`、`lyrics`、`summary` 与 `warnings`，用于解释音高、音域、滑音/颤音、节奏稳定性和歌词情绪推断。它是可选解释层，不会修改 `ScoreRevision`、不会重写 MIDI/MusicXML，也不会影响 required stage 成败。
 
 当前 production 语义：
 

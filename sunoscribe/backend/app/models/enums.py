@@ -51,6 +51,7 @@ class ArtifactType(str, Enum):
     MIDI = "midi"
     MUSICXML = "musicxml"
     SCORE_VIEW = "score_view"
+    AUDIO_ANALYSIS_REPORT = "audio_analysis_report"
     PDF = "pdf"
     DEBUG_IMAGE = "debug_image"
     DEBUG_JSON = "debug_json"

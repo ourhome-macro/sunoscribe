@@ -12,6 +12,8 @@ export interface PublicArtifactResponse {
     quality_gate_status?: string | null
     quality_failed_checks?: string[]
     diagnostic_message?: string | null
+    kind?: string | null
+    report_status?: string | null
   } | null
 }
 

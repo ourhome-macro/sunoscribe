@@ -9,6 +9,7 @@ from app.modules.pitch.types import F0Frame, F0Track, MetaInfo, PitchAnalysisRes
 from app.modules.score_ir import ScoreIR, ScoreIRSerializer, ScoreMeasure, ScoreMeta, ScoreNote
 from app.modules.pitch import MidiExporter
 from app.services.audio_analysis_service import AudioAnalysisOptions, AudioAnalysisService
+from app.services.melody_transcription_service import MelodyTranscriptionService
 from app.services.media_ingest_service import MediaIngestService
 from app.services.workspace import ProjectWorkspace
 
@@ -137,6 +138,29 @@ class _EmptyPitchPipeline:
         )
 
 
+class _CaptureMelodySelector:
+    def __init__(self) -> None:
+        self.last_kwargs = None
+
+    def select(self, **kwargs):
+        self.last_kwargs = kwargs
+        return {
+            "version": "selected_melody_v1",
+            "selected_notes": [
+                {
+                    "candidate_id": "sel_1",
+                    "start_time_sec": 0.1,
+                    "end_time_sec": 0.3,
+                    "pitch_center_midi": 57,
+                    "confidence": 0.9,
+                    "source_contour_ids": ["pc_00001"],
+                    "source_candidate_ids": [],
+                    "reason_codes": [],
+                }
+            ],
+        }
+
+
 class _FakeScoreIRBuilder:
     def __init__(self) -> None:
         self.last_args = None
@@ -214,6 +238,49 @@ class TestAudioAnalysisService(unittest.TestCase):
             self.assertEqual(result.canonical_audio_path, canonical_audio)
             self.assertTrue(canonical_audio.exists())
             self.assertEqual(result.metadata["stage"], "media_ingest")
+
+
+    def test_melody_transcription_passes_vocal_activity_to_selector(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            workspace = ProjectWorkspace(project_id="melody_selector_bridge", projects_root=root / "projects")
+            workspace.ensure_structure()
+            source_audio = root / "source.wav"
+            source_audio.write_bytes(b"audio")
+            selector = _CaptureMelodySelector()
+            service = MelodyTranscriptionService(
+                pitch_pipeline=_CapturePitchPipeline(),
+                serializer=AudioAnalysisService(
+                    audio_processor=_PassthroughAudioProcessor(),
+                    vocal_separator=None,
+                    lyrics_recognizer=None,
+                    pitch_pipeline=None,
+                    analysis_inferencer=None,
+                    midi_exporter=None,
+                )._serialize,
+                pitch_request_builder=lambda **kwargs: PitchPipelineRequest(
+                    lead_audio_path=str(kwargs["vocals_path"] or kwargs["fallback_audio_path"]),
+                    source_audio_path=str(kwargs["source_audio_path"]),
+                    rhythm_audio_path=str(kwargs["accompaniment_path"]) if kwargs.get("accompaniment_path") else None,
+                    source_stems={name: str(path) for name, path in kwargs.get("stem_paths", {}).items()},
+                ),
+                short_exception=lambda exc: str(exc),
+                melody_selector=selector,
+            )
+
+            result = service.transcribe(
+                source_audio_path=source_audio,
+                canonical_audio_path=source_audio,
+                vocals_path=source_audio,
+                accompaniment_path=None,
+                stem_paths={"vocals": source_audio},
+                workspace=workspace,
+            )
+
+            self.assertIsNotNone(selector.last_kwargs)
+            self.assertEqual(selector.last_kwargs["vocal_activity"]["segments"][0]["state"], "vocal")
+            self.assertEqual(result.selected_melody_dict["selected_notes"][0]["candidate_id"], "sel_1")
+            self.assertEqual(result.vocal_activity_dict["segments"][0]["source_stem"], "vocals")
 
     def test_process_audio_canonicalizes_mp4_before_separation(self) -> None:
         with TemporaryDirectory() as temp_dir:

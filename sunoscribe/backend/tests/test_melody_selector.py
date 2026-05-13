@@ -2,7 +2,12 @@ import unittest
 
 from app.modules.pitch.config import PitchDetectionConfig
 from app.modules.pitch.melody_selector import MelodySelector
-from app.modules.pitch.reason_codes import OCTAVE_JUMP_CORRECTED, SHORT_GAP_BRIDGED, SHORT_NOTE_ABSORBED
+from app.modules.pitch.reason_codes import (
+    OCTAVE_JUMP_CORRECTED,
+    PRESELECTOR_LOW_OCTAVE_CORRECTED,
+    SHORT_GAP_BRIDGED,
+    SHORT_NOTE_ABSORBED,
+)
 from app.modules.pitch.types import Note
 
 
@@ -30,6 +35,56 @@ class TestMelodySelector(unittest.TestCase):
         self.assertEqual(result.removed_pitch_range, 1)
         self.assertEqual(result.removed_short, 1)
         self.assertEqual(result.removed_low_confidence, 1)
+
+    def test_rescues_low_octave_candidate_with_local_context(self):
+        selector = MelodySelector(
+            PitchDetectionConfig(
+                melody_min_confidence=0.52,
+                melody_min_duration_sec=0.12,
+                melody_merge_gap_sec=0.08,
+                melody_merge_pitch_tolerance_semitones=1,
+            )
+        )
+        notes = [
+            Note(pitch="A#3", start_time=0.00, end_time=0.30, confidence=0.88),
+            Note(pitch="A#2", start_time=0.62, end_time=1.04, confidence=0.68),
+            Note(pitch="A#3", start_time=2.00, end_time=2.30, confidence=0.86),
+        ]
+
+        result = selector.select(notes)
+
+        self.assertEqual(result.removed_pitch_range, 0)
+        rescued = [note for note in result.notes if note.start_time == 0.62]
+        self.assertEqual(len(rescued), 1)
+        self.assertEqual(rescued[0].pitch, "A#3")
+        self.assertIn(PRESELECTOR_LOW_OCTAVE_CORRECTED, rescued[0].reason_codes)
+
+    def test_does_not_rescue_low_octave_without_context(self):
+        selector = MelodySelector(PitchDetectionConfig())
+        notes = [
+            Note(pitch="A#2", start_time=1.00, end_time=1.42, confidence=0.68),
+            Note(pitch="F4", start_time=10.00, end_time=10.50, confidence=0.90),
+        ]
+
+        result = selector.select(notes)
+
+        self.assertEqual(result.kept_count, 1)
+        self.assertEqual(result.notes[0].pitch, "F4")
+        self.assertEqual(result.removed_pitch_range, 1)
+
+    def test_does_not_rescue_low_octave_when_it_splits_one_big_gap_into_two(self):
+        selector = MelodySelector(PitchDetectionConfig())
+        notes = [
+            Note(pitch="A#3", start_time=0.00, end_time=0.30, confidence=0.88),
+            Note(pitch="A#2", start_time=1.00, end_time=1.42, confidence=0.68),
+            Note(pitch="A#3", start_time=2.00, end_time=2.30, confidence=0.86),
+        ]
+
+        result = selector.select(notes)
+
+        self.assertEqual(result.kept_count, 2)
+        self.assertEqual([note.pitch for note in result.notes], ["A#3", "A#3"])
+        self.assertEqual(result.removed_pitch_range, 1)
 
     def test_merges_adjacent_near_pitch_fragments(self):
         selector = MelodySelector(

@@ -193,6 +193,13 @@ def list_score_revisions_for_score(score: Score) -> list[dict[str, Any]]:
 
 
 def _serialize_revision(revision: Any) -> dict[str, Any]:
+    artifact_ids: dict[str, str] = {}
+    for artifact in list(getattr(revision, "artifacts", None) or []):
+        artifact_type = str(getattr(artifact, "artifact_type", "") or "")
+        artifact_id = getattr(artifact, "id", None)
+        if artifact_type and artifact_id is not None:
+            artifact_ids[artifact_type] = str(artifact_id)
+
     return {
         "id": str(revision.id),
         "project_id": str(revision.project_id),
@@ -202,6 +209,7 @@ def _serialize_revision(revision: Any) -> dict[str, Any]:
         "revision_type": str(revision.revision_type),
         "score_type": str(revision.score_type),
         "key": str(revision.key),
+        "artifact_ids": artifact_ids,
         "client_summary": build_score_revision_client_summary(revision=revision),
         "created_by_user_id": str(revision.created_by_user_id) if revision.created_by_user_id else None,
         "created_at": revision.created_at.isoformat() if revision.created_at else None,

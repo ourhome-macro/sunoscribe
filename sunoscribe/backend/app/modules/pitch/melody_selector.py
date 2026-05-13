@@ -6,7 +6,7 @@ from typing import List
 from .config import PitchDetectionConfig
 from .note_utils import midi_to_note, note_to_midi
 from .phrase_postprocessor import PhraseAwarePostprocessor, PhrasePostprocessConfig
-from .reason_codes import SHORT_GAP_BRIDGED
+from .reason_codes import OCTAVE_OUTLIER, PRESELECTOR_LOW_OCTAVE_CORRECTED, SHORT_GAP_BRIDGED
 from .types import Note
 
 
@@ -59,8 +59,12 @@ class MelodySelector:
                 removed_pitch_range += 1
                 continue
             if pitch_midi < int(self.config.melody_pitch_min_midi) or pitch_midi > int(self.config.melody_pitch_max_midi):
-                removed_pitch_range += 1
-                continue
+                rescued_note = self._rescue_low_octave_note(note, sorted_notes=sorted_notes)
+                if rescued_note is None:
+                    removed_pitch_range += 1
+                    continue
+                note = rescued_note
+                pitch_midi = self._to_midi(note.pitch)
             if duration < float(self.config.melody_min_duration_sec):
                 removed_short += 1
                 if confidence < float(self.config.melody_short_note_min_confidence):
@@ -140,6 +144,116 @@ class MelodySelector:
             vocal_max_midi=int(self.config.melody_pitch_max_midi),
             max_iterations=2,
         )
+
+    def _rescue_low_octave_note(self, note: Note, *, sorted_notes: list[Note]) -> Note | None:
+        if not bool(self.config.melody_low_octave_rescue_enabled):
+            return None
+        pitch_midi = self._to_midi(note.pitch)
+        if pitch_midi is None or pitch_midi >= int(self.config.melody_pitch_min_midi):
+            return None
+        duration = self._duration_sec(note)
+        confidence = float(note.confidence)
+        if duration < float(self.config.melody_min_duration_sec) or confidence < float(self.config.melody_min_confidence):
+            return None
+
+        left_note, right_note = self._nearest_context_notes(note, sorted_notes=sorted_notes)
+        if not self._low_octave_rescue_preserves_gap_continuity(note, left_note, right_note):
+            return None
+        context_pitches = [
+            midi
+            for midi in (
+                self._to_midi(left_note.pitch) if left_note is not None else None,
+                self._to_midi(right_note.pitch) if right_note is not None else None,
+            )
+            if midi is not None
+        ]
+        if not context_pitches:
+            return None
+
+        current_delta = min(abs(pitch_midi - context_pitch) for context_pitch in context_pitches)
+        if current_delta < max(8, int(self.config.melody_large_jump_semitones) - 3):
+            return None
+
+        min_pitch = int(self.config.melody_pitch_min_midi)
+        max_pitch = int(self.config.melody_pitch_max_midi)
+        tolerance = max(1, int(self.config.melody_low_octave_rescue_context_tolerance_semitones))
+        best_candidate: tuple[int, int, int] | None = None
+        for shift in (12,):
+            shifted_pitch = pitch_midi + shift
+            if shifted_pitch < min_pitch or shifted_pitch > max_pitch:
+                continue
+            shifted_delta = min(abs(shifted_pitch - context_pitch) for context_pitch in context_pitches)
+            candidate = (shifted_delta, shift, shifted_pitch)
+            if best_candidate is None or candidate < best_candidate:
+                best_candidate = candidate
+        if best_candidate is None:
+            return None
+        shifted_delta, shift, shifted_pitch = best_candidate
+        if shifted_delta > tolerance:
+            return None
+        if shifted_delta + max(2, tolerance // 2) >= current_delta:
+            return None
+
+        return Note(
+            pitch=midi_to_note(shifted_pitch),
+            start_time=float(note.start_time),
+            end_time=float(note.end_time),
+            confidence=confidence,
+            reason_codes=self._unique_reason_codes(
+                list(getattr(note, "reason_codes", []) or [])
+                + [OCTAVE_OUTLIER, PRESELECTOR_LOW_OCTAVE_CORRECTED]
+            ),
+        )
+
+    def _low_octave_rescue_preserves_gap_continuity(
+        self,
+        note: Note,
+        left_note: Note | None,
+        right_note: Note | None,
+    ) -> bool:
+        if left_note is None or right_note is None:
+            return False
+        big_gap = max(0.0, float(self.config.melody_low_octave_rescue_big_gap_sec))
+        original_gap = float(right_note.start_time) - float(left_note.end_time)
+        if original_gap <= big_gap:
+            return True
+        left_gap = float(note.start_time) - float(left_note.end_time)
+        right_gap = float(right_note.start_time) - float(note.end_time)
+        if left_gap < 0.0 or right_gap < 0.0:
+            return False
+        before_big_count = 1 if original_gap > big_gap else 0
+        after_big_count = int(left_gap > big_gap) + int(right_gap > big_gap)
+        return after_big_count <= before_big_count
+
+    def _nearest_context_notes(self, note: Note, *, sorted_notes: list[Note]) -> tuple[Note | None, Note | None]:
+        max_gap = max(0.0, float(self.config.melody_low_octave_rescue_context_gap_sec))
+        start = float(note.start_time)
+        end = float(note.end_time)
+        min_pitch = int(self.config.melody_pitch_min_midi)
+        max_pitch = int(self.config.melody_pitch_max_midi)
+
+        left_candidates: list[Note] = []
+        right_candidates: list[Note] = []
+        for candidate in sorted_notes:
+            if candidate is note:
+                continue
+            candidate_pitch = self._to_midi(candidate.pitch)
+            if candidate_pitch is None or candidate_pitch < min_pitch or candidate_pitch > max_pitch:
+                continue
+            if float(candidate.confidence) < float(self.config.melody_min_confidence):
+                continue
+            if self._duration_sec(candidate) < float(self.config.melody_min_duration_sec):
+                continue
+            candidate_end = float(candidate.end_time)
+            candidate_start = float(candidate.start_time)
+            if candidate_end <= start and start - candidate_end <= max_gap:
+                left_candidates.append(candidate)
+            elif candidate_start >= end and candidate_start - end <= max_gap:
+                right_candidates.append(candidate)
+
+        left_note = max(left_candidates, key=lambda item: float(item.end_time), default=None)
+        right_note = min(right_candidates, key=lambda item: float(item.start_time), default=None)
+        return left_note, right_note
 
     def _repair_phrase_notes(self, notes: List[Note]) -> list[Note]:
         if len(notes) <= 2:

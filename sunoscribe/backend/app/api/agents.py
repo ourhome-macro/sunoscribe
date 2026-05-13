@@ -10,6 +10,7 @@ from app.models.artifact import Artifact
 from app.models.score_revision import ScoreRevision
 from app.modules.agents import AgentScorePatch
 from app.modules.score_ir.client_summary import build_score_revision_client_summary
+from app.schemas.audio_analysis import AudioAnalysisReportResponse
 from app.schemas.agent_workflow import (
     AgentDiagnoseResponse,
     AgentScorePatchProposalResponse,
@@ -43,6 +44,46 @@ def diagnose_revision_api(
     )
     response = AgentDiagnoseResponse.model_validate(diagnosis.model_dump())
     return success_response(response.model_dump(mode="json"))
+
+
+@router.get("/{revision_id}/audio-analysis")
+def get_audio_analysis_api(
+    revision_id: uuid.UUID,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    report, artifact = agent_workflow_service.get_audio_analysis_report(
+        db,
+        user=current_user,
+        revision_id=str(revision_id),
+    )
+    response = AudioAnalysisReportResponse(
+        artifact_id=uuid.UUID(str(artifact.id)) if getattr(artifact, "id", None) else None,
+        artifact_status=str(artifact.status or "") if getattr(artifact, "status", None) is not None else None,
+        artifact_created_at=artifact.created_at,
+        report=report,
+    )
+    return success_response(response.model_dump(mode="json"))
+
+
+@router.post("/{revision_id}/audio-analysis")
+def run_audio_analysis_api(
+    revision_id: uuid.UUID,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    report, artifact = agent_workflow_service.run_audio_analysis(
+        db,
+        user=current_user,
+        revision_id=str(revision_id),
+    )
+    response = AudioAnalysisReportResponse(
+        artifact_id=uuid.UUID(str(artifact.id)) if getattr(artifact, "id", None) else None,
+        artifact_status=str(artifact.status or "") if getattr(artifact, "status", None) is not None else None,
+        artifact_created_at=artifact.created_at,
+        report=report,
+    )
+    return success_response(response.model_dump(mode="json"), "audio analysis report generated")
 
 
 @router.post("/{revision_id}/agent/patch/propose")
@@ -170,4 +211,5 @@ def _public_artifact(artifact: Artifact) -> PublicArtifactResponse:
         file_size_bytes=artifact.file_size_bytes,
         checksum=artifact.checksum,
         created_at=artifact.created_at,
+        metadata=dict(getattr(artifact, "artifact_metadata", None) or {}),
     )

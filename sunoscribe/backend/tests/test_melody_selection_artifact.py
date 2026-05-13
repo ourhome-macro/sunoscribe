@@ -4,6 +4,14 @@ import unittest
 
 from app.modules.pitch.melody_selection_artifact import MelodySelectionConfig, RuleBasedMelodySelector
 from app.modules.pitch.reason_codes import (
+    BRIDGE_CONFIDENCE_GUARDED,
+    BRIDGE_FROM_VOICED_CONTOUR,
+    BRIDGE_LOW_CONFIDENCE_LONG_CONTOUR,
+    BRIDGE_NO_SELECTED_GAP,
+    BRIDGE_OVERLAPS_RAW_CANDIDATE,
+    BRIDGE_OVERLAPS_SELECTED_NOTE,
+    BRIDGE_VOCAL_ACTIVITY_UNSUPPORTED,
+    BRIDGE_UNSTABLE_CONTOUR_GUARDED,
     ISOLATED_FRAGMENT_REMOVED,
     LOW_CONFIDENCE,
     OCTAVE_JUMP_CORRECTED,
@@ -11,6 +19,7 @@ from app.modules.pitch.reason_codes import (
     OVERLAPS_STRONGER_CANDIDATE,
     PHRASE_MEDIAN_SMOOTHED,
     PHRASE_GAP_SUSTAINED,
+    POST_F0_CONTOUR_BRIDGE,
     SHORT_GAP_BRIDGED,
     SHORT_NOTE_ABSORBED,
     TOO_SHORT,
@@ -79,6 +88,215 @@ class TestRuleBasedMelodySelector(unittest.TestCase):
         self.assertEqual(result["summary"]["selected_count"], 1)
         self.assertEqual(result["summary"]["rejected_count"], 1)
         self.assertIn(OVERLAPS_STRONGER_CANDIDATE, result["rejected_candidates"][0]["reason_codes"])
+
+
+    def test_post_f0_contour_bridge_creates_missing_high_confidence_contour(self) -> None:
+        result = RuleBasedMelodySelector(MelodySelectionConfig(phrase_postprocess_enabled=False)).select(
+            note_candidates={
+                "melody_candidates": {
+                    "notes": [
+                        {"id": "left", "start_time": 0.0, "end_time": 0.4, "pitch": "C4", "confidence": 0.9},
+                        {"id": "right", "start_time": 1.4, "end_time": 1.8, "pitch": "D4", "confidence": 0.9},
+                    ]
+                }
+            },
+            pitch_contours={
+                "contours": [
+                    {
+                        "id": "pc_bridge",
+                        "start_time_sec": 0.75,
+                        "end_time_sec": 1.05,
+                        "pitch_center_midi": 62,
+                        "mean_confidence": 0.88,
+                        "voiced_ratio": 1.0,
+                        "stability": 0.8,
+                    }
+                ]
+            },
+            vocal_activity={"segments": [{"start_time": 0.5, "end_time": 1.2, "state": "vocal"}]},
+        )
+
+        bridged = [note for note in result["selected_notes"] if note["candidate_id"].startswith("post_f0_bridge:")]
+        self.assertEqual(len(bridged), 1)
+        self.assertIn(POST_F0_CONTOUR_BRIDGE, bridged[0]["reason_codes"])
+        self.assertIn(BRIDGE_FROM_VOICED_CONTOUR, bridged[0]["reason_codes"])
+        self.assertIn(BRIDGE_CONFIDENCE_GUARDED, bridged[0]["reason_codes"])
+        self.assertEqual(bridged[0]["bridge_evidence"]["source_contour_id"], "pc_bridge")
+        self.assertEqual(result["summary"]["bridge_accepted_count"], 1)
+        self.assertEqual(result["bridge"]["accepted_count"], 1)
+
+    def test_post_f0_contour_bridge_rejects_overlap_with_selected_or_raw_candidate(self) -> None:
+        result = RuleBasedMelodySelector(MelodySelectionConfig(phrase_postprocess_enabled=False)).select(
+            note_candidates={
+                "melody_candidates": {
+                    "notes": [
+                        {"id": "left", "start_time": 0.0, "end_time": 0.4, "pitch": "C4", "confidence": 0.9},
+                        {"id": "raw_overlap", "start_time": 0.8, "end_time": 1.0, "pitch": "D4", "confidence": 0.9},
+                        {"id": "right", "start_time": 1.6, "end_time": 2.0, "pitch": "E4", "confidence": 0.9},
+                    ]
+                }
+            },
+            pitch_contours={
+                "contours": [
+                    {
+                        "id": "pc_raw_overlap",
+                        "start_time_sec": 0.8,
+                        "end_time_sec": 1.05,
+                        "pitch_center_midi": 62,
+                        "mean_confidence": 0.91,
+                        "voiced_ratio": 1.0,
+                        "stability": 0.8,
+                    },
+                    {
+                        "id": "pc_selected_overlap",
+                        "start_time_sec": 0.2,
+                        "end_time_sec": 0.35,
+                        "pitch_center_midi": 60,
+                        "mean_confidence": 0.91,
+                        "voiced_ratio": 1.0,
+                        "stability": 0.8,
+                    },
+                ]
+            },
+            vocal_activity={"segments": [{"start_time": 0.0, "end_time": 2.0, "state": "vocal"}]},
+        )
+
+        rejected = {item["candidate_id"]: set(item.get("bridge_guard_reason_codes") or []) for item in result["rejected_candidates"]}
+        self.assertIn(BRIDGE_OVERLAPS_RAW_CANDIDATE, rejected["post_f0_bridge:pc_raw_overlap"])
+        self.assertIn(BRIDGE_OVERLAPS_SELECTED_NOTE, rejected["post_f0_bridge:pc_selected_overlap"])
+        self.assertEqual(result["bridge"]["accepted_count"], 0)
+
+    def test_post_f0_contour_bridge_rejects_confidence_duration_range_and_vocal_activity_guards(self) -> None:
+        result = RuleBasedMelodySelector(MelodySelectionConfig(phrase_postprocess_enabled=False)).select(
+            note_candidates={
+                "melody_candidates": {
+                    "notes": [
+                        {"id": "left", "start_time": 0.0, "end_time": 0.4, "pitch": "C4", "confidence": 0.9},
+                        {"id": "right", "start_time": 2.0, "end_time": 2.4, "pitch": "E4", "confidence": 0.9},
+                    ]
+                }
+            },
+            pitch_contours={
+                "contours": [
+                    {
+                        "id": "pc_guarded",
+                        "start_time_sec": 0.7,
+                        "end_time_sec": 0.8,
+                        "pitch_center_midi": 90,
+                        "mean_confidence": 0.4,
+                        "voiced_ratio": 0.5,
+                        "stability": 0.8,
+                    }
+                ]
+            },
+            vocal_activity={"segments": [{"start_time": 1.2, "end_time": 1.5, "state": "vocal"}]},
+        )
+
+        bridge_rejection = next(item for item in result["rejected_candidates"] if item["candidate_id"] == "post_f0_bridge:pc_guarded")
+        reasons = set(bridge_rejection["bridge_guard_reason_codes"])
+        self.assertIn(LOW_CONFIDENCE, reasons)
+        self.assertIn(TOO_SHORT, reasons)
+        self.assertIn(OUTSIDE_VOCAL_RANGE, reasons)
+        self.assertIn(BRIDGE_VOCAL_ACTIVITY_UNSUPPORTED, reasons)
+        self.assertEqual(result["bridge"]["guard_reason_counts"][LOW_CONFIDENCE], 1)
+        self.assertEqual(bridge_rejection["bridge_evidence"]["vocal_activity_overlap_ratio"], 0.0)
+
+    def test_post_f0_contour_bridge_requires_meaningful_selected_gap(self) -> None:
+        result = RuleBasedMelodySelector(MelodySelectionConfig(phrase_postprocess_enabled=False)).select(
+            note_candidates={
+                "melody_candidates": {
+                    "notes": [
+                        {"id": "left", "start_time": 0.0, "end_time": 0.4, "pitch": "C4", "confidence": 0.9},
+                        {"id": "right", "start_time": 0.75, "end_time": 1.1, "pitch": "D4", "confidence": 0.9},
+                    ]
+                }
+            },
+            pitch_contours={
+                "contours": [
+                    {
+                        "id": "pc_tight_gap",
+                        "start_time_sec": 0.5,
+                        "end_time_sec": 0.65,
+                        "pitch_center_midi": 62,
+                        "mean_confidence": 0.9,
+                        "voiced_ratio": 1.0,
+                        "stability": 0.8,
+                    }
+                ]
+            },
+            vocal_activity={"segments": [{"start_time": 0.45, "end_time": 0.7, "state": "vocal"}]},
+        )
+
+        rejected = next(item for item in result["rejected_candidates"] if item["candidate_id"] == "post_f0_bridge:pc_tight_gap")
+        self.assertIn(BRIDGE_NO_SELECTED_GAP, rejected["bridge_guard_reason_codes"])
+
+    def test_post_f0_contour_bridge_accepts_unstable_only_when_other_guards_pass(self) -> None:
+        result = RuleBasedMelodySelector(MelodySelectionConfig(phrase_postprocess_enabled=False)).select(
+            note_candidates={
+                "melody_candidates": {
+                    "notes": [
+                        {"id": "left", "start_time": 0.0, "end_time": 0.4, "pitch": "C4", "confidence": 0.9},
+                        {"id": "right", "start_time": 1.4, "end_time": 1.8, "pitch": "D4", "confidence": 0.9},
+                    ]
+                }
+            },
+            pitch_contours={
+                "contours": [
+                    {
+                        "id": "pc_unstable_guarded",
+                        "start_time_sec": 0.75,
+                        "end_time_sec": 1.05,
+                        "pitch_center_midi": 62,
+                        "mean_confidence": 0.9,
+                        "voiced_ratio": 1.0,
+                        "stability": 0.2,
+                        "has_glide": True,
+                    }
+                ]
+            },
+            vocal_activity={"segments": [{"start_time": 0.5, "end_time": 1.2, "state": "vocal"}]},
+        )
+
+        bridged = [note for note in result["selected_notes"] if note["candidate_id"].startswith("post_f0_bridge:")]
+        self.assertEqual(len(bridged), 1)
+        self.assertIn(BRIDGE_UNSTABLE_CONTOUR_GUARDED, bridged[0]["reason_codes"])
+        self.assertEqual(bridged[0]["bridge_guard_reason_codes"], [])
+
+    def test_post_f0_contour_bridge_rejects_low_confidence_long_contour(self) -> None:
+        result = RuleBasedMelodySelector(MelodySelectionConfig(phrase_postprocess_enabled=False)).select(
+            note_candidates={
+                "melody_candidates": {
+                    "notes": [
+                        {"id": "left", "start_time": 0.0, "end_time": 0.4, "pitch": "C4", "confidence": 0.9},
+                        {"id": "right", "start_time": 4.0, "end_time": 4.4, "pitch": "D4", "confidence": 0.9},
+                    ]
+                }
+            },
+            pitch_contours={
+                "contours": [
+                    {
+                        "id": "pc_low_conf_long",
+                        "start_time_sec": 0.7,
+                        "end_time_sec": 3.5,
+                        "pitch_center_midi": 62,
+                        "mean_confidence": 0.72,
+                        "voiced_ratio": 1.0,
+                        "stability": 0.2,
+                        "has_glide": True,
+                    }
+                ]
+            },
+            vocal_activity={"segments": [{"start_time": 0.5, "end_time": 3.8, "state": "vocal"}]},
+        )
+
+        rejected = next(
+            item
+            for item in result["rejected_candidates"]
+            if item["candidate_id"].startswith("post_f0_bridge:pc_low_conf_long")
+        )
+        self.assertIn(BRIDGE_LOW_CONFIDENCE_LONG_CONTOUR, rejected["bridge_guard_reason_codes"])
+        self.assertNotIn(LOW_CONFIDENCE, rejected["bridge_guard_reason_codes"])
+        self.assertEqual(result["bridge"]["accepted_count"], 0)
 
     def test_phrase_postprocess_bridges_short_gap_and_records_reason(self) -> None:
         result = RuleBasedMelodySelector().select(

@@ -2,7 +2,7 @@
 
 ## Purpose
 
-This document defines the slim production mainline for the lead-vocal MVP and the first lightweight internal plugin boundary. The goal is to keep audio-to-score deterministic, narrow, and traceable, while moving optional diagnosis/edit/RVC/lyrics behavior behind post-`ScoreRevision` plugins.
+This document defines the slim production mainline for the lead-vocal MVP and the first lightweight internal plugin boundary. The goal is to keep audio-to-score deterministic, narrow, and traceable, while moving optional analysis/diagnosis/edit/RVC/lyrics behavior behind post-`ScoreRevision` plugins.
 
 ## Trunk Services
 
@@ -69,6 +69,7 @@ Plugins run after `ScoreRevision` and typed artifacts exist:
 flowchart LR
   ScoreRevision --> PluginRegistry
   Artifact --> PluginRegistry
+  PluginRegistry --> AudioAnalysisPlugin
   PluginRegistry --> DiagnosisPlugin
   PluginRegistry --> ScorePatchPlugin
   PluginRegistry --> RvcPreparePlugin
@@ -87,10 +88,22 @@ The first registry is intentionally simple:
 
 ## Built-In Plugin Roles
 
+- `audio_analysis`: reads `ScoreRevision`, `ScoreIR`, F0, rhythm grid, note candidates, and optional lyrics; returns an `AudioAnalysisReport` and persists a revision-scoped `audio_analysis_report` JSON artifact. It is optional and must not mutate the score revision or block exports.
 - `diagnosis`: reads revision context and typed artifacts; returns transcription diagnosis.
 - `score_patch_agent`: proposes a controlled patch; caller validates before creating a user revision.
 - `rvc_prepare`: prepares an RVC job spec; caller validates before enqueueing external work.
 - `lyrics_alignment`: reserved optional plugin for future lyrics recognition/alignment, currently not part of the mainline.
+
+## Audio Analysis MVP
+
+The current audio analysis MVP is a post-revision explanatory layer, not a required transcription stage:
+
+- Entry points: `GET /api/score-revisions/{revision_id}/audio-analysis` reads the latest report; `POST /api/score-revisions/{revision_id}/audio-analysis` generates or refreshes it.
+- Implementation: `AudioAnalysisAgent` is registered as the built-in `audio_analysis` plugin by `AgentWorkflowService`.
+- Inputs: typed revision context only (`ScoreIR`, `F0Track`, `NoteCandidateSet`, `RhythmGrid`, artifact refs, warnings) plus optional `Lyrics` text/timeline loaded by the workflow service.
+- Output: `AudioAnalysisReport` with `pitch`, `expression`, `range`, `rhythm`, `lyrics`, `summary`, and `warnings` sections.
+- Persistence: report JSON is stored as an `audio_analysis_report` artifact under the selected revision workspace.
+- Failure policy: missing lyrics or optional evidence creates explicit warnings such as `missing_lyrics`; it must not create fake conclusions, mutate `ScoreRevision`, regenerate exports, or hide required-stage failures.
 
 ## Review Checklist
 

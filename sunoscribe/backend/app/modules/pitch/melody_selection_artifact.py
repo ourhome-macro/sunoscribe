@@ -9,10 +9,19 @@ from typing import Any
 from .note_utils import midi_to_note, note_to_midi
 from .phrase_postprocessor import PhraseAwarePostprocessor, PhrasePostprocessConfig
 from .reason_codes import (
+    BRIDGE_CONFIDENCE_GUARDED,
+    BRIDGE_FROM_VOICED_CONTOUR,
+    BRIDGE_LOW_CONFIDENCE_LONG_CONTOUR,
+    BRIDGE_NO_SELECTED_GAP,
+    BRIDGE_OVERLAPS_RAW_CANDIDATE,
+    BRIDGE_OVERLAPS_SELECTED_NOTE,
+    BRIDGE_UNSTABLE_CONTOUR_GUARDED,
+    BRIDGE_VOCAL_ACTIVITY_UNSUPPORTED,
     LOW_CONFIDENCE,
     LOW_VOICED_RATIO,
     OUTSIDE_VOCAL_RANGE,
     OVERLAPS_STRONGER_CANDIDATE,
+    POST_F0_CONTOUR_BRIDGE,
     TOO_SHORT,
     TOO_UNSTABLE,
     UNCERTAIN,
@@ -50,6 +59,15 @@ class MelodySelectionConfig:
     phrase_sustain_gap_sec: float = 0.18
     phrase_sustain_max_pitch_delta_semitones: int = 2
     phrase_max_iterations: int = 2
+    post_f0_contour_bridge_enabled: bool = True
+    bridge_min_confidence: float = 0.70
+    bridge_min_voiced_ratio: float = 0.9
+    bridge_min_duration_sec: float = 0.18
+    bridge_max_duration_sec: float = 2.5
+    bridge_low_confidence_long_contour_sec: float = 2.5
+    bridge_high_confidence_floor: float = 0.74
+    bridge_min_selected_gap_sec: float = 0.5
+    bridge_min_vocal_activity_overlap_ratio: float = 0.6
 
 
 class RuleBasedMelodySelector:
@@ -62,6 +80,7 @@ class RuleBasedMelodySelector:
         *,
         note_candidates: dict[str, Any] | None,
         pitch_contours: dict[str, Any] | None = None,
+        vocal_activity: dict[str, Any] | None = None,
     ) -> dict[str, Any] | None:
         candidates, input_source = self._candidate_items(note_candidates, pitch_contours)
         if not candidates:
@@ -78,6 +97,14 @@ class RuleBasedMelodySelector:
 
         selected, overlap_rejected = self._resolve_overlaps(selected)
         rejected.extend(overlap_rejected)
+        bridge_result = self._bridge_from_contours(
+            raw_candidates=self._raw_candidate_items(note_candidates),
+            selected=selected,
+            pitch_contours=pitch_contours,
+            vocal_activity=vocal_activity,
+        )
+        selected.extend(bridge_result["accepted_candidates"])
+        rejected.extend(bridge_result["rejected_candidates"])
         inherited_reason_counts = Counter(reason for item in selected for reason in item.get("reason_codes", []))
         postprocess_result = self.postprocessor.process_dict_notes(selected)
         selected = [self._selected_from_postprocessed(item) for item in postprocess_result.notes]
@@ -113,7 +140,10 @@ class RuleBasedMelodySelector:
                 "postprocess_reason_code_counts": postprocess_diagnostics["reason_code_counts"],
                 "mean_selected_confidence": round(mean(selected_conf), 6) if selected_conf else 0.0,
                 "mean_rejected_confidence": round(mean(rejected_conf), 6) if rejected_conf else 0.0,
+                "bridge_accepted_count": bridge_result["accepted_count"],
+                "bridge_candidate_count": bridge_result["candidate_count"],
             },
+            "bridge": bridge_result["summary"],
             "postprocess": {
                 **postprocess_diagnostics,
                 "inherited_reason_code_counts": inherited_reason_code_counts,
@@ -130,6 +160,15 @@ class RuleBasedMelodySelector:
                 "phrase_sustain_short_gaps_enabled": self.config.phrase_sustain_short_gaps_enabled,
                 "input_source": input_source,
                 "prefer_preselected_notes": self.config.prefer_preselected_notes,
+                "post_f0_contour_bridge_enabled": self._contour_bridge_enabled(),
+                "bridge_min_confidence": self.config.bridge_min_confidence,
+                "bridge_min_voiced_ratio": self.config.bridge_min_voiced_ratio,
+                "bridge_min_duration_sec": self.config.bridge_min_duration_sec,
+                "bridge_max_duration_sec": self.config.bridge_max_duration_sec,
+                "bridge_low_confidence_long_contour_sec": self.config.bridge_low_confidence_long_contour_sec,
+                "bridge_high_confidence_floor": self.config.bridge_high_confidence_floor,
+                "bridge_min_selected_gap_sec": self.config.bridge_min_selected_gap_sec,
+                "bridge_min_vocal_activity_overlap_ratio": self.config.bridge_min_vocal_activity_overlap_ratio,
             },
         }
 
@@ -148,6 +187,10 @@ class RuleBasedMelodySelector:
         if isinstance(contours, list):
             return [self._candidate_from_contour(contour, index) for index, contour in enumerate(contours, start=1) if isinstance(contour, dict)], "pitch_contours.contours"
         return [], "none"
+
+    def _raw_candidate_items(self, note_candidates: dict[str, Any] | None) -> list[dict[str, Any]]:
+        raw_notes = _extract_raw_candidate_notes(note_candidates)
+        return [self._normalize_candidate(note, index) for index, note in enumerate(raw_notes, start=1)]
 
     def _normalize_candidate(self, note: dict[str, Any], index: int) -> dict[str, Any]:
         start = _safe_float(_first(note, "start_time_sec", "start_time", "onset_sec")) or 0.0
@@ -225,9 +268,259 @@ class RuleBasedMelodySelector:
                 rejected.append(self._rejected(note, [OVERLAPS_STRONGER_CANDIDATE]))
         return kept, rejected
 
+    def _bridge_from_contours(
+        self,
+        *,
+        raw_candidates: list[dict[str, Any]],
+        selected: list[dict[str, Any]],
+        pitch_contours: dict[str, Any] | None,
+        vocal_activity: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        contours = pitch_contours.get("contours") if isinstance(pitch_contours, dict) else None
+        summary = {
+            "version": "post_f0_contour_bridge_v1",
+            "enabled": self._contour_bridge_enabled(),
+            "candidate_count": len(contours) if isinstance(contours, list) else 0,
+            "accepted_count": 0,
+            "rejected_count": 0,
+            "guard_reason_counts": {},
+            "accepted_candidates": [],
+            "rejected_candidates": [],
+        }
+        if not self._contour_bridge_enabled() or not isinstance(contours, list) or not raw_candidates:
+            return {"accepted_candidates": [], "rejected_candidates": [], "candidate_count": summary["candidate_count"], "accepted_count": 0, "summary": summary}
+
+        selected_gaps = self._selected_gaps(selected)
+        vocal_segments = _vocal_activity_segments(vocal_activity)
+        accepted: list[dict[str, Any]] = []
+        rejected: list[dict[str, Any]] = []
+        guard_counts: Counter[str] = Counter()
+        for index, contour in enumerate(contours, start=1):
+            if not isinstance(contour, dict):
+                continue
+            span_candidates = self._bridge_candidate_spans(contour, selected_gaps)
+            if not span_candidates:
+                span_candidates = [None]
+            for span in span_candidates:
+                candidate = self._bridge_candidate_from_contour(contour, index, span=span)
+                evidence = self._bridge_evidence(
+                    candidate=candidate,
+                    contour=contour,
+                    selected=selected,
+                    raw_candidates=raw_candidates,
+                    selected_gaps=selected_gaps,
+                    vocal_segments=vocal_segments,
+                )
+                guard_reasons = self._bridge_guard_reasons(candidate, evidence, vocal_segments_available=bool(vocal_segments))
+                candidate["bridge_evidence"] = evidence
+                candidate["bridge_guard_reason_codes"] = guard_reasons
+                if guard_reasons:
+                    rejected_item = self._rejected(candidate, guard_reasons)
+                    rejected_item["bridge_evidence"] = evidence
+                    rejected_item["bridge_guard_reason_codes"] = guard_reasons
+                    rejected.append(rejected_item)
+                    for reason in guard_reasons:
+                        guard_counts[reason] += 1
+                    continue
+                accepted_candidate = self._selected(candidate)
+                accepted_candidate["bridge_evidence"] = evidence
+                accepted.append(accepted_candidate)
+                guard_counts[BRIDGE_CONFIDENCE_GUARDED] += 1
+
+        summary["accepted_count"] = len(accepted)
+        summary["rejected_count"] = len(rejected)
+        summary["guard_reason_counts"] = dict(sorted(guard_counts.items()))
+        summary["accepted_candidates"] = [self._bridge_summary_item(item) for item in accepted]
+        summary["rejected_candidates"] = [self._bridge_summary_item(item) for item in rejected]
+        return {
+            "accepted_candidates": accepted,
+            "rejected_candidates": rejected,
+            "candidate_count": summary["candidate_count"],
+            "accepted_count": len(accepted),
+            "summary": summary,
+        }
+
+    def _bridge_candidate_from_contour(
+        self,
+        contour: dict[str, Any],
+        index: int,
+        *,
+        span: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        candidate = self._candidate_from_contour(contour, index)
+        base_id = candidate["candidate_id"]
+        if isinstance(span, dict):
+            start = float(span["start_time_sec"])
+            end = float(span["end_time_sec"])
+            candidate["candidate_id"] = f"post_f0_bridge:{base_id}:gap_{span['gap_index']:05d}"
+            candidate["start_time_sec"] = start
+            candidate["end_time_sec"] = end
+            candidate["duration_sec"] = max(0.0, end - start)
+            candidate["bridge_gap_index"] = int(span["gap_index"])
+        else:
+            candidate["candidate_id"] = f"post_f0_bridge:{base_id}"
+        candidate["reason_codes"] = _unique(
+            list(candidate.get("reason_codes") or [])
+            + [POST_F0_CONTOUR_BRIDGE, BRIDGE_FROM_VOICED_CONTOUR, BRIDGE_CONFIDENCE_GUARDED]
+        )
+        candidate["immutable_post_f0_bridge"] = True
+        return candidate
+
+    def _bridge_candidate_spans(self, contour: dict[str, Any], selected_gaps: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        contour_start = _safe_float(_first(contour, "start_time_sec", "start_time", "start"))
+        contour_end = _safe_float(_first(contour, "end_time_sec", "end_time", "end"))
+        if contour_start is None or contour_end is None or contour_end <= contour_start:
+            return []
+        spans: list[dict[str, Any]] = []
+        for gap_index, gap in enumerate(selected_gaps, start=1):
+            if float(gap.get("duration_sec") or 0.0) < float(self.config.bridge_min_selected_gap_sec):
+                continue
+            start = max(float(contour_start), _record_start(gap))
+            end = min(float(contour_end), _record_end(gap))
+            if end - start < float(self.config.bridge_min_duration_sec):
+                continue
+            spans.append(
+                {
+                    "gap_index": gap_index,
+                    "start_time_sec": round(start, 6),
+                    "end_time_sec": round(end, 6),
+                    "duration_sec": round(end - start, 6),
+                }
+            )
+        return spans
+
+    def _bridge_evidence(
+        self,
+        *,
+        candidate: dict[str, Any],
+        contour: dict[str, Any],
+        selected: list[dict[str, Any]],
+        raw_candidates: list[dict[str, Any]],
+        selected_gaps: list[dict[str, Any]],
+        vocal_segments: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        start = float(candidate["start_time_sec"])
+        end = float(candidate["end_time_sec"])
+        selected_overlap = _max_overlap_duration(selected, start, end)
+        raw_overlap = _max_overlap_duration(raw_candidates, start, end)
+        nearest_gap = _nearest_gap(selected_gaps, start, end)
+        vocal_overlap = _total_overlap_duration(vocal_segments, start, end)
+        duration = max(0.0, end - start)
+        contour_start = _safe_float(_first(contour, "start_time_sec", "start_time", "start"))
+        contour_end = _safe_float(_first(contour, "end_time_sec", "end_time", "end"))
+        nearest_gap_overlap = (
+            _overlap_seconds(start, end, _record_start(nearest_gap), _record_end(nearest_gap))
+            if isinstance(nearest_gap, dict)
+            else 0.0
+        )
+        return {
+            "source_contour_id": str(contour.get("id") or candidate.get("source_contour_ids", [None])[0] or candidate["candidate_id"]),
+            "source_start_time_sec": round(float(contour_start), 6) if contour_start is not None else round(start, 6),
+            "source_end_time_sec": round(float(contour_end), 6) if contour_end is not None else round(end, 6),
+            "bridge_start_time_sec": round(start, 6),
+            "bridge_end_time_sec": round(end, 6),
+            "duration_sec": round(duration, 6),
+            "confidence": round(float(candidate.get("confidence") or 0.0), 6),
+            "voiced_ratio": _round_optional(candidate.get("voiced_ratio")),
+            "stability": _round_optional(candidate.get("stability")),
+            "pitch_center_midi": _round_optional(candidate.get("pitch_center_midi")),
+            "nearest_selected_gap": nearest_gap,
+            "nearest_selected_gap_overlap_duration_sec": round(nearest_gap_overlap, 6),
+            "selected_overlap_duration_sec": round(selected_overlap, 6),
+            "raw_candidate_overlap_duration_sec": round(raw_overlap, 6),
+            "vocal_activity_overlap_ratio": round(vocal_overlap / duration, 6) if duration > 0 else 0.0,
+            "vocal_activity_available": bool(vocal_segments),
+            "has_glide": bool(contour.get("has_glide")),
+            "has_vibrato": bool(contour.get("has_vibrato")),
+            "source_contour_reason_codes": list(contour.get("reason_codes") or []),
+        }
+
+    def _bridge_guard_reasons(
+        self,
+        candidate: dict[str, Any],
+        evidence: dict[str, Any],
+        *,
+        vocal_segments_available: bool,
+    ) -> list[str]:
+        reasons = self._base_reasons(candidate)
+        duration = float(candidate.get("duration_sec") or 0.0)
+        if duration < float(self.config.bridge_min_duration_sec):
+            reasons.append(TOO_SHORT)
+        if duration > float(self.config.bridge_max_duration_sec):
+            reasons.append(TOO_UNSTABLE)
+        confidence = float(candidate.get("confidence") or 0.0)
+        if confidence < float(self.config.bridge_min_confidence):
+            reasons.append(LOW_CONFIDENCE)
+        if (
+            duration > float(self.config.bridge_low_confidence_long_contour_sec)
+            and confidence < float(self.config.bridge_high_confidence_floor)
+        ):
+            reasons.append(BRIDGE_LOW_CONFIDENCE_LONG_CONTOUR)
+        voiced_ratio = candidate.get("voiced_ratio")
+        if voiced_ratio is None or float(voiced_ratio) < float(self.config.bridge_min_voiced_ratio):
+            reasons.append(LOW_VOICED_RATIO)
+        nearest_gap = evidence.get("nearest_selected_gap") if isinstance(evidence.get("nearest_selected_gap"), dict) else None
+        nearest_gap_overlap = float(evidence.get("nearest_selected_gap_overlap_duration_sec") or 0.0)
+        if (
+            not nearest_gap
+            or float(nearest_gap.get("duration_sec") or 0.0) < float(self.config.bridge_min_selected_gap_sec)
+            or nearest_gap_overlap < float(self.config.bridge_min_duration_sec)
+        ):
+            reasons.append(BRIDGE_NO_SELECTED_GAP)
+        if float(evidence.get("selected_overlap_duration_sec") or 0.0) > 0.0:
+            reasons.append(BRIDGE_OVERLAPS_SELECTED_NOTE)
+        if float(evidence.get("raw_candidate_overlap_duration_sec") or 0.0) > 0.0:
+            reasons.append(BRIDGE_OVERLAPS_RAW_CANDIDATE)
+        if vocal_segments_available and float(evidence.get("vocal_activity_overlap_ratio") or 0.0) < float(self.config.bridge_min_vocal_activity_overlap_ratio):
+            reasons.append(BRIDGE_VOCAL_ACTIVITY_UNSUPPORTED)
+        reasons = _unique(reasons)
+        hard_reasons = [reason for reason in reasons if reason != TOO_UNSTABLE]
+        if TOO_UNSTABLE in reasons and not hard_reasons:
+            candidate["reason_codes"] = _unique(
+                list(candidate.get("reason_codes") or []) + [BRIDGE_UNSTABLE_CONTOUR_GUARDED]
+            )
+            return []
+        return reasons
+
+    def _selected_gaps(self, selected: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        ordered = sorted(selected, key=lambda item: (float(item["start_time_sec"]), float(item["end_time_sec"])))
+        gaps: list[dict[str, Any]] = []
+        for left, right in zip(ordered, ordered[1:]):
+            start = float(left["end_time_sec"])
+            end = float(right["start_time_sec"])
+            if end <= start:
+                continue
+            gaps.append(
+                {
+                    "start_time_sec": round(start, 6),
+                    "end_time_sec": round(end, 6),
+                    "duration_sec": round(end - start, 6),
+                    "left_candidate_id": left.get("candidate_id"),
+                    "right_candidate_id": right.get("candidate_id"),
+                }
+            )
+        return gaps
+
+    @staticmethod
+    def _bridge_summary_item(candidate: dict[str, Any]) -> dict[str, Any]:
+        evidence = candidate.get("bridge_evidence") if isinstance(candidate.get("bridge_evidence"), dict) else {}
+        return {
+            "candidate_id": candidate.get("candidate_id"),
+            "start_time_sec": candidate.get("start_time_sec"),
+            "end_time_sec": candidate.get("end_time_sec"),
+            "pitch_center_midi": candidate.get("pitch_center_midi"),
+            "confidence": candidate.get("confidence"),
+            "reason_codes": list(candidate.get("reason_codes") or []),
+            "bridge_guard_reason_codes": list(candidate.get("bridge_guard_reason_codes") or []),
+            "evidence": evidence,
+        }
+
+    def _contour_bridge_enabled(self) -> bool:
+        return self._postprocess_profile() == "conservative" and bool(self.config.post_f0_contour_bridge_enabled)
+
     @staticmethod
     def _selected(candidate: dict[str, Any]) -> dict[str, Any]:
-        return {
+        selected = {
             "candidate_id": candidate["candidate_id"],
             "start_time_sec": round(float(candidate["start_time_sec"]), 6),
             "end_time_sec": round(float(candidate["end_time_sec"]), 6),
@@ -238,10 +531,15 @@ class RuleBasedMelodySelector:
             "source_candidate_ids": list(candidate.get("source_candidate_ids") or []),
             "reason_codes": list(candidate.get("reason_codes") or []),
         }
+        if isinstance(candidate.get("bridge_evidence"), dict):
+            selected["bridge_evidence"] = dict(candidate["bridge_evidence"])
+        if "bridge_guard_reason_codes" in candidate:
+            selected["bridge_guard_reason_codes"] = list(candidate.get("bridge_guard_reason_codes") or [])
+        return selected
 
     @staticmethod
     def _selected_from_postprocessed(candidate: dict[str, Any]) -> dict[str, Any]:
-        return {
+        selected = {
             "candidate_id": candidate["candidate_id"],
             "start_time_sec": round(float(candidate["start_time_sec"]), 6),
             "end_time_sec": round(float(candidate["end_time_sec"]), 6),
@@ -252,6 +550,11 @@ class RuleBasedMelodySelector:
             "source_candidate_ids": list(candidate.get("source_candidate_ids") or []),
             "reason_codes": list(candidate.get("reason_codes") or []),
         }
+        if isinstance(candidate.get("bridge_evidence"), dict):
+            selected["bridge_evidence"] = dict(candidate["bridge_evidence"])
+        if "bridge_guard_reason_codes" in candidate:
+            selected["bridge_guard_reason_codes"] = list(candidate.get("bridge_guard_reason_codes") or [])
+        return selected
 
     def _postprocess_config(self) -> PhrasePostprocessConfig:
         profile = self._postprocess_profile()
@@ -361,6 +664,19 @@ def _extract_candidate_notes(
     return [], "none"
 
 
+def _extract_raw_candidate_notes(note_candidates: dict[str, Any] | None) -> list[dict[str, Any]]:
+    if not isinstance(note_candidates, dict):
+        return []
+    melody = note_candidates.get("melody_candidates")
+    for container in (melody, note_candidates):
+        if not isinstance(container, dict):
+            continue
+        notes = container.get("notes") if isinstance(container.get("notes"), list) else None
+        if notes:
+            return [note for note in notes if isinstance(note, dict)]
+    return []
+
+
 def _pitch_center(note: dict[str, Any]) -> float | None:
     value = _safe_float(_first(note, "pitch_center_midi", "midi_float", "pitch_midi", "midi_pitch"))
     if value is not None:
@@ -391,6 +707,79 @@ def _safe_float(value: Any) -> float | None:
         return None
     return result if math.isfinite(result) else None
 
+
+
+def _overlap_seconds(left_start: float, left_end: float, right_start: float, right_end: float) -> float:
+    return max(0.0, min(float(left_end), float(right_end)) - max(float(left_start), float(right_start)))
+
+
+def _total_overlap_duration(records: list[dict[str, Any]], start: float, end: float) -> float:
+    return sum(_overlap_seconds(_record_start(record), _record_end(record), start, end) for record in records)
+
+
+def _max_overlap_duration(records: list[dict[str, Any]], start: float, end: float) -> float:
+    overlaps = [_overlap_seconds(_record_start(record), _record_end(record), start, end) for record in records]
+    return max(overlaps) if overlaps else 0.0
+
+
+def _nearest_gap(gaps: list[dict[str, Any]], start: float, end: float) -> dict[str, Any] | None:
+    if not gaps:
+        return None
+    midpoint = (float(start) + float(end)) / 2.0
+    ranked = sorted(
+        gaps,
+        key=lambda gap: (
+            0 if _record_start(gap) <= midpoint <= _record_end(gap) else 1,
+            abs(((_record_start(gap) + _record_end(gap)) / 2.0) - midpoint),
+        ),
+    )
+    gap = ranked[0]
+    return {
+        "start_time_sec": round(_record_start(gap), 6),
+        "end_time_sec": round(_record_end(gap), 6),
+        "duration_sec": round(max(0.0, _record_end(gap) - _record_start(gap)), 6),
+        "left_candidate_id": gap.get("left_candidate_id"),
+        "right_candidate_id": gap.get("right_candidate_id"),
+    }
+
+
+def _vocal_activity_segments(vocal_activity: dict[str, Any] | None) -> list[dict[str, Any]]:
+    if not isinstance(vocal_activity, dict):
+        return []
+    items = vocal_activity.get("segments")
+    if not isinstance(items, list):
+        return []
+    segments: list[dict[str, Any]] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        state = str(_first(item, "state", "label", "activity") or "").strip().lower()
+        if state not in {"vocal", "active", "singing", "voiced"}:
+            continue
+        start = _safe_float(_first(item, "start_time_sec", "start_time", "start_sec", "start"))
+        end = _safe_float(_first(item, "end_time_sec", "end_time", "end_sec", "end"))
+        if start is None or end is None or end <= start:
+            continue
+        segments.append({"start_time_sec": float(start), "end_time_sec": float(end), "state": state})
+    return segments
+
+
+def _record_start(record: dict[str, Any]) -> float:
+    return float(_safe_float(_first(record, "start_time_sec", "start_time", "start_sec", "start")) or 0.0)
+
+
+def _record_end(record: dict[str, Any]) -> float:
+    start = _record_start(record)
+    end = _safe_float(_first(record, "end_time_sec", "end_time", "end_sec", "end"))
+    if end is None:
+        duration = _safe_float(_first(record, "duration_sec", "duration")) or 0.0
+        end = start + duration
+    return float(end)
+
+
+def _round_optional(value: Any) -> float | None:
+    parsed = _safe_float(value)
+    return round(parsed, 6) if parsed is not None else None
 
 def _overlaps(left: dict[str, Any], right: dict[str, Any], window_sec: float) -> bool:
     return float(left["start_time_sec"]) < float(right["end_time_sec"]) - window_sec and float(right["start_time_sec"]) < float(left["end_time_sec"]) - window_sec

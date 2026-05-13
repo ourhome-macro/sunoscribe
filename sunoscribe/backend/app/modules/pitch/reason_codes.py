@@ -6,6 +6,7 @@ TOO_SHORT = "too_short"
 TOO_UNSTABLE = "too_unstable"
 OUTSIDE_VOCAL_RANGE = "outside_vocal_range"
 OCTAVE_OUTLIER = "octave_outlier"
+PRESELECTOR_LOW_OCTAVE_CORRECTED = "preselector_low_octave_corrected"
 LIKELY_HARMONIC = "likely_harmonic"
 LIKELY_ACCOMPANIMENT_BLEED = "likely_accompaniment_bleed"
 DUPLICATE_FRAGMENT = "duplicate_fragment"
@@ -15,6 +16,15 @@ SILENCE_OR_BREATH_REGION = "silence_or_breath_region"
 UNCERTAIN = "uncertain"
 SUSPECTED_VIBRATO = "suspected_vibrato"
 SUSPECTED_GLIDE = "suspected_glide"
+POST_F0_CONTOUR_BRIDGE = "post_f0_contour_bridge"
+BRIDGE_FROM_VOICED_CONTOUR = "bridge_from_voiced_contour"
+BRIDGE_CONFIDENCE_GUARDED = "bridge_confidence_guarded"
+BRIDGE_UNSTABLE_CONTOUR_GUARDED = "bridge_unstable_contour_guarded"
+BRIDGE_LOW_CONFIDENCE_LONG_CONTOUR = "bridge_low_confidence_long_contour"
+BRIDGE_NO_SELECTED_GAP = "bridge_no_selected_gap"
+BRIDGE_VOCAL_ACTIVITY_UNSUPPORTED = "bridge_vocal_activity_unsupported"
+BRIDGE_OVERLAPS_RAW_CANDIDATE = "bridge_overlaps_raw_candidate"
+BRIDGE_OVERLAPS_SELECTED_NOTE = "bridge_overlaps_selected_note"
 LARGE_QUANTIZE_ERROR = "large_quantize_error"
 HIGH_QUANTIZE_ERROR = LARGE_QUANTIZE_ERROR
 QUANTIZED_DURATION_TOO_SHORT = "quantized_duration_too_short"
@@ -46,4 +56,9 @@ REJECTION_REASON_CODES = {
     OVERLAPS_STRONGER_CANDIDATE,
     INSUFFICIENT_ONSET_EVIDENCE,
     SILENCE_OR_BREATH_REGION,
+    BRIDGE_NO_SELECTED_GAP,
+    BRIDGE_LOW_CONFIDENCE_LONG_CONTOUR,
+    BRIDGE_VOCAL_ACTIVITY_UNSUPPORTED,
+    BRIDGE_OVERLAPS_RAW_CANDIDATE,
+    BRIDGE_OVERLAPS_SELECTED_NOTE,
 }

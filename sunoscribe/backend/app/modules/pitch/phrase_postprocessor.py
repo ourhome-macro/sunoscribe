@@ -698,6 +698,8 @@ class PhraseAwarePostprocessor:
         return updated
 
     def _can_mutate(self, note: dict[str, Any]) -> bool:
+        if note.get("immutable_post_f0_bridge"):
+            return False
         confidence = float(note.get("confidence") or 0.0)
         return confidence >= max(0.0, float(self.config.min_confidence_for_mutation))
 

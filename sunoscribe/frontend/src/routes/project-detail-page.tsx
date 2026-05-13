@@ -1,6 +1,7 @@
 import { useQuery } from '@tanstack/react-query'
 import { Link, useParams } from 'react-router-dom'
 
+import { AudioAnalysisPanel } from '@/components/audio-analysis/audio-analysis-panel'
 import { ArtifactSummary } from '@/components/artifacts/artifact-summary'
 import { StageProgress } from '@/components/diagnostics/stage-progress'
 import { PageHeader } from '@/components/layout/page-header'
@@ -61,6 +62,7 @@ export function ProjectDetailPage() {
 
       <div className="mt-6 space-y-6">
         <RevisionList revisions={revisionsQuery.data ?? []} />
+        <AudioAnalysisPanel revisionId={latestRevision?.id} />
         <ArtifactSummary artifacts={artifactsQuery.data ?? []} />
       </div>
     </div>

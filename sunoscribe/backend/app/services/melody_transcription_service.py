@@ -101,6 +101,7 @@ class MelodyTranscriptionService:
         result.selected_melody_dict = self.melody_selector.select(
             note_candidates=result.note_candidates_dict,
             pitch_contours=result.pitch_contours_dict,
+            vocal_activity=result.vocal_activity_dict,
         )
         rhythm_grid_dict = self._build_rhythm_grid_payload(result.semantic_audio_dict)
         result.quantized_notes_dict = self.quantized_notes_builder.build(

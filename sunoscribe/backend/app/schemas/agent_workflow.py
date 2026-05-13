@@ -123,6 +123,7 @@ class PublicArtifactResponse(_AgentWorkflowSchema):
     file_size_bytes: int | None = None
     checksum: str | None = None
     created_at: datetime | None = None
+    metadata: dict[str, Any] | None = None
 
 
 class RegenerateExportsResponse(_AgentWorkflowSchema):

@@ -16,6 +16,7 @@ from app.modules.benchmark.reason_codes import (
     LOST_EXPECTED_F0_EXISTS_NO_CANDIDATE,
     LOST_EXPECTED_QUANTIZATION_EXPORT_INDUCED,
     LOST_EXPECTED_RAW_F0_MISSING,
+    DELETED_CANDIDATE_SELECTOR_REMOVED,
 )
 
 
@@ -53,7 +54,12 @@ class GapAttributionTests(unittest.TestCase):
 
             self.assertEqual(result["top_lost_expected_notes"][0]["classification"], GAP_ATTR_CANDIDATE_EXISTS_SELECTOR_REMOVED)
             self.assertEqual(result["top_lost_expected_notes"][0]["reason_codes"], [LOST_EXPECTED_CANDIDATE_EXISTS_SELECTOR_REMOVED])
-            self.assertEqual(result["top_deleted_candidates"][0]["diagnostic_reason_codes"][0], "deleted_candidate_selector_removed")
+            self.assertEqual(result["top_deleted_candidates"][0]["diagnostic_reason_codes"][0], DELETED_CANDIDATE_SELECTOR_REMOVED)
+            self.assertTrue(result["diagnostic_only"])
+            self.assertFalse(result["production_mutation_allowed"])
+            self.assertTrue(result["reference_midi_used_for_benchmark_attribution_only"])
+            for key in ("version", "layer_summary", "retention", "reason_counts", "recommended_fix_focus"):
+                self.assertIn(key, result)
 
     def test_f0_exists_but_no_candidate(self) -> None:
         with TemporaryDirectory() as tmp:

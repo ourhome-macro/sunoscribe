@@ -2,6 +2,7 @@
 
 import json
 import uuid
+import hashlib
 from copy import deepcopy
 from pathlib import Path
 from typing import Any
@@ -11,7 +12,8 @@ from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.models.artifact import Artifact
-from app.models.enums import ScoreRevisionType
+from app.models.enums import ArtifactStatus, ArtifactStorageBackend, ArtifactType, ScoreRevisionType
+from app.models.lyrics import Lyrics
 from app.models.score import Score
 from app.models.score_revision import ScoreRevision
 from app.models.user import User
@@ -21,6 +23,7 @@ from app.modules.agents import (
     AgentScorePatch,
     AgentScorePatchValidator,
     ArtifactReference,
+    AudioAnalysisAgent,
     DiagnosisAgent,
     RvcJobSpec,
     RvcPrepareAgent,
@@ -31,10 +34,12 @@ from app.modules.agents import (
     TranscriptionDiagnosis,
 )
 from app.modules.agents.llm_client import ScorePatchLLMClient, make_openai_score_patch_llm_client
+from app.schemas.audio_analysis import AudioAnalysisReport
 from app.services.plugins import CallablePlugin, PluginContext, PluginRegistry
 from app.services.render_export_service import RenderExportService
 from app.services.score_revision_service import get_score_revision_by_id
-from app.utils.errors import ValidationAppError
+from app.services.workspace import ProjectWorkspace
+from app.utils.errors import NotFoundError, ValidationAppError
 
 
 class AgentWorkflowService:
@@ -44,6 +49,7 @@ class AgentWorkflowService:
         self,
         *,
         diagnosis_agent: DiagnosisAgent | None = None,
+        audio_analysis_agent: AudioAnalysisAgent | None = None,
         score_patch_agent: ScorePatchAgent | None = None,
         rvc_prepare_agent: RvcPrepareAgent | None = None,
         score_patch_validator: AgentScorePatchValidator | None = None,
@@ -55,6 +61,7 @@ class AgentWorkflowService:
         plugin_registry: PluginRegistry | None = None,
     ) -> None:
         self.diagnosis_agent = diagnosis_agent or DiagnosisAgent()
+        self.audio_analysis_agent = audio_analysis_agent or AudioAnalysisAgent()
         self.score_patch_agent = score_patch_agent or ScorePatchAgent()
         self.rvc_prepare_agent = rvc_prepare_agent or RvcPrepareAgent()
         self.score_patch_validator = score_patch_validator or AgentScorePatchValidator()
@@ -128,6 +135,55 @@ class AgentWorkflowService:
             PluginContext(agent_context=context, artifacts=tuple(context.artifacts), warnings=tuple(context.warnings)),
         )
         return result.payload
+
+    def get_audio_analysis_report(
+        self,
+        db: Session,
+        *,
+        user: User,
+        revision_id: str,
+    ) -> tuple[AudioAnalysisReport, Artifact]:
+        revision = get_score_revision_by_id(db, user=user, revision_id=revision_id)
+        artifact = self._get_latest_audio_analysis_artifact(db, revision_id=str(revision.id))
+        if artifact is None:
+            raise NotFoundError("audio analysis report not found")
+        payload = self._read_json_artifact(artifact, warnings=[])
+        if not isinstance(payload, dict):
+            raise ValidationAppError("audio analysis report artifact is invalid")
+        report_payload = payload.get("report") if isinstance(payload.get("report"), dict) else payload
+        return AudioAnalysisReport.model_validate(report_payload), artifact
+
+    def run_audio_analysis(
+        self,
+        db: Session,
+        *,
+        user: User,
+        revision_id: str,
+    ) -> tuple[AudioAnalysisReport, Artifact]:
+        revision = get_score_revision_by_id(db, user=user, revision_id=revision_id)
+        if revision.score is None:
+            raise ValidationAppError("revision is detached from its score")
+        artifacts = list(self._list_revision_artifacts(db, revision_id=str(revision.id)))
+        context = self.build_context_from_revision(
+            revision=revision,
+            artifacts=artifacts,
+            skill_profile=None,
+        )
+        lyrics_payload = self._load_lyrics_payload(db, project_id=str(revision.project_id))
+        result = self.plugin_registry.run(
+            "audio_analysis",
+            PluginContext(
+                agent_context=context,
+                artifacts=tuple(context.artifacts),
+                warnings=tuple(context.warnings),
+                params={"lyrics": lyrics_payload},
+            ),
+        )
+        report = result.payload if isinstance(result.payload, AudioAnalysisReport) else AudioAnalysisReport.model_validate(result.payload)
+        artifact = self._save_audio_analysis_artifact(db, revision=revision, report=report)
+        db.commit()
+        db.refresh(artifact)
+        return report, artifact
 
     def propose_score_patch(
         self,
@@ -299,6 +355,16 @@ class AgentWorkflowService:
         )
         registry.register(
             CallablePlugin(
+                name="audio_analysis",
+                kind="analysis",
+                handler=lambda plugin_context: self.audio_analysis_agent.run(
+                    self._require_agent_context(plugin_context),
+                    lyrics=plugin_context.params.get("lyrics"),
+                ),
+            )
+        )
+        registry.register(
+            CallablePlugin(
                 name="score_patch_agent",
                 kind="score_patch",
                 handler=lambda plugin_context: self._propose_score_patch(
@@ -348,6 +414,72 @@ class AgentWorkflowService:
         artifacts = self.export_service.ensure_core_exports(db, score=revision.score, revision=revision)
         db.commit()
         return artifacts
+
+    def _load_lyrics_payload(self, db: Session, *, project_id: str) -> dict[str, Any] | None:
+        project_uuid = uuid.UUID(str(project_id))
+        stmt = select(Lyrics).where(Lyrics.project_id == project_uuid)
+        lyrics = db.execute(stmt).scalar_one_or_none()
+        if lyrics is None:
+            return None
+        return {"text": lyrics.text or "", "timeline": lyrics.timeline or []}
+
+    def _get_latest_audio_analysis_artifact(self, db: Session, *, revision_id: str) -> Artifact | None:
+        revision_uuid = uuid.UUID(str(revision_id))
+        stmt = (
+            select(Artifact)
+            .where(
+                Artifact.score_revision_id == revision_uuid,
+                Artifact.artifact_type == ArtifactType.AUDIO_ANALYSIS_REPORT.value,
+            )
+            .order_by(Artifact.created_at.desc())
+        )
+        return db.execute(stmt).scalars().first()
+
+    def _save_audio_analysis_artifact(
+        self,
+        db: Session,
+        *,
+        revision: ScoreRevision,
+        report: AudioAnalysisReport,
+    ) -> Artifact:
+        if revision.score is None:
+            raise ValidationAppError("revision is detached from its score")
+        payload = report.model_dump(mode="json")
+        payload_bytes = json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8")
+        workspace = ProjectWorkspace(project_id=str(revision.project_id))
+        workspace.ensure_structure()
+        report_dir = workspace.revision_dir(str(revision.id)) / "analysis"
+        report_dir.mkdir(parents=True, exist_ok=True)
+        target_path = report_dir / "audio_analysis_report.json"
+        target_path.write_bytes(payload_bytes)
+
+        artifact = self._get_latest_audio_analysis_artifact(db, revision_id=str(revision.id))
+        if artifact is None:
+            artifact = Artifact(
+                project_id=revision.project_id,
+                score_id=revision.score_id,
+                score_revision_id=revision.id,
+                artifact_type=ArtifactType.AUDIO_ANALYSIS_REPORT.value,
+            )
+        artifact.status = ArtifactStatus.AVAILABLE.value
+        artifact.storage_backend = ArtifactStorageBackend.WORKSPACE.value
+        artifact.storage_path = str(target_path)
+        artifact.filename = target_path.name
+        artifact.mime_type = "application/json"
+        artifact.file_size_bytes = len(payload_bytes)
+        artifact.checksum = hashlib.sha256(payload_bytes).hexdigest()
+        artifact.error_message = None
+        artifact.artifact_metadata = {
+            "kind": "audio_analysis_report",
+            "score_revision_id": str(revision.id),
+            "revision_number": int(revision.revision_number),
+            "revision_type": str(revision.revision_type),
+            "report_version": report.version,
+            "report_status": report.status,
+            "optional": True,
+        }
+        db.add(artifact)
+        return artifact
 
     def _list_revision_artifacts(self, db: Session, *, revision_id: str) -> list[Artifact]:
         revision_uuid = uuid.UUID(str(revision_id))
