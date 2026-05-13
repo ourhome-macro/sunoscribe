@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from typing import Any, Callable
 
-from app.modules.analysis_ir import AnalysisIR
 from app.modules.score_ir import ScoreIR, ScoreIRBuilder, ScoreIRSerializer
 
 
@@ -13,7 +12,7 @@ class ScoreBuildService:
         self,
         *,
         score_ir_builder: ScoreIRBuilder | None,
-        invoke_builder: Callable[[Any, list[dict], AnalysisIR | None], ScoreIR],
+        invoke_builder: Callable[[Any, list[dict], Any | None], ScoreIR],
     ) -> None:
         self.score_ir_builder = score_ir_builder
         self.invoke_builder = invoke_builder
@@ -23,7 +22,7 @@ class ScoreBuildService:
         *,
         pitch_result_obj: Any,
         lyrics_segments: list[dict],
-        analysis_ir_obj: AnalysisIR | None,
+        analysis_ir_obj: Any | None = None,
     ) -> tuple[ScoreIR, dict | None]:
         if self.score_ir_builder is None:
             raise RuntimeError("score_ir_builder is not configured")

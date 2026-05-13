@@ -21,7 +21,7 @@ from app.modules.alignment import (
     InitialLyricsAligner,
     StubAlignmentLLMClient,
 )
-from app.modules.analysis_ir import AnalysisIR, BaselineAnalysisInferencer
+from app.modules.analysis_ir import AnalysisIR
 from app.modules.pitch.note_utils import midi_to_note
 from app.modules.score_ir import AnalysisHints, ScoreIR, ScoreIRBuilder, ScoreIRSerializer, ScoreMeasure, ScoreMeta, ScoreNote
 
@@ -154,9 +154,7 @@ class AudioAnalysisService:
         self.vocal_separator = vocal_separator if vocal_separator is not None else self._try_make_vocal_separator()
         self.lyrics_recognizer = lyrics_recognizer if lyrics_recognizer is not None else self._try_make_lyrics_recognizer()
         self.pitch_pipeline = pitch_pipeline if pitch_pipeline is not None else self._try_make_pitch_pipeline()
-        self.analysis_inferencer = (
-            analysis_inferencer if analysis_inferencer is not None else self._try_make_analysis_inferencer()
-        )
+        self.analysis_inferencer = analysis_inferencer
         self.score_ir_builder = score_ir_builder or ScoreIRBuilder()
         self.midi_exporter = midi_exporter if midi_exporter is not None else self._try_make_midi_exporter()
         self.media_ingest_service = MediaIngestService(self.audio_processor) if self.audio_processor is not None else None
@@ -193,7 +191,7 @@ class AudioAnalysisService:
         canonical_audio_path = await self._run_media_ingest_stage(source_copy_path, workspace)
 
         perception = await self._run_perception_stage(source_copy_path, canonical_audio_path, workspace, options)
-        alignment = await self._run_alignment_stage(perception.score_ir_obj, options)
+        alignment = self._empty_alignment_stage()
         final_midi_path, export_warnings = await self._run_export_stage(perception, alignment, workspace)
 
         persist_warnings = self._persist_artifacts(workspace, perception, alignment)
@@ -290,27 +288,8 @@ class AudioAnalysisService:
                 warnings.append(message)
                 raise RuntimeError(message) from exc
 
-        lyrics_audio_path = vocals_path or fallback_audio_path
         lyrics_segments: list[dict] = []
         whisper_raw: dict[str, Any] | None = None
-
-        if self.lyrics_recognizer is None:
-            warnings.append("lyrics_recognizer_missing: skip lyrics")
-        else:
-            try:
-                lyrics_output = await self._invoke_lyrics_recognizer(str(lyrics_audio_path))
-                # TODO: 鎸夌湡瀹炴帴鍙ｈ皟鏁?
-                if isinstance(lyrics_output, dict):
-                    whisper_raw = lyrics_output
-                    maybe_segments = lyrics_output.get("segments")
-                    if isinstance(maybe_segments, list):
-                        lyrics_segments = [seg for seg in maybe_segments if isinstance(seg, dict)]
-                elif isinstance(lyrics_output, list):
-                    lyrics_segments = [seg for seg in lyrics_output if isinstance(seg, dict)]
-                else:
-                    warnings.append("lyrics_output_invalid_type")
-            except Exception as exc:
-                warnings.append(f"lyrics_recognition_failed:{self._short_exception(exc)}")
 
         pitch_result_obj: Any | None = None
         pitch_result_dict: dict | None = None
@@ -341,29 +320,15 @@ class AudioAnalysisService:
             warnings.extend(transcription.warnings)
             rhythm_grid_dict = self.rhythm_quantization_service.build_rhythm_grid_payload(semantic_audio_dict)
         except Exception as exc:
-            warnings.append(f"pitch_pipeline_failed:{self._short_exception(exc)}")
-
-        if self.analysis_inferencer is None:
-            warnings.append("analysis_inferencer_missing: skip analysis_ir")
-        elif pitch_result_obj is None:
-            warnings.append("analysis_ir_skipped_no_pitch_result")
-        else:
-            try:
-                analysis_ir_obj = await asyncio.to_thread(
-                    self.analysis_inferencer.infer,
-                    pitch_result_obj,
-                    lyrics_segments,
-                )
-                serialized = self._serialize(perception_obj=analysis_ir_obj)
-                analysis_ir_dict = serialized if isinstance(serialized, dict) else {"value": serialized}
-            except Exception as exc:
-                warnings.append(f"analysis_ir_failed:{self._short_exception(exc)}")
+            message = f"pitch_pipeline_failed:{self._short_exception(exc)}"
+            warnings.append(message)
+            raise RuntimeError(message) from exc
 
         score_ir_obj: ScoreIR | None = None
         if self.score_build_service.score_ir_builder is None:
-            warnings.append("score_ir_builder_missing: use empty score_ir")
+            raise RuntimeError("required score_ir_builder is unavailable")
         elif pitch_result_obj is None:
-            warnings.append("score_ir_skipped_no_pitch_result")
+            raise RuntimeError("required pitch result is unavailable for score_ir build")
         else:
             try:
                 score_ir_obj, score_data_dict = await asyncio.to_thread(
@@ -373,10 +338,12 @@ class AudioAnalysisService:
                     analysis_ir_obj=analysis_ir_obj,
                 )
             except Exception as exc:
-                warnings.append(f"score_ir_build_failed:{self._short_exception(exc)}")
+                message = f"score_ir_build_failed:{self._short_exception(exc)}"
+                warnings.append(message)
+                raise RuntimeError(message) from exc
 
         if score_ir_obj is None:
-            score_ir_obj = self._build_empty_score_ir(warnings)
+            raise RuntimeError("required score_ir build returned no score_ir")
         score_ir_obj = self._replace_lead_notes_from_quantized_artifact(
             score_ir_obj,
             quantized_notes_dict=quantized_notes_dict,
@@ -387,7 +354,9 @@ class AudioAnalysisService:
             try:
                 score_data_dict = ScoreIRSerializer.to_score_data(score_ir_obj)
             except Exception as exc:
-                warnings.append(f"score_data_build_failed:{self._short_exception(exc)}")
+                message = f"score_data_build_failed:{self._short_exception(exc)}"
+                warnings.append(message)
+                raise RuntimeError(message) from exc
 
         score_ir_serialized = self._serialize(perception_obj=score_ir_obj)
         score_ir_dict = score_ir_serialized if isinstance(score_ir_serialized, dict) else {"value": score_ir_serialized}
@@ -401,7 +370,9 @@ class AudioAnalysisService:
 
                 score_data_dict = ScoreIRSerializer.to_score_data_dict(score_ir_dict)
             except Exception as exc:
-                warnings.append(f"score_data_trace_annotation_failed:{self._short_exception(exc)}")
+                message = f"score_data_trace_annotation_failed:{self._short_exception(exc)}"
+                warnings.append(message)
+                raise RuntimeError(message) from exc
 
         return _PerceptionStageResult(
             source_audio_path=source_audio_path,
@@ -701,6 +672,22 @@ class AudioAnalysisService:
             validator_warnings_after=list(refine_response.validator_warnings_after),
             refine_debug=refine_debug,
             warnings=warnings,
+        )
+
+    def _empty_alignment_stage(self) -> _AlignmentStageResult:
+        draft = AlignmentDraft(method="plugin_deferred", warnings=["lyrics_alignment_deferred_to_plugin"])
+        return _AlignmentStageResult(
+            baseline_draft=draft,
+            baseline_validator_warnings=[],
+            refine_response=None,
+            final_draft=draft,
+            alignment_source="plugin_deferred",
+            alignment_accepted=True,
+            refine_warnings=[],
+            validator_warnings_before=[],
+            validator_warnings_after=[],
+            refine_debug=None,
+            warnings=[],
         )
 
     async def _run_export_stage(
@@ -1012,13 +999,6 @@ class AudioAnalysisService:
             return PitchPipeline(config=build_pitch_detection_config_from_settings())
         except Exception as exc:
             self.logger.warning("PitchPipeline unavailable: %s", self._short_exception(exc))
-            return None
-
-    def _try_make_analysis_inferencer(self) -> Any | None:
-        try:
-            return BaselineAnalysisInferencer()
-        except Exception as exc:
-            self.logger.warning("BaselineAnalysisInferencer unavailable: %s", self._short_exception(exc))
             return None
 
     def _try_make_midi_exporter(self) -> Any | None:

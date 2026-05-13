@@ -31,6 +31,7 @@ from app.modules.agents import (
     TranscriptionDiagnosis,
 )
 from app.modules.agents.llm_client import ScorePatchLLMClient, make_openai_score_patch_llm_client
+from app.services.plugins import CallablePlugin, PluginContext, PluginRegistry
 from app.services.render_export_service import RenderExportService
 from app.services.score_revision_service import get_score_revision_by_id
 from app.utils.errors import ValidationAppError
@@ -51,6 +52,7 @@ class AgentWorkflowService:
         export_service: RenderExportService | None = None,
         score_patch_llm_client: ScorePatchLLMClient | None = None,
         auto_configure_llm_client: bool = True,
+        plugin_registry: PluginRegistry | None = None,
     ) -> None:
         self.diagnosis_agent = diagnosis_agent or DiagnosisAgent()
         self.score_patch_agent = score_patch_agent or ScorePatchAgent()
@@ -62,6 +64,7 @@ class AgentWorkflowService:
         self.score_patch_llm_client = score_patch_llm_client or (
             self._try_make_score_patch_llm_client() if auto_configure_llm_client else None
         )
+        self.plugin_registry = plugin_registry or self._build_default_plugin_registry()
 
     def load_context(
         self,
@@ -120,7 +123,11 @@ class AgentWorkflowService:
 
     def diagnose_transcription(self, db: Session, *, user: User, revision_id: str) -> TranscriptionDiagnosis:
         context = self.load_context(db, user=user, revision_id=revision_id, skill_profile="diagnosis")
-        return self.diagnosis_agent.run(context)
+        result = self.plugin_registry.run(
+            "diagnosis",
+            PluginContext(agent_context=context, artifacts=tuple(context.artifacts), warnings=tuple(context.warnings)),
+        )
+        return result.payload
 
     def propose_score_patch(
         self,
@@ -131,7 +138,7 @@ class AgentWorkflowService:
         instruction: str | dict[str, Any] | AgentScorePatch,
     ) -> AgentScorePatch:
         context = self.load_context(db, user=user, revision_id=revision_id, skill_profile="score_patch")
-        proposal = self._propose_score_patch(context=context, instruction=instruction)
+        proposal = self._run_score_patch_plugin(context=context, instruction=instruction)
         validation = self.score_patch_validator.validate(context=context, proposal=proposal)
         if not bool(validation.get("accepted", False)):
             raise ValidationAppError("agent-generated score patch proposal is invalid", details=validation)
@@ -244,15 +251,89 @@ class AgentWorkflowService:
         transpose_semitones: int = 0,
     ) -> RvcJobSpec:
         context = self.load_context(db, user=user, revision_id=revision_id, skill_profile="rvc")
-        spec = self.rvc_prepare_agent.prepare(
-            context,
-            voice_model_id=voice_model_id,
-            transpose_semitones=transpose_semitones,
+        result = self.plugin_registry.run(
+            "rvc_prepare",
+            PluginContext(
+                agent_context=context,
+                artifacts=tuple(context.artifacts),
+                warnings=tuple(context.warnings),
+                params={"voice_model_id": voice_model_id, "transpose_semitones": transpose_semitones},
+            ),
         )
+        spec = result.payload
         validation = self.rvc_spec_validator.validate(context=context, spec=spec)
         if not validation.accepted:
             raise ValidationAppError("agent-generated RVC job spec is invalid", details={"errors": validation.errors})
         return spec
+
+    def _run_score_patch_plugin(
+        self,
+        *,
+        context: AgentRevisionContext,
+        instruction: str | dict[str, Any] | AgentScorePatch,
+    ) -> AgentScorePatch:
+        result = self.plugin_registry.run(
+            "score_patch_agent",
+            PluginContext(
+                agent_context=context,
+                artifacts=tuple(context.artifacts),
+                warnings=tuple(context.warnings),
+                params={"instruction": instruction},
+            ),
+        )
+        proposal = result.payload
+        if isinstance(proposal, AgentScorePatch):
+            return proposal
+        if isinstance(proposal, dict):
+            return AgentScorePatch.model_validate(proposal)
+        raise ValidationAppError("score_patch_agent plugin returned an invalid proposal")
+
+    def _build_default_plugin_registry(self) -> PluginRegistry:
+        registry = PluginRegistry()
+        registry.register(
+            CallablePlugin(
+                name="diagnosis",
+                kind="diagnosis",
+                handler=lambda plugin_context: self.diagnosis_agent.run(self._require_agent_context(plugin_context)),
+            )
+        )
+        registry.register(
+            CallablePlugin(
+                name="score_patch_agent",
+                kind="score_patch",
+                handler=lambda plugin_context: self._propose_score_patch(
+                    context=self._require_agent_context(plugin_context),
+                    instruction=plugin_context.params.get("instruction", ""),
+                ),
+            )
+        )
+        registry.register(
+            CallablePlugin(
+                name="rvc_prepare",
+                kind="rvc",
+                handler=lambda plugin_context: self.rvc_prepare_agent.prepare(
+                    self._require_agent_context(plugin_context),
+                    voice_model_id=str(plugin_context.params.get("voice_model_id", "")),
+                    transpose_semitones=int(plugin_context.params.get("transpose_semitones", 0)),
+                ),
+            )
+        )
+        registry.register(
+            CallablePlugin(
+                name="lyrics_alignment",
+                kind="lyrics",
+                handler=lambda _plugin_context: {
+                    "status": "not_configured",
+                    "warnings": ["lyrics_alignment_plugin_not_configured"],
+                },
+            )
+        )
+        return registry
+
+    def _require_agent_context(self, plugin_context: PluginContext) -> AgentRevisionContext:
+        if plugin_context.agent_context is None:
+            raise ValidationAppError("plugin requires an agent revision context")
+        return plugin_context.agent_context
 
     def regenerate_exports(
         self,

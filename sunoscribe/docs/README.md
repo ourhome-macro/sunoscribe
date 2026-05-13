@@ -5,15 +5,16 @@
 ## 建议阅读顺序
 
 1. `backend-audio-pipeline.md`：后端音频流水线、typed data lineage、服务边界与 required stage 契约。
-2. `production-runtime-policy.md`：生产/诊断/benchmark profile、RMVPE fallback policy、artifact lineage 与失败策略。
-3. `lead-vocal-mvp-execution.md`：第一阶段 lead-vocal MVP 的实际 API 执行流程、导出边界与验收标准。
-4. `post-mvp-development-roadmap.md`：lead-vocal MVP 之后的开发顺序，包含真实前端、artifact API、ScorePatch、RVC 与钢琴编配边界。
-5. `sunoscribe-mir-practical-guide.md`：面向当前项目状态的 MIR 实践指南，聚焦主链路、benchmark、artifact、revision 与错误分析。
-6. `frontend-current-state.md`：当前 React/Vite 前端工作台原型的已实现页面、mock 数据边界与待对接后端事项。
-7. `mvp-trial-runbook.md`：初步 MVP 试验步骤、runtime doctor、单曲 smoke 与 19 首 observe-only benchmark。
-8. `mp4-midi-benchmark.md`：26 首 MP4 -> MIDI 本地 benchmark 设计、指标、manifest 与回归门禁。
-9. `audio_processor.md`、`vocal_separator.md`、`pitch _detection.md`：早期模块级实现说明，可作为历史/实现参考。
-10. `lyrics_processor.md`：歌词处理说明。
+2. `mainline-plugin-architecture.md`：精简后的六个主干服务、目标依赖图与轻量内置插件 registry 边界。
+3. `production-runtime-policy.md`：生产/诊断/benchmark profile、RMVPE fallback policy、artifact lineage 与失败策略。
+4. `lead-vocal-mvp-execution.md`：第一阶段 lead-vocal MVP 的实际 API 执行流程、导出边界与验收标准。
+5. `post-mvp-development-roadmap.md`：lead-vocal MVP 之后的开发顺序，包含真实前端、artifact API、ScorePatch、RVC 与钢琴编配边界。
+6. `sunoscribe-mir-practical-guide.md`：面向当前项目状态的 MIR 实践指南，聚焦主链路、benchmark、artifact、revision 与错误分析。
+7. `frontend-current-state.md`：当前 React/Vite 前端工作台原型的已实现页面、mock 数据边界与待对接后端事项。
+8. `mvp-trial-runbook.md`：初步 MVP 试验步骤、runtime doctor、单曲 smoke 与 19 首 observe-only benchmark。
+9. `mp4-midi-benchmark.md`：26 首 MP4 -> MIDI 本地 benchmark 设计、指标、manifest 与回归门禁。
+10. `audio_processor.md`、`vocal_separator.md`、`pitch _detection.md`：早期模块级实现说明，可作为历史/实现参考。
+11. `lyrics_processor.md`：歌词处理说明。
 
 ## 当前后端重点
 

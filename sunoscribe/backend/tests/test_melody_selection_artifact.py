@@ -18,7 +18,7 @@ from app.modules.pitch.reason_codes import (
 
 
 class TestRuleBasedMelodySelector(unittest.TestCase):
-    def test_raw_notes_are_preferred_over_legacy_selected_notes(self) -> None:
+    def test_preselected_notes_are_preferred_by_default_and_marked(self) -> None:
         result = RuleBasedMelodySelector(MelodySelectionConfig(phrase_postprocess_enabled=False)).select(
             note_candidates={
                 "melody_candidates": {
@@ -39,10 +39,10 @@ class TestRuleBasedMelodySelector(unittest.TestCase):
             }
         )
 
-        self.assertEqual([note["candidate_id"] for note in result["selected_notes"]], ["raw"])
-        self.assertEqual(result["summary"]["input_source"], "melody_candidates.notes")
-        self.assertEqual(result["config"]["input_source"], "melody_candidates.notes")
-        self.assertEqual(result["summary"]["inherited_reason_code_counts"], {})
+        self.assertEqual([note["candidate_id"] for note in result["selected_notes"]], ["legacy"])
+        self.assertEqual(result["summary"]["input_source"], "melody_candidates.selected_notes_preselected")
+        self.assertEqual(result["config"]["input_source"], "melody_candidates.selected_notes_preselected")
+        self.assertEqual(result["summary"]["inherited_reason_code_counts"], {SHORT_GAP_BRIDGED: 1})
 
     def test_rejects_low_confidence_short_and_out_of_range(self) -> None:
         selector = RuleBasedMelodySelector()
@@ -266,8 +266,37 @@ class TestRuleBasedMelodySelector(unittest.TestCase):
             }
         )
 
+        self.assertEqual([note["candidate_id"] for note in result["selected_notes"]], ["legacy"])
+        self.assertEqual(result["summary"]["input_source"], "melody_candidates.selected_notes_preselected")
+        self.assertTrue(result["summary"]["prefer_preselected_notes"])
+        self.assertEqual(result["summary"]["inherited_reason_code_counts"], {SHORT_GAP_BRIDGED: 1})
+
+    def test_raw_notes_can_be_forced_for_diagnostic_review(self) -> None:
+        result = RuleBasedMelodySelector(
+            MelodySelectionConfig(phrase_postprocess_enabled=False, prefer_preselected_notes=False)
+        ).select(
+            note_candidates={
+                "melody_candidates": {
+                    "notes": [
+                        {"id": "raw", "start_time": 0.0, "end_time": 0.4, "pitch": "C4", "confidence": 0.9},
+                    ],
+                    "selected_notes": [
+                        {
+                            "id": "legacy",
+                            "start_time": 1.0,
+                            "end_time": 1.4,
+                            "pitch": "D4",
+                            "confidence": 0.9,
+                            "reason_codes": [SHORT_GAP_BRIDGED],
+                        },
+                    ],
+                }
+            }
+        )
+
         self.assertEqual([note["candidate_id"] for note in result["selected_notes"]], ["raw"])
         self.assertEqual(result["summary"]["input_source"], "melody_candidates.notes")
+        self.assertFalse(result["summary"]["prefer_preselected_notes"])
         self.assertEqual(result["summary"]["inherited_reason_code_counts"], {})
 
     def test_legacy_selected_notes_reason_codes_are_inherited_not_actions(self) -> None:
@@ -288,7 +317,7 @@ class TestRuleBasedMelodySelector(unittest.TestCase):
             }
         )
 
-        self.assertEqual(result["summary"]["input_source"], "melody_candidates.selected_notes_legacy")
+        self.assertEqual(result["summary"]["input_source"], "melody_candidates.selected_notes_preselected")
         self.assertEqual(result["summary"]["inherited_reason_code_counts"], {SHORT_GAP_BRIDGED: 1})
         self.assertEqual(result["postprocess"]["inherited_reason_code_counts"], {SHORT_GAP_BRIDGED: 1})
         self.assertEqual(result["postprocess"]["action_count"], 0)

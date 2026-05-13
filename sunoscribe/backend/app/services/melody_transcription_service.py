@@ -58,7 +58,7 @@ class MelodyTranscriptionService:
         workspace: ProjectWorkspace,
     ) -> MelodyTranscriptionResult:
         if self.pitch_pipeline is None:
-            return MelodyTranscriptionResult(warnings=["pitch_pipeline_missing: skip pitch"])
+            raise RuntimeError("required pitch pipeline is unavailable")
 
         result = MelodyTranscriptionResult()
         pitch_request = self.pitch_request_builder(
@@ -115,7 +115,29 @@ class MelodyTranscriptionService:
             except Exception as exc:
                 result.warnings.append(f"raw_midi_export_failed:{self.short_exception(exc)}")
 
+        if not self._has_lead_notes(result.pitch_result_obj):
+            raise RuntimeError("required pitch pipeline produced no lead-vocal notes")
+
         return result
+
+    @staticmethod
+    def _has_lead_notes(pitch_result_obj: Any | None) -> bool:
+        if pitch_result_obj is None:
+            return False
+        for attr in ("lead_notes", "raw_notes"):
+            notes = getattr(pitch_result_obj, attr, None)
+            if isinstance(notes, list) and notes:
+                return True
+
+        measures = getattr(pitch_result_obj, "measures", None)
+        if isinstance(measures, list):
+            for measure in measures:
+                if not isinstance(measure, dict):
+                    continue
+                notes = measure.get("notes")
+                if isinstance(notes, list) and notes:
+                    return True
+        return False
 
     @staticmethod
     def _build_note_candidates_payload(semantic_audio_dict: dict | None) -> dict | None:

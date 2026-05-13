@@ -21,6 +21,7 @@ from .reason_codes import (
 
 @dataclass(frozen=True)
 class MelodySelectionConfig:
+    prefer_preselected_notes: bool = True
     min_confidence: float = 0.52
     min_duration_sec: float = 0.12
     min_voiced_ratio: float = 0.5
@@ -94,6 +95,7 @@ class RuleBasedMelodySelector:
             "summary": {
                 "input_candidate_count": len(candidates),
                 "input_source": input_source,
+                "prefer_preselected_notes": self.config.prefer_preselected_notes,
                 "pre_postprocess_selected_count": postprocess_result.input_count,
                 "selected_count": len(selected),
                 "rejected_count": len(rejected),
@@ -119,6 +121,7 @@ class RuleBasedMelodySelector:
                 "phrase_remove_isolated_fragments_enabled": self.config.phrase_remove_isolated_fragments_enabled,
                 "phrase_sustain_short_gaps_enabled": self.config.phrase_sustain_short_gaps_enabled,
                 "input_source": input_source,
+                "prefer_preselected_notes": self.config.prefer_preselected_notes,
             },
         }
 
@@ -127,7 +130,10 @@ class RuleBasedMelodySelector:
         note_candidates: dict[str, Any] | None,
         pitch_contours: dict[str, Any] | None,
     ) -> tuple[list[dict[str, Any]], str]:
-        raw_notes, input_source = _extract_candidate_notes(note_candidates)
+        raw_notes, input_source = _extract_candidate_notes(
+            note_candidates,
+            prefer_preselected_notes=bool(self.config.prefer_preselected_notes),
+        )
         if raw_notes:
             return [self._normalize_candidate(note, index) for index, note in enumerate(raw_notes, start=1)], input_source
         contours = pitch_contours.get("contours") if isinstance(pitch_contours, dict) else None
@@ -307,11 +313,22 @@ def selected_notes_to_pitch_notes(selected_melody: dict[str, Any] | None) -> lis
     return notes
 
 
-def _extract_candidate_notes(note_candidates: dict[str, Any] | None) -> tuple[list[dict[str, Any]], str]:
+def _extract_candidate_notes(
+    note_candidates: dict[str, Any] | None,
+    *,
+    prefer_preselected_notes: bool,
+) -> tuple[list[dict[str, Any]], str]:
     if not isinstance(note_candidates, dict):
         return [], "none"
     melody = note_candidates.get("melody_candidates")
     containers = [("melody_candidates", melody), ("note_candidates", note_candidates)]
+    if prefer_preselected_notes:
+        for source, container in containers:
+            if not isinstance(container, dict):
+                continue
+            notes = container.get("selected_notes") if isinstance(container.get("selected_notes"), list) else None
+            if notes:
+                return [note for note in notes if isinstance(note, dict)], f"{source}.selected_notes_preselected"
     for source, container in containers:
         if not isinstance(container, dict):
             continue
@@ -323,7 +340,7 @@ def _extract_candidate_notes(note_candidates: dict[str, Any] | None) -> tuple[li
             continue
         notes = container.get("selected_notes") if isinstance(container.get("selected_notes"), list) else None
         if notes:
-            return [note for note in notes if isinstance(note, dict)], f"{source}.selected_notes_legacy"
+            return [note for note in notes if isinstance(note, dict)], f"{source}.selected_notes_legacy_fallback"
     return [], "none"
 
 

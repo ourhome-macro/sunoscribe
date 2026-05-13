@@ -61,7 +61,23 @@ class _CapturePitchPipeline:
                 duration_sec=3.0,
                 time_signature="4/4",
             ),
-            measures=[],
+            measures=[
+                {
+                    "measure_num": 1,
+                    "start_time": 0.0,
+                    "end_time": 1.0,
+                    "notes": [
+                        {
+                            "pitch": "A3",
+                            "start_time": 0.0,
+                            "end_time": 0.5,
+                            "duration_beats": 1.0,
+                            "note_type": "quarter",
+                            "confidence": 0.9,
+                        }
+                    ],
+                }
+            ],
             lead_notes=[],
             raw_notes=[],
             f0_track=F0Track(
@@ -95,6 +111,29 @@ class _CapturePitchPipeline:
                     beat_unit=4,
                 ),
             ),
+        )
+
+
+class _EmptyPitchPipeline:
+    def __init__(self) -> None:
+        self.last_request = None
+
+    def run(self, request):
+        self.last_request = request
+        return PitchAnalysisResult(
+            version="test",
+            meta=MetaInfo(
+                bpm=120.0,
+                bpm_confidence=0.9,
+                key="C Major",
+                key_confidence=0.8,
+                rhythm_type="stable",
+                duration_sec=3.0,
+                time_signature="4/4",
+            ),
+            measures=[],
+            lead_notes=[],
+            raw_notes=[],
         )
 
 
@@ -262,13 +301,12 @@ class TestAudioAnalysisService(unittest.TestCase):
             self.assertEqual(perception.stem_paths["drums"], workspace.stem_path("drums"))
             self.assertEqual(perception.stem_paths["bass"], workspace.stem_path("bass"))
             self.assertIn("other", pitch_pipeline.last_request.source_stems)
-            self.assertIsNotNone(perception.analysis_ir_dict)
+            self.assertIsNone(perception.analysis_ir_dict)
             self.assertIsNotNone(perception.score_data_dict)
             self.assertIn("measures", perception.score_data_dict)
             self.assertIsNotNone(score_ir_builder.last_args)
             self.assertEqual(len(score_ir_builder.last_args), 2)
-            self.assertIn("analysis_ir", score_ir_builder.last_kwargs)
-            self.assertIsNotNone(score_ir_builder.last_kwargs["analysis_ir"])
+            self.assertNotIn("analysis_ir", score_ir_builder.last_kwargs)
             self.assertEqual(perception.semantic_audio_dict["source_stems"]["bass"], str(workspace.stem_path("bass")))
             self.assertIsNotNone(perception.f0_track_dict)
             self.assertEqual(perception.f0_track_dict["backend"], "rmvpe")
@@ -290,7 +328,7 @@ class TestAudioAnalysisService(unittest.TestCase):
             self.assertIsNotNone(perception.rhythm_grid_dict)
             self.assertEqual(perception.vocal_activity_dict["segments"][0]["state"], "vocal")
 
-            alignment = asyncio.run(service._run_alignment_stage(perception.score_ir_obj, options))
+            alignment = service._empty_alignment_stage()
             persist_warnings = service._persist_artifacts(workspace, perception, alignment)
             self.assertEqual(persist_warnings, [])
             self.assertTrue(workspace.f0_track_path.exists())
@@ -300,6 +338,48 @@ class TestAudioAnalysisService(unittest.TestCase):
             self.assertTrue(workspace.quantized_notes_path.exists())
             self.assertTrue(workspace.rhythm_grid_path.exists())
             self.assertTrue(workspace.vocal_activity_path.exists())
+
+    def test_perception_stage_fails_when_pitch_pipeline_missing(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source_audio = root / "source.wav"
+            source_audio.write_bytes(b"mix")
+            workspace = ProjectWorkspace(project_id="missing_pitch_001", projects_root=root / "projects")
+            workspace.ensure_structure()
+            workspace.vocals_path.write_bytes(b"vocals")
+            service = AudioAnalysisService(
+                audio_processor=_FakeNormalizingAudioProcessor(),
+                vocal_separator=_FakeSeparator({"vocals": workspace.vocals_path}),
+                pitch_pipeline=None,
+                score_ir_builder=_FakeScoreIRBuilder(),
+                midi_exporter=None,
+                projects_root=root / "projects",
+            )
+            service.pitch_pipeline = None
+            service.melody_transcription_service.pitch_pipeline = None
+
+            with self.assertRaisesRegex(RuntimeError, "pitch_pipeline_failed"):
+                asyncio.run(service._run_perception_stage(source_audio, source_audio, workspace, AudioAnalysisOptions(project_id="missing_pitch_001")))
+
+    def test_perception_stage_fails_when_pitch_pipeline_returns_no_notes(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source_audio = root / "source.wav"
+            source_audio.write_bytes(b"mix")
+            workspace = ProjectWorkspace(project_id="empty_pitch_001", projects_root=root / "projects")
+            workspace.ensure_structure()
+            workspace.vocals_path.write_bytes(b"vocals")
+            service = AudioAnalysisService(
+                audio_processor=_FakeNormalizingAudioProcessor(),
+                vocal_separator=_FakeSeparator({"vocals": workspace.vocals_path}),
+                pitch_pipeline=_EmptyPitchPipeline(),
+                score_ir_builder=_FakeScoreIRBuilder(),
+                midi_exporter=None,
+                projects_root=root / "projects",
+            )
+
+            with self.assertRaisesRegex(RuntimeError, "no lead-vocal notes"):
+                asyncio.run(service._run_perception_stage(source_audio, source_audio, workspace, AudioAnalysisOptions(project_id="empty_pitch_001")))
 
     def test_perception_stage_uses_canonical_audio_for_required_stages(self) -> None:
         with TemporaryDirectory() as temp_dir:
