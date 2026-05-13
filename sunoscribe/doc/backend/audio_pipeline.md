@@ -4,8 +4,8 @@
 
 唯一正式事实源为：
 
-- `../../docs/backend-audio-pipeline.md`
-- `../../docs/production-runtime-policy.md`
+- `../architecture/backend-audio-pipeline.md`
+- `../architecture/production-runtime-policy.md`
 
 ## 目的
 
@@ -32,8 +32,8 @@
 
 如果你是从旧文档入口进入这里，请直接改读下面两份文档：
 
-- `../../docs/backend-audio-pipeline.md`
-- `../../docs/production-runtime-policy.md`
+- `../architecture/backend-audio-pipeline.md`
+- `../architecture/production-runtime-policy.md`
 
 它们描述的是当前正式的：
 

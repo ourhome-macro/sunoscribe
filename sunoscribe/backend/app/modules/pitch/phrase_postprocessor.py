@@ -20,6 +20,7 @@ from .types import Note
 @dataclass(frozen=True)
 class PhrasePostprocessConfig:
     enabled: bool = True
+    profile: str = "conservative"
     max_phrase_gap_sec: float = 0.12
     short_gap_sec: float = 0.08
     same_pitch_tolerance_semitones: int = 1
@@ -31,7 +32,7 @@ class PhrasePostprocessConfig:
     median_deviation_semitones: int = 2
     median_max_adjust_semitones: int = 4
     median_max_note_sec: float = 0.24
-    remove_isolated_fragments_enabled: bool = True
+    remove_isolated_fragments_enabled: bool = False
     isolated_fragment_max_sec: float = 0.16
     isolated_fragment_max_confidence: float = 0.54
     isolated_fragment_min_jump_semitones: int = 7
@@ -337,6 +338,7 @@ class PhraseAwarePostprocessor:
                         pitch_after_midi=None,
                         details={
                             "mode": "delete_weak_short_local_outlier",
+                            "profile": str(self.config.profile or "conservative"),
                             "duration_sec": round(cur_duration, 6),
                             "confidence": round(cur_confidence, 6),
                             "jump_from_prev_semitones": round(jump_from_prev, 6),

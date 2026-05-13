@@ -17,6 +17,7 @@ SUSPECTED_VIBRATO = "suspected_vibrato"
 SUSPECTED_GLIDE = "suspected_glide"
 LARGE_QUANTIZE_ERROR = "large_quantize_error"
 HIGH_QUANTIZE_ERROR = LARGE_QUANTIZE_ERROR
+QUANTIZED_DURATION_TOO_SHORT = "quantized_duration_too_short"
 DP_FALLBACK = "dp_fallback"
 RHYTHM_GRID_UNAVAILABLE = "rhythm_grid_unavailable"
 DP_NO_CANDIDATE_PATH = "dp_no_candidate_path"

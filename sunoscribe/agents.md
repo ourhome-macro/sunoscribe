@@ -13,7 +13,7 @@ The first production milestone is intentionally narrow:
 - RVC: external service integration with ScoreIR-guided F0 correction.
 - Deferred: full piano arrangement, full multi-track transcription, robust chord chart, structure labels, NMF/HPSS-based source decomposition.
 
-## MIR Principles From `mirdoc.md`
+## MIR Principles From `doc/principles/mirdoc.md`
 
 Agents must preserve these principles when proposing or implementing changes:
 
@@ -126,7 +126,7 @@ Recommended skills:
 - `skills/debug-diagnosis`: read warnings and artifacts, classify failure causes, and recommend next actions.
 - `skills/rvc-cover`: prepare RVC jobs using ScoreIR-guided F0 correction and external service constraints.
 
-RAG is not the preferred path because `mirdoc.md` is mostly stable project knowledge. Distill it into skills and validators so the agent follows fixed engineering rules instead of retrieving passages and improvising.
+RAG is not the preferred path because `doc/principles/mirdoc.md` is mostly stable project knowledge. Distill it into skills and validators so the agent follows fixed engineering rules instead of retrieving passages and improvising.
 
 ## Agent Tool Rules
 

@@ -78,7 +78,29 @@ class TestQuantizedNotesArtifactBuilder(unittest.TestCase):
         )
 
         self.assertEqual(artifact["quantizer_backend"], "dp_v1")
-        self.assertEqual(artifact["notes"][0]["duration_beats"], 1.0)
+        self.assertGreaterEqual(artifact["notes"][0]["quantized_duration_sec"], 0.68)
+        self.assertLessEqual(artifact["notes"][0]["quantized_end_time_sec"], artifact["notes"][1]["quantized_start_time_sec"])
+
+    def test_dp_v1_protects_duration_from_over_short_quantization(self) -> None:
+        artifact = QuantizedNotesArtifactBuilder(
+            QuantizerArtifactConfig(allowed_durations_beats=[0.25, 0.5, 1.0], min_quantized_duration_ratio=0.8)
+        ).build(
+            selected_melody={
+                "selected_notes": [
+                    {
+                        "candidate_id": "sung_long",
+                        "start_time_sec": 0.0,
+                        "end_time_sec": 0.80,
+                        "pitch_center_midi": 60.0,
+                        "confidence": 0.9,
+                    },
+                ]
+            },
+            rhythm_grid={"bpm": 120.0, "beat_times": [0.0, 0.5, 1.0, 1.5], "beats_per_bar": 4, "beat_unit": 4},
+        )
+
+        self.assertGreaterEqual(artifact["notes"][0]["quantized_duration_sec"], 0.64)
+        self.assertNotIn("quantized_duration_too_short", artifact["notes"][0]["reason_codes"])
 
     def test_marks_high_error_uncertain(self) -> None:
         artifact = QuantizedNotesArtifactBuilder(QuantizerArtifactConfig(high_error_sec=0.001)).build(

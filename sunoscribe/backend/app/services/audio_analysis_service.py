@@ -442,15 +442,24 @@ class AudioAnalysisService:
         )
         score_ir.meta.analysis_info = dict(score_ir.meta.analysis_info or {})
         score_ir.meta.analysis_info["lead_note_source"] = "quantized_notes"
+        score_ir.meta.analysis_info["timing_origin"] = "performance_time_from_quantized_notes"
+        score_ir.meta.analysis_info["notation_timing_origin"] = "quantized_grid_from_quantized_notes"
         score_ir.meta.analysis_info["quantizer_backend"] = quantized_notes_dict.get("quantizer_backend")
+        score_ir.meta.analysis_info["quantized_note_count"] = len(raw_notes)
+        score_ir.meta.analysis_info["score_ir_lead_note_count"] = len(converted_notes)
         score_ir.analysis_hints.quantize_mode = str(quantized_notes_dict.get("quantizer_backend") or "") or None
         return score_ir
 
     def _score_note_from_quantized_artifact(self, raw_note: dict[str, Any], index: int) -> ScoreNote | None:
-        start_time = self._float_from_any(raw_note.get("quantized_start_time_sec"), raw_note.get("start_time_sec"), 0.0)
-        end_time = self._float_from_any(raw_note.get("quantized_end_time_sec"), raw_note.get("end_time_sec"), start_time)
+        start_time = self._float_from_any(raw_note.get("start_time_sec"), raw_note.get("quantized_start_time_sec"), 0.0)
+        end_time = self._float_from_any(raw_note.get("end_time_sec"), raw_note.get("quantized_end_time_sec"), start_time)
         if end_time <= start_time:
             return None
+        quantized_start_time = self._optional_float_from_any(raw_note.get("quantized_start_time_sec"))
+        quantized_end_time = self._optional_float_from_any(raw_note.get("quantized_end_time_sec"))
+        quantized_duration = self._optional_float_from_any(raw_note.get("quantized_duration_sec"))
+        if quantized_duration is None and quantized_start_time is not None and quantized_end_time is not None:
+            quantized_duration = max(0.0, quantized_end_time - quantized_start_time)
         pitch_midi = self._optional_int_from_any(raw_note.get("pitch_midi"))
         pitch = str(raw_note.get("pitch") or "")
         if not pitch and pitch_midi is not None:
@@ -484,6 +493,12 @@ class AudioAnalysisService:
             source="quantized_notes",
             source_candidate_id=str(raw_note.get("source_candidate_id") or ""),
             quantized_note_id=str(raw_note.get("id") or ""),
+            timing_origin="performance_time_from_quantized_notes",
+            performance_start_time_sec=start_time,
+            performance_end_time_sec=end_time,
+            quantized_start_time_sec=quantized_start_time,
+            quantized_end_time_sec=quantized_end_time,
+            quantized_duration_sec=quantized_duration,
             uncertain=bool(raw_note.get("uncertain")) or bool(reason_codes),
             reason_codes=reason_codes,
         )

@@ -95,6 +95,18 @@ STAGE_CONTINUITY_STAGE_SPECS = [
         "lineage_source": "quantized_notes.notes",
         "artifact": "quantized_notes.json",
     },
+    {
+        "stage": "score_ir_lead_notes",
+        "label": "score_ir lead notes",
+        "lineage_source": "score_ir.notes",
+        "artifact": "score_ir.json",
+    },
+    {
+        "stage": "predicted_midi",
+        "label": "predicted MIDI",
+        "lineage_source": "exported_midi.notes",
+        "artifact": "final_score.mid",
+    },
 ]
 
 
@@ -552,6 +564,8 @@ def build_derived_diagnostics(
         note_candidates_path=note_candidates_path,
         selected_melody_path=selected_melody_path,
         quantized_notes_path=quantized_notes_path,
+        score_ir_path=score_ir_path,
+        predicted_notes=predicted_notes,
     )
     rhythm = _derive_rhythm_diagnostics(rhythm_debug_path, rhythm_candidates_path=rhythm_candidates_path)
     short_note_diagnostics = _derive_short_note_diagnostics(
@@ -2503,10 +2517,24 @@ def _load_artifact_note_events(path: Path | None, *, kind: str) -> list[NoteEven
     for item in items or []:
         if not isinstance(item, dict):
             continue
-        event = _artifact_item_to_note_event(item)
+        event = _artifact_item_to_score_ir_note_event(item) if kind == "score_ir" else _artifact_item_to_note_event(item)
         if event is not None:
             events.append(event)
     return events
+
+
+def _artifact_item_to_score_ir_note_event(item: dict[str, Any]) -> NoteEvent | None:
+    start = _as_float(_first_present(item, "performance_start_time_sec", "start_time", "start_time_sec"))
+    end = _as_float(_first_present(item, "performance_end_time_sec", "end_time", "end_time_sec"))
+    duration = _as_float(_first_present(item, "duration_sec", "duration"))
+    if end is None and start is not None and duration is not None:
+        end = start + duration
+    pitch = _candidate_pitch_midi(item)
+    if start is None or pitch is None:
+        return None
+    if end is None:
+        end = start + max(0.0, duration or 0.0)
+    return NoteEvent(start=float(start), end=float(end), pitch=int(round(pitch)))
 
 
 def _artifact_item_to_note_event(item: dict[str, Any]) -> NoteEvent | None:
@@ -4060,6 +4088,8 @@ def summarize_stage_continuity_lineage(
     note_candidates_path: Path | None,
     selected_melody_path: Path | None,
     quantized_notes_path: Path | None,
+    score_ir_path: Path | None = None,
+    predicted_notes: list[NoteEvent] | None = None,
 ) -> dict[str, Any]:
     selected_melody = _derive_selected_melody_diagnostics(selected_melody_path)
     stages = [
@@ -4102,6 +4132,22 @@ def summarize_stage_continuity_lineage(
             artifact="quantized_notes.json",
             events=_load_artifact_note_events(quantized_notes_path, kind="quantized_notes"),
             unavailable_reason="quantized notes unavailable" if quantized_notes_path is None or not quantized_notes_path.exists() else None,
+        ),
+        _stage_continuity_payload(
+            stage="score_ir_lead_notes",
+            label="score_ir lead notes",
+            lineage_source="score_ir.notes",
+            artifact="score_ir.json",
+            events=_load_artifact_note_events(score_ir_path, kind="score_ir"),
+            unavailable_reason="score_ir notes unavailable" if score_ir_path is None or not score_ir_path.exists() else None,
+        ),
+        _stage_continuity_payload(
+            stage="predicted_midi",
+            label="predicted MIDI",
+            lineage_source="exported_midi.notes",
+            artifact="final_score.mid",
+            events=list(predicted_notes or []) if predicted_notes is not None else None,
+            unavailable_reason="predicted MIDI notes unavailable" if predicted_notes is None else None,
         ),
     ]
     return {

@@ -4,7 +4,7 @@
 
 本文面向未来维护 SunoScribe 后端音频流水线的工程师与 agent，描述当前后端从上传文件到乐谱导出工件的 typed data lineage、服务边界、阶段契约与落盘路径。
 
-本文只覆盖后端音频流水线。前端当前实现状态见 `docs/frontend-current-state.md`。
+本文只覆盖后端音频流水线。前端当前实现状态见 `../frontend/frontend-current-state.md`。
 
 截至 2026-05-11，代码现状是：`Artifact`、`ScoreRevision`、revision-scoped export、上传即注册 `source_media`、任务编排与受约束 agent workflow 已经有代码实现；前端是 mock 驱动的工作台原型；OSMD、真实前端 API 对接、外部 RVC 调用与完整 score editing UI 尚未完成。
 
@@ -59,7 +59,7 @@ Upload File
 
 当前实现已经覆盖到 `Export Artifacts`，并提供了后续 `Frontend Render/Edit` 与 `CorrectedF0Track`/RVC job spec 的接口雏形；真正的前端 API 对接、OSMD 渲染、外部 RVC 调用和混音产物还没有形成生产闭环。
 
-第一阶段的具体执行步骤见 `docs/lead-vocal-mvp-execution.md`。钢琴弹奏版/伴奏编配不属于本阶段，应按 `docs/post-mvp-development-roadmap.md` 中的 piano arrangement 层单独设计。
+第一阶段的具体执行步骤见 `../runbooks/lead-vocal-mvp-execution.md`。钢琴弹奏版/伴奏编配不属于本阶段，应按 `../roadmap/post-mvp-development-roadmap.md` 中的 piano arrangement 层单独设计。
 
 ### 1. Upload File -> MediaAsset
 

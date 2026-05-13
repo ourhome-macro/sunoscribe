@@ -5,7 +5,7 @@ description: Lead-vocal MIR transcription guidance for SunoScribe. Use when desi
 
 # MIR Transcription
 
-Use this skill to keep SunoScribe transcription work aligned with the MIR principles distilled from `mirdoc.md`.
+Use this skill to keep SunoScribe transcription work aligned with the MIR principles distilled from `doc/principles/mirdoc.md`.
 
 ## Core Rule
 

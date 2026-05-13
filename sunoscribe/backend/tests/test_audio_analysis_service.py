@@ -444,6 +444,55 @@ class TestAudioAnalysisService(unittest.TestCase):
             self.assertEqual(warnings, [])
             self.assertNotEqual(workspace.final_midi_path.read_bytes(), b"raw-midi-bypass")
 
+    def test_score_ir_from_quantized_notes_preserves_performance_time_for_midi(self) -> None:
+        service = AudioAnalysisService(
+            audio_processor=_PassthroughAudioProcessor(),
+            vocal_separator=None,
+            lyrics_recognizer=None,
+            pitch_pipeline=None,
+            analysis_inferencer=None,
+            midi_exporter=None,
+        )
+        score_ir = _FakeScoreIRBuilder().build()
+        warnings: list[str] = []
+
+        updated = service._replace_lead_notes_from_quantized_artifact(
+            score_ir,
+            quantized_notes_dict={
+                "quantizer_backend": "dp_v1",
+                "notes": [
+                    {
+                        "id": "qn_00001",
+                        "source_candidate_id": "cand_00001",
+                        "pitch": "C4",
+                        "pitch_midi": 60,
+                        "start_time_sec": 0.30,
+                        "end_time_sec": 0.60,
+                        "quantized_start_time_sec": 0.25,
+                        "quantized_end_time_sec": 0.50,
+                        "quantized_duration_sec": 0.25,
+                        "measure_index": 0,
+                        "beat_in_measure": 1.5,
+                        "duration_beats": 0.5,
+                        "confidence": 0.91,
+                    }
+                ],
+            },
+            warnings=warnings,
+        )
+
+        note = updated.notes[0]
+        self.assertEqual(note.source, "quantized_notes")
+        self.assertEqual(note.timing_origin, "performance_time_from_quantized_notes")
+        self.assertAlmostEqual(note.start_time, 0.30)
+        self.assertAlmostEqual(note.end_time, 0.60)
+        self.assertAlmostEqual(note.performance_start_time_sec, 0.30)
+        self.assertAlmostEqual(note.performance_end_time_sec, 0.60)
+        self.assertAlmostEqual(note.quantized_start_time_sec, 0.25)
+        self.assertAlmostEqual(note.quantized_end_time_sec, 0.50)
+        self.assertEqual(updated.meta.analysis_info["lead_note_source"], "quantized_notes")
+        self.assertEqual(updated.meta.analysis_info["timing_origin"], "performance_time_from_quantized_notes")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -9,7 +9,7 @@ from app.modules.pitch.types import Note
 class TestPitchSchemaContract(unittest.TestCase):
     def setUp(self):
         self.schema_path = (
-            Path(__file__).resolve().parents[1] / "docs" / "pitch" / "pitch_p1.schema.json"
+            Path(__file__).resolve().parents[2] / "doc" / "backend" / "pitch" / "pitch_p1.schema.json"
         )
 
     def test_schema_file_exists_and_has_required_sections(self):

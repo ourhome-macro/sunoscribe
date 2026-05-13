@@ -22,6 +22,7 @@ from .reason_codes import (
 @dataclass(frozen=True)
 class MelodySelectionConfig:
     prefer_preselected_notes: bool = True
+    postprocess_profile: str = "conservative"
     min_confidence: float = 0.52
     min_duration_sec: float = 0.12
     min_voiced_ratio: float = 0.5
@@ -87,6 +88,12 @@ class RuleBasedMelodySelector:
         selected_conf = [float(item["confidence"]) for item in selected]
         rejected_conf = [float(item["confidence"]) for item in rejected]
         postprocess_diagnostics = postprocess_result.diagnostics()
+        action_dicts = postprocess_diagnostics.get("actions") if isinstance(postprocess_diagnostics, dict) else None
+        if isinstance(action_dicts, list):
+            for action in action_dicts:
+                if isinstance(action, dict):
+                    details = action.get("details") if isinstance(action.get("details"), dict) else {}
+                    action["details"] = {"profile": self._postprocess_profile(), **details}
         inherited_reason_code_counts = dict(sorted(inherited_reason_counts.items()))
         return {
             "version": "selected_melody_v1",
@@ -113,12 +120,13 @@ class RuleBasedMelodySelector:
             },
             "config": {
                 "phrase_postprocess_enabled": self.config.phrase_postprocess_enabled,
+                "postprocess_profile": self._postprocess_profile(),
                 "phrase_max_gap_sec": self.config.phrase_max_gap_sec,
                 "phrase_short_gap_sec": self.config.phrase_short_gap_sec,
                 "phrase_short_note_sec": self.config.phrase_short_note_sec,
                 "phrase_octave_jump_semitones": self.config.phrase_octave_jump_semitones,
                 "phrase_median_window": self.config.phrase_median_window,
-                "phrase_remove_isolated_fragments_enabled": self.config.phrase_remove_isolated_fragments_enabled,
+                "phrase_remove_isolated_fragments_enabled": self._isolated_fragment_remove_enabled(),
                 "phrase_sustain_short_gaps_enabled": self.config.phrase_sustain_short_gaps_enabled,
                 "input_source": input_source,
                 "prefer_preselected_notes": self.config.prefer_preselected_notes,
@@ -246,8 +254,10 @@ class RuleBasedMelodySelector:
         }
 
     def _postprocess_config(self) -> PhrasePostprocessConfig:
+        profile = self._postprocess_profile()
         return PhrasePostprocessConfig(
             enabled=bool(self.config.phrase_postprocess_enabled),
+            profile=profile,
             max_phrase_gap_sec=float(self.config.phrase_max_gap_sec),
             short_gap_sec=float(self.config.phrase_short_gap_sec),
             same_pitch_tolerance_semitones=int(self.config.phrase_same_pitch_tolerance_semitones),
@@ -259,7 +269,7 @@ class RuleBasedMelodySelector:
             median_deviation_semitones=int(self.config.phrase_median_deviation_semitones),
             median_max_adjust_semitones=int(self.config.phrase_median_max_adjust_semitones),
             median_max_note_sec=float(self.config.phrase_median_max_note_sec),
-            remove_isolated_fragments_enabled=bool(self.config.phrase_remove_isolated_fragments_enabled),
+            remove_isolated_fragments_enabled=self._isolated_fragment_remove_enabled(),
             isolated_fragment_max_sec=float(self.config.phrase_isolated_fragment_max_sec),
             isolated_fragment_max_confidence=float(self.config.phrase_isolated_fragment_max_confidence),
             isolated_fragment_min_jump_semitones=int(self.config.phrase_isolated_fragment_min_jump_semitones),
@@ -270,6 +280,13 @@ class RuleBasedMelodySelector:
             vocal_max_midi=int(self.config.vocal_max_midi),
             max_iterations=int(self.config.phrase_max_iterations),
         )
+
+    def _postprocess_profile(self) -> str:
+        profile = str(self.config.postprocess_profile or "conservative").strip().lower()
+        return profile if profile in {"conservative", "cleanup_aggressive"} else "conservative"
+
+    def _isolated_fragment_remove_enabled(self) -> bool:
+        return self._postprocess_profile() == "cleanup_aggressive" and bool(self.config.phrase_remove_isolated_fragments_enabled)
 
     @staticmethod
     def _rejected(candidate: dict[str, Any], reasons: list[str]) -> dict[str, Any]:

@@ -135,8 +135,10 @@ class RenderExportService:
         artifact.error_message = None
         artifact.artifact_metadata = {
             "export_format": format_key,
+            "score_revision_id": str(revision.id),
             "revision_number": int(revision.revision_number),
             "revision_type": str(revision.revision_type),
+            "lineage": _score_revision_export_lineage(revision),
         }
         db.add(artifact)
         return artifact
@@ -273,7 +275,48 @@ def _revision_score_data_for_export(revision: ScoreRevision) -> dict[str, Any]:
         raise ValidationAppError("selected score revision is missing score_ir")
     if embedded_score_ir != score_ir or score_data.get("source_of_truth") != "score_ir":
         raise ValidationAppError("selected score revision export data is not derived from score_ir")
+    _validate_revision_score_ir_lineage(score_ir)
     return score_data
+
+
+def _validate_revision_score_ir_lineage(score_ir: dict[str, Any]) -> None:
+    notes = score_ir.get("notes") if isinstance(score_ir.get("notes"), list) else []
+    if not notes:
+        raise ValidationAppError("selected score revision has no lead notes")
+    invalid_sources = sorted(
+        {
+            str(note.get("source") or "")
+            for note in notes
+            if isinstance(note, dict) and str(note.get("source") or "") not in {"quantized_notes", "user_patch", "agent_patch"}
+        }
+    )
+    if invalid_sources:
+        raise ValidationAppError("selected score revision contains non-revision lead-note sources")
+
+
+def _score_revision_export_lineage(revision: ScoreRevision) -> dict[str, Any]:
+    score_ir = revision.score_ir if isinstance(revision.score_ir, dict) else {}
+    notes = [note for note in (score_ir.get("notes") or []) if isinstance(note, dict)]
+    sources = sorted({str(note.get("source") or "") for note in notes if note.get("source")})
+    timing_origins = sorted({str(note.get("timing_origin") or "") for note in notes if note.get("timing_origin")})
+    quantized_note_ids = [str(note.get("quantized_note_id")) for note in notes if note.get("quantized_note_id")]
+    source_candidate_ids = [str(note.get("source_candidate_id")) for note in notes if note.get("source_candidate_id")]
+    analysis_info = score_ir.get("meta", {}).get("analysis_info", {}) if isinstance(score_ir.get("meta"), dict) else {}
+    return {
+        "source_of_truth": "score_revision",
+        "score_revision_id": str(revision.id),
+        "lead_note_source": analysis_info.get("lead_note_source"),
+        "timing_origin": analysis_info.get("timing_origin") or (timing_origins[0] if len(timing_origins) == 1 else None),
+        "notation_timing_origin": analysis_info.get("notation_timing_origin"),
+        "quantizer_backend": analysis_info.get("quantizer_backend"),
+        "note_count": len(notes),
+        "sources": sources,
+        "timing_origins": timing_origins,
+        "quantized_note_ids": quantized_note_ids[:50],
+        "source_candidate_ids": source_candidate_ids[:50],
+        "quantized_note_id_count": len(quantized_note_ids),
+        "source_candidate_id_count": len(source_candidate_ids),
+    }
 
 
 def build_musicxml_bytes_from_score_data(score_data: dict[str, Any] | None) -> bytes | None:

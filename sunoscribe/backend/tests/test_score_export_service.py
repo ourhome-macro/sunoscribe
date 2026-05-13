@@ -88,6 +88,7 @@ class TestScoreExportServiceContracts(unittest.TestCase):
                 {
                     "id": "n1",
                     "pitch": "C4",
+                    "source": "quantized_notes",
                     "start_tick": 0,
                     "duration_tick": 480,
                     "measure_num": 1,
@@ -96,6 +97,7 @@ class TestScoreExportServiceContracts(unittest.TestCase):
                     "reason_codes": ["low_confidence"],
                     "source_candidate_id": "cand1",
                     "quantized_note_id": "qn1",
+                    "timing_origin": "performance_time_from_quantized_notes",
                 }
             ],
             "measures": [],
@@ -125,6 +127,27 @@ class TestScoreExportServiceContracts(unittest.TestCase):
         self.assertEqual(view_data["client_summary"]["score_notes"][0]["reason_codes"], ["low_confidence", "uncertain"])
         self.assertNotIn("storage_path", view_data["client_summary"])
 
+    def test_revision_export_rejects_legacy_measure_note_sources(self) -> None:
+        from app.models.score_revision import ScoreRevision
+        from app.services.render_export_service import RenderExportService
+
+        score_ir = {
+            "meta": {"bpm": 120.0},
+            "notes": [{"id": "n1", "pitch": "C4", "source": "measure_note"}],
+            "measures": [],
+        }
+        revision = ScoreRevision(
+            id=uuid.uuid4(),
+            project_id=uuid.uuid4(),
+            score_id=uuid.uuid4(),
+            revision_number=1,
+            score_ir=score_ir,
+            score_data={"score_ir": score_ir, "source_of_truth": "score_ir", "measures": []},
+        )
+
+        with self.assertRaisesRegex(Exception, "non-revision lead-note sources"):
+            RenderExportService()._build_export_payload(revision=revision, format_key="score_view")
+
     def test_revision_export_midi_preserves_lead_vocal_timeline_without_hook_track(self) -> None:
         import pretty_midi
 
@@ -137,6 +160,7 @@ class TestScoreExportServiceContracts(unittest.TestCase):
                 {
                     "id": "n1",
                     "pitch": "C4",
+                    "source": "quantized_notes",
                     "start_tick": 0,
                     "duration_tick": 120,
                     "measure_num": 1,
@@ -146,6 +170,7 @@ class TestScoreExportServiceContracts(unittest.TestCase):
                 {
                     "id": "n2",
                     "pitch": "D4",
+                    "source": "quantized_notes",
                     "start_tick": 120,
                     "duration_tick": 480,
                     "measure_num": 1,
@@ -155,6 +180,7 @@ class TestScoreExportServiceContracts(unittest.TestCase):
                 {
                     "id": "n3",
                     "pitch": "E4",
+                    "source": "quantized_notes",
                     "start_tick": 600,
                     "duration_tick": 120,
                     "measure_num": 2,

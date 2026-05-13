@@ -4,8 +4,8 @@ FastAPI 后端负责账号、项目、上传、异步任务、歌词、谱面生
 
 正式的音频流水线与 production runtime 语义以这两份文档为唯一事实源：
 
-- `../docs/backend-audio-pipeline.md`
-- `../docs/production-runtime-policy.md`
+- `../architecture/backend-audio-pipeline.md`
+- `../architecture/production-runtime-policy.md`
 
 本文件只保留当前后端的运行入口、API 概览和与实现对齐的简要说明；不再单独定义 fallback、stub 或 legacy export 语义。
 
@@ -108,8 +108,8 @@ $env:PYTHONPATH='.'
 
 详细说明见：
 
-- `../docs/backend-audio-pipeline.md`
-- `../docs/production-runtime-policy.md`
+- `../architecture/backend-audio-pipeline.md`
+- `../architecture/production-runtime-policy.md`
 
 ## 测试
 

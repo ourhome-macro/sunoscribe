@@ -40,7 +40,7 @@ RMVPE_MODEL_PATH=
 说明：
 
 - `PITCH_BACKEND=rmvpe` 是默认音高检测模型。
-- `PITCH_PROFILE` 控制当前运行语义，production / diagnostic / benchmark 的正式规则见 `../../docs/production-runtime-policy.md`。
+- `PITCH_PROFILE` 控制当前运行语义，production / diagnostic / benchmark 的正式规则见 `../architecture/production-runtime-policy.md`。
 - `PITCH_ALLOW_BACKEND_FALLBACKS` 控制是否允许备用 backend。
 - `PITCH_BACKEND_FALLBACKS` 是逗号分隔列表，只有在明确允许 fallback 的 profile 下才生效。
 - `PITCH_CACHE_DIR` 是 SunoScribe 的 pitch 缓存目录。

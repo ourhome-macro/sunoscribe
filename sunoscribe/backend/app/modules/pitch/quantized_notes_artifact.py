@@ -13,6 +13,7 @@ from .reason_codes import (
     FRAGMENTATION_RISK,
     HIGH_QUANTIZE_ERROR,
     OVERMERGE_RISK,
+    QUANTIZED_DURATION_TOO_SHORT,
     QUANTIZER_BACKEND_UNSUPPORTED,
     RHYTHM_GRID_UNAVAILABLE,
     TOO_SHORT,
@@ -29,6 +30,7 @@ class QuantizerArtifactConfig:
     allowed_durations_beats: list[float] = field(default_factory=lambda: [0.25, 0.5, 1.0, 2.0, 4.0])
     high_error_sec: float = 0.12
     min_duration_beats: float = 0.25
+    min_quantized_duration_ratio: float = 0.8
     dp_search_radius_steps: int = 2
     dp_onset_error_weight: float = 1.0
     dp_duration_error_weight: float = 0.45
@@ -231,6 +233,7 @@ class QuantizedNotesArtifactBuilder:
             grid_beats = 4.0 / max(1, self.config.grid_division)
             start_beat = round(start_beat_raw / grid_beats) * grid_beats
             duration_beats = min(self.config.allowed_durations_beats, key=lambda value: abs(value - duration_beat_raw))
+            duration_beats = self._protect_duration_beats(duration_beats, duration_beat_raw, grid_beats=grid_beats)
             quantized_start_time = beat_grid.beat_to_time(start_beat)
             quantized_end_time = beat_grid.beat_to_time(start_beat + duration_beats)
             quantize_error_sec = abs(quantized_start_time - start_time)
@@ -334,6 +337,7 @@ class QuantizedNotesArtifactBuilder:
             if start_beat < 0.0:
                 continue
             for duration_beats in durations:
+                duration_beats = self._protect_duration_beats(duration_beats, raw_note.duration_beats_raw, grid_beats=grid_beats)
                 duration_step = int(round(duration_beats / grid_beats))
                 key = (step_index, duration_step)
                 if key in seen:
@@ -364,6 +368,17 @@ class QuantizedNotesArtifactBuilder:
                     )
                 )
         return sorted(candidates, key=lambda item: (item.local_cost, item.start_beat, item.duration_beats))[:24]
+
+    def _protect_duration_beats(self, duration_beats: float, raw_duration_beats: float, *, grid_beats: float) -> float:
+        ratio = max(0.0, min(1.0, float(self.config.min_quantized_duration_ratio)))
+        if ratio <= 0.0 or raw_duration_beats <= 0.0:
+            return duration_beats
+        min_allowed = raw_duration_beats * ratio
+        if duration_beats >= min_allowed:
+            return duration_beats
+        grid = max(1e-6, float(grid_beats))
+        protected = math.ceil(min_allowed / grid) * grid
+        return round(max(duration_beats, protected), 9)
 
     def _select_dp_path(self, candidates_by_note: list[list[_QuantizeCandidate]]) -> list[_QuantizeCandidate]:
         if not candidates_by_note:
@@ -421,6 +436,10 @@ class QuantizedNotesArtifactBuilder:
             reason_codes.append(HIGH_QUANTIZE_ERROR)
         if candidate.duration_beats < self.config.min_duration_beats:
             reason_codes.append(TOO_SHORT)
+        if raw_note.duration_beats_raw > 0.0:
+            min_duration = raw_note.duration_beats_raw * max(0.0, min(1.0, float(self.config.min_quantized_duration_ratio)))
+            if candidate.duration_beats + 1e-9 < min_duration:
+                reason_codes.append(QUANTIZED_DURATION_TOO_SHORT)
         uncertain = bool(reason_codes)
         if uncertain:
             reason_codes.append(UNCERTAIN)

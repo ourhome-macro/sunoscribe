@@ -39,6 +39,12 @@ class ScoreNote:
     source: str
     source_candidate_id: Optional[str] = None
     quantized_note_id: Optional[str] = None
+    timing_origin: Optional[str] = None
+    performance_start_time_sec: Optional[float] = None
+    performance_end_time_sec: Optional[float] = None
+    quantized_start_time_sec: Optional[float] = None
+    quantized_end_time_sec: Optional[float] = None
+    quantized_duration_sec: Optional[float] = None
     uncertain: bool = False
     reason_codes: List[str] = field(default_factory=list)
 

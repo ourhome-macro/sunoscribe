@@ -147,7 +147,7 @@ class TestRuleBasedMelodySelector(unittest.TestCase):
 
     def test_phrase_postprocess_removes_weak_isolated_fragment(self) -> None:
         result = RuleBasedMelodySelector(
-            MelodySelectionConfig(phrase_remove_isolated_fragments_enabled=True)
+            MelodySelectionConfig(postprocess_profile="cleanup_aggressive", phrase_remove_isolated_fragments_enabled=True)
         ).select(
             note_candidates={
                 "melody_candidates": {
@@ -165,11 +165,12 @@ class TestRuleBasedMelodySelector(unittest.TestCase):
         action = [action for action in result["postprocess"]["actions"] if action["action"] == "isolated_fragment_remove"][0]
         self.assertEqual(action["reason_code"], ISOLATED_FRAGMENT_REMOVED)
         self.assertEqual(action["note_ids"], ["bad"])
+        self.assertEqual(action["details"]["profile"], "cleanup_aggressive")
         self.assertEqual(action["details"]["mode"], "delete_weak_short_local_outlier")
 
     def test_phrase_postprocess_keeps_confident_isolated_note(self) -> None:
         result = RuleBasedMelodySelector(
-            MelodySelectionConfig(phrase_remove_isolated_fragments_enabled=True)
+            MelodySelectionConfig(postprocess_profile="cleanup_aggressive", phrase_remove_isolated_fragments_enabled=True)
         ).select(
             note_candidates={
                 "melody_candidates": {
@@ -205,7 +206,7 @@ class TestRuleBasedMelodySelector(unittest.TestCase):
 
     def test_phrase_postprocess_absorbs_short_note_and_corrects_octave(self) -> None:
         result = RuleBasedMelodySelector(
-            MelodySelectionConfig(phrase_remove_isolated_fragments_enabled=True)
+            MelodySelectionConfig(postprocess_profile="cleanup_aggressive", phrase_remove_isolated_fragments_enabled=True)
         ).select(
             note_candidates={
                 "melody_candidates": {
@@ -225,6 +226,7 @@ class TestRuleBasedMelodySelector(unittest.TestCase):
             action for action in result["postprocess"]["actions"] if action["action"] == "isolated_fragment_remove"
         ][0]
         self.assertEqual(remove_action["reason_code"], ISOLATED_FRAGMENT_REMOVED)
+        self.assertEqual(remove_action["details"]["profile"], "cleanup_aggressive")
         self.assertEqual(remove_action["details"]["mode"], "delete_weak_short_local_outlier")
         self.assertGreater(remove_action["details"]["jump_from_prev_semitones"], 7)
 

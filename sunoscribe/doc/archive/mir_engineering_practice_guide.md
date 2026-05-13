@@ -6,8 +6,8 @@
 
 正式事实源仍以以下文档为准：
 
-- `../../docs/backend-audio-pipeline.md`
-- `../../docs/production-runtime-policy.md`
+- `../architecture/backend-audio-pipeline.md`
+- `../architecture/production-runtime-policy.md`
 
 如果本文与实现不一致，应优先修实现，或在正式事实源中修正文档，而不是在本文中增加临时口径。
 
