@@ -71,6 +71,7 @@ Desktop.ini
 # =========================
 # Frontend artifacts
 # =========================
+!frontend/.env.example
 node_modules/
 *.tsbuildinfo
 *.wav

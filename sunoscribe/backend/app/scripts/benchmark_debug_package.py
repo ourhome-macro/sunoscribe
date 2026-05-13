@@ -109,6 +109,8 @@ def _export_batch(
                     "rhythm_grid_candidates.md",
                     "note_funnel_debug.json",
                     "note_funnel_debug.md",
+                    "gap_attribution.json",
+                    "gap_attribution.md",
                     "debug_summary.md",
                     "timeline_debug.png",
                 ]
@@ -170,6 +172,15 @@ def _write_batch_summary(run_root: Path, summary: DebugPackageBatchSummary) -> t
     payload = summary.to_dict()
     json_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
     markdown_path.write_text(_batch_summary_markdown(payload), encoding="utf-8")
+    gap_payload = _gap_attribution_batch_payload(run_root, payload)
+    (run_root / "gap_attribution_summary.json").write_text(
+        json.dumps(gap_payload, ensure_ascii=False, indent=2, sort_keys=True),
+        encoding="utf-8",
+    )
+    (run_root / "gap_attribution_summary.md").write_text(
+        _gap_attribution_batch_markdown(gap_payload),
+        encoding="utf-8",
+    )
     return json_path, markdown_path
 
 
@@ -201,6 +212,150 @@ def _batch_summary_markdown(payload: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def _gap_attribution_batch_payload(run_root: Path, batch_payload: dict[str, Any]) -> dict[str, Any]:
+    rows: list[dict[str, Any]] = []
+    for row in batch_payload.get("per_sample", []):
+        if not isinstance(row, dict) or row.get("status") != "generated":
+            continue
+        sample_id = str(row.get("sample_id") or "")
+        if not sample_id:
+            continue
+        path = run_root / sample_id / "debug_package" / "gap_attribution.json"
+        if not path.exists():
+            rows.append({"sample_id": sample_id, "available": False, "unavailable_reason": "gap_attribution.json missing"})
+            continue
+        try:
+            gap = json.loads(path.read_text(encoding="utf-8"))
+        except Exception as exc:
+            rows.append({"sample_id": sample_id, "available": False, "unavailable_reason": str(exc)})
+            continue
+        rows.append(_gap_attribution_sample_summary(sample_id=sample_id, title=str(row.get("title") or sample_id), gap=gap))
+    return {
+        "version": "gap_attribution_batch_v1",
+        "diagnostic_only": True,
+        "reference_midi_used_for_benchmark_attribution_only": True,
+        "sample_count": len(rows),
+        "samples": rows,
+    }
+
+
+def _gap_attribution_sample_summary(*, sample_id: str, title: str, gap: dict[str, Any]) -> dict[str, Any]:
+    metrics = gap.get("benchmark_metrics") if isinstance(gap.get("benchmark_metrics"), dict) else {}
+    reference = gap.get("reference_alignment") if isinstance(gap.get("reference_alignment"), dict) else {}
+    retention = gap.get("retention") if isinstance(gap.get("retention"), dict) else {}
+    reason_counts = gap.get("reason_counts") if isinstance(gap.get("reason_counts"), dict) else {}
+    return {
+        "sample_id": sample_id,
+        "title": title,
+        "available": True,
+        "quality_status": metrics.get("quality_status"),
+        "note_recall": metrics.get("note_recall"),
+        "note_f1": metrics.get("note_f1"),
+        "matched_note_count": metrics.get("matched_note_count"),
+        "expected_note_count": reference.get("expected_note_count"),
+        "predicted_note_count": reference.get("predicted_note_count"),
+        "gap50_ratio": metrics.get("gap50_ratio"),
+        "midi_coverage_ratio": metrics.get("midi_coverage_ratio"),
+        "raw_to_selected_count_ratio": retention.get("raw_to_selected_count_ratio"),
+        "selected_to_quantized_count_ratio": retention.get("selected_to_quantized_count_ratio"),
+        "score_ir_to_predicted_count_ratio": retention.get("score_ir_to_predicted_count_ratio"),
+        "reason_counts": reason_counts,
+        "recommended_fix_focus": gap.get("recommended_fix_focus") if isinstance(gap.get("recommended_fix_focus"), list) else [],
+        "top_gaps": _compact_top_items(gap.get("top_gaps")),
+        "top_lost_expected_notes": _compact_top_items(gap.get("top_lost_expected_notes")),
+        "top_deleted_candidates": _compact_top_items(gap.get("top_deleted_candidates")),
+    }
+
+
+def _compact_top_items(items: Any, *, limit: int = 5) -> list[dict[str, Any]]:
+    if not isinstance(items, list):
+        return []
+    compact: list[dict[str, Any]] = []
+    for item in items[:limit]:
+        if not isinstance(item, dict):
+            continue
+        compact.append(
+            {
+                "start_sec": item.get("start_sec"),
+                "duration_sec": item.get("duration_sec"),
+                "pitch_name": item.get("pitch_name"),
+                "classification": item.get("classification"),
+                "reason_codes": item.get("reason_codes") or item.get("diagnostic_reason_codes"),
+            }
+        )
+    return compact
+
+
+def _gap_attribution_batch_markdown(payload: dict[str, Any]) -> str:
+    lines = [
+        "# Gap Attribution Summary",
+        "",
+        "- diagnostic_only: true",
+        "- reference_midi_used_for_benchmark_attribution_only: true",
+        f"- sample_count: {payload.get('sample_count', 0)}",
+        "",
+        "## Samples",
+        "| sample_id | status | recall | f1 | matched | expected | predicted | gap50 | raw_to_selected | selected_to_quantized | score_ir_to_midi |",
+        "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+    ]
+    for row in payload.get("samples", []):
+        if not isinstance(row, dict):
+            continue
+        lines.append(
+            "| {sample_id} | {status} | {recall} | {f1} | {matched} | {expected} | {predicted} | {gap50} | {raw_selected} | {selected_quantized} | {score_midi} |".format(
+                sample_id=_escape_md(str(row.get("sample_id") or "")),
+                status=_escape_md(str(row.get("quality_status") or row.get("unavailable_reason") or "missing")),
+                recall=_fmt(row.get("note_recall")),
+                f1=_fmt(row.get("note_f1")),
+                matched=_fmt(row.get("matched_note_count")),
+                expected=_fmt(row.get("expected_note_count")),
+                predicted=_fmt(row.get("predicted_note_count")),
+                gap50=_fmt(row.get("gap50_ratio")),
+                raw_selected=_fmt(row.get("raw_to_selected_count_ratio")),
+                selected_quantized=_fmt(row.get("selected_to_quantized_count_ratio")),
+                score_midi=_fmt(row.get("score_ir_to_predicted_count_ratio")),
+            )
+        )
+    for row in payload.get("samples", []):
+        if not isinstance(row, dict) or not row.get("available"):
+            continue
+        lines.extend(
+            [
+                "",
+                f"## {row.get('sample_id')}",
+                f"- reason_counts: {_fmt(row.get('reason_counts'))}",
+                f"- recommended_fix_focus: {_fmt(row.get('recommended_fix_focus'))}",
+                "### Top Gaps",
+                *(_compact_items_lines(row.get("top_gaps"))),
+                "### Top Lost Expected Notes",
+                *(_compact_items_lines(row.get("top_lost_expected_notes"))),
+                "### Top Deleted Candidates",
+                *(_compact_items_lines(row.get("top_deleted_candidates"))),
+            ]
+        )
+    lines.append("")
+    return "\n".join(lines)
+
+
+def _compact_items_lines(items: Any) -> list[str]:
+    if not isinstance(items, list) or not items:
+        return ["- none"]
+    lines: list[str] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        lines.append(
+            "- start={start} dur={dur} pitch={pitch} class={classification} reasons={reasons}".format(
+                start=_fmt(item.get("start_sec")),
+                dur=_fmt(item.get("duration_sec")),
+                pitch=_fmt(item.get("pitch_name")),
+                classification=_fmt(item.get("classification")),
+                reasons=_fmt(item.get("reason_codes")),
+            )
+        )
+    return lines or ["- none"]
+
+
 def _parse_sample_ids(value: str | None) -> list[str]:
     if not value:
         return []
@@ -213,6 +368,16 @@ def _sample_title(sample: BenchmarkSample) -> str:
 
 def _escape_md(value: str) -> str:
     return value.replace("|", "\\|").replace("\n", " ")
+
+
+def _fmt(value: Any) -> str:
+    if value is None:
+        return "missing"
+    if isinstance(value, float):
+        return f"{value:.6g}"
+    if isinstance(value, (dict, list)):
+        return json.dumps(value, ensure_ascii=False, sort_keys=True)
+    return str(value)
 
 
 if __name__ == "__main__":

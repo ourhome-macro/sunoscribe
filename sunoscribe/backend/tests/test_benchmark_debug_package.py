@@ -803,12 +803,23 @@ class BenchmarkDebugPackageTests(unittest.TestCase):
             self.assertEqual(payload["total_requested"], 2)
             self.assertEqual(payload["generated_count"], 2)
             self.assertEqual(payload["failed_count"], 0)
+            gap_summary_path = run_root / "gap_attribution_summary.json"
+            gap_markdown_path = run_root / "gap_attribution_summary.md"
+            self.assertTrue(gap_summary_path.exists())
+            self.assertTrue(gap_markdown_path.exists())
+            gap_payload = json.loads(gap_summary_path.read_text(encoding="utf-8"))
+            self.assertTrue(gap_payload["diagnostic_only"])
+            self.assertEqual(gap_payload["sample_count"], 2)
             by_id = {row["sample_id"]: row for row in payload["per_sample"]}
             for sample_id in ["song_a", "song_b"]:
                 self.assertTrue((run_root / sample_id / "debug_package" / "rhythm_grid_candidates.json").exists())
                 self.assertTrue((run_root / sample_id / "debug_package" / "note_funnel_debug.json").exists())
                 self.assertTrue((run_root / sample_id / "debug_package" / "note_funnel_debug.md").exists())
+                self.assertTrue((run_root / sample_id / "debug_package" / "gap_attribution.json").exists())
+                self.assertTrue((run_root / sample_id / "debug_package" / "gap_attribution.md").exists())
                 self.assertIn("note_funnel_debug.json", by_id[sample_id]["generated_files"])
+                self.assertIn("gap_attribution.json", by_id[sample_id]["generated_files"])
+                self.assertIn("gap_attribution.md", by_id[sample_id]["generated_files"])
 
             rhythm_summary = build_rhythm_candidate_summary(run_root)
             self.assertEqual(len(rhythm_summary["samples"]), 2)
@@ -832,6 +843,7 @@ class BenchmarkDebugPackageTests(unittest.TestCase):
             self.assertEqual(payload["total_requested"], 2)
             self.assertEqual(payload["generated_count"], 2)
             self.assertEqual(payload["failed_count"], 0)
+            self.assertTrue((run_root / "gap_attribution_summary.json").exists())
             by_id = {row["sample_id"]: row for row in payload["per_sample"]}
             self.assertIn("rhythm_grid_candidates.json", by_id["song_a"]["generated_files"])
             self.assertIn("predicted_notes.json", by_id["song_b"]["missing_files"])

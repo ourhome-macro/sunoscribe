@@ -1,21 +1,80 @@
+import { useState } from 'react'
+import { toast } from 'sonner'
+
 import { GlossaryTerm } from '@/components/layout/glossary-term'
 import { PageHeader } from '@/components/layout/page-header'
+import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
+import { Input } from '@/components/ui/input'
+import { Label } from '@/components/ui/label'
+import { accessTokenStorageKey } from '@/lib/api/client'
 
 export function SettingsPage() {
+  const [token, setToken] = useState(() => window.localStorage.getItem(accessTokenStorageKey) ?? '')
+
+  const apiMode = import.meta.env.VITE_API_MODE ?? 'backend'
+  const apiBaseUrl = import.meta.env.VITE_API_BASE_URL || '/api via Vite proxy'
+
   return (
-    <div>
-      <PageHeader title="设置" description="这里记录工作台必须遵守的扒谱边界。" />
+    <div className="space-y-6">
+      <PageHeader title="??" description="???????? API ????????????????????" />
+
       <Card>
         <CardHeader>
-          <CardTitle>工作台规则</CardTitle>
-          <CardDescription>SunoScribe 前端只展示和修改乐谱版本，不绕过后端流水线。</CardDescription>
+          <CardTitle>?? API ??</CardTitle>
+          <CardDescription>
+            ?????<span className="font-mono">{apiMode}</span>?API ???<span className="font-mono">{apiBaseUrl}</span>?
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-3">
+          <div className="space-y-2">
+            <Label htmlFor="api-token">Bearer token</Label>
+            <Input
+              id="api-token"
+              type="password"
+              value={token}
+              placeholder="?????? access_token???? VITE_API_ACCESS_TOKEN"
+              onChange={(event) => setToken(event.target.value)}
+            />
+          </div>
+          <div className="flex gap-2">
+            <Button
+              onClick={() => {
+                window.localStorage.setItem(accessTokenStorageKey, token.trim())
+                toast.success('API token ?????????')
+              }}
+            >
+              ?? token
+            </Button>
+            <Button
+              variant="outline"
+              onClick={() => {
+                window.localStorage.removeItem(accessTokenStorageKey)
+                setToken('')
+                toast.success('API token ???')
+              }}
+            >
+              ??
+            </Button>
+          </div>
+          <p className="text-xs text-muted-foreground">
+            ????????????????????? `.env.local` ?? `VITE_API_MODE=mock`?
+          </p>
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle>?????</CardTitle>
+          <CardDescription>SunoScribe ??????????????????????</CardDescription>
         </CardHeader>
         <CardContent className="space-y-2 text-sm text-muted-foreground">
-          <p>不展示后端内部存储路径。</p>
-          <p>不请求完整的人声音高轨迹，只读取摘要和诊断结果。</p>
-          <p><GlossaryTerm term="MIDI" />、<GlossaryTerm term="MusicXML" /> 和前端显示数据都是从当前 <GlossaryTerm term="ScoreRevision" /> 导出的文件。</p>
-          <p>任何音符修正都必须由后端校验，并生成新的乐谱版本。</p>
+          <p>????????????</p>
+          <p>????????????????????????</p>
+          <p>
+            <GlossaryTerm term="MIDI" />?<GlossaryTerm term="MusicXML" /> ??????????? <GlossaryTerm term="ScoreRevision" /> ???
+          </p>
+          <p>?????????????????????????</p>
         </CardContent>
       </Card>
     </div>

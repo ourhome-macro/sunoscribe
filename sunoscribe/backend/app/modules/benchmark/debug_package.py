@@ -9,6 +9,7 @@ import shutil
 from typing import Any
 
 from .dataset import BenchmarkSample, load_manifest
+from .gap_attribution import build_gap_attribution, build_gap_attribution_markdown
 from .reason_codes import (
     DTW_SEQUENCE_ALIGNMENT_SUSPECT,
     OCTAVE_NORMALIZED_MATCHING_IMPROVES,
@@ -50,6 +51,8 @@ DEBUG_PACKAGE_FILES = [
     "rhythm_grid_candidates.md",
     "note_funnel_debug.json",
     "note_funnel_debug.md",
+    "gap_attribution.json",
+    "gap_attribution.md",
     "selected_melody.json",
     "quantized_notes.json",
     "score_ir.json",
@@ -156,6 +159,7 @@ def export_benchmark_debug_package(
     alignment_debug: dict[str, Any] | None = None
     derived_diagnostics: dict[str, Any] | None = None
     note_funnel_debug: dict[str, Any] | None = None
+    gap_attribution: dict[str, Any] | None = None
 
     workspace_path = _resolve_workspace_path(
         artifacts_payload=artifacts_payload,
@@ -310,6 +314,33 @@ def export_benchmark_debug_package(
         encoding="utf-8",
     )
     generated_files.add("note_funnel_debug.md")
+
+    gap_metrics_payload = dict(metrics_payload) if isinstance(metrics_payload, dict) else {}
+    gap_metrics_payload["quality_gate"] = quality_payload
+    gap_attribution = build_gap_attribution(
+        expected_notes=expected_notes,
+        predicted_notes=predicted_notes,
+        f0_track_path=debug_dir / "f0_track.json" if (debug_dir / "f0_track.json").exists() else None,
+        vocal_activity_path=debug_dir / "vocal_activity.json" if (debug_dir / "vocal_activity.json").exists() else None,
+        pitch_contours_path=debug_dir / "pitch_contours.json" if (debug_dir / "pitch_contours.json").exists() else None,
+        note_candidates_path=debug_dir / "note_candidates.json" if (debug_dir / "note_candidates.json").exists() else None,
+        selected_melody_path=debug_dir / "selected_melody.json" if (debug_dir / "selected_melody.json").exists() else None,
+        quantized_notes_path=debug_dir / "quantized_notes.json" if (debug_dir / "quantized_notes.json").exists() else None,
+        score_ir_path=debug_dir / "score_ir.json" if (debug_dir / "score_ir.json").exists() else None,
+        metrics_payload=gap_metrics_payload,
+        config=metric_config,
+    )
+    _write_json(debug_dir / "gap_attribution.json", gap_attribution)
+    generated_files.add("gap_attribution.json")
+    (debug_dir / "gap_attribution.md").write_text(
+        build_gap_attribution_markdown(
+            sample_id=sample_id,
+            sample_title=str(sample_metadata.get("title") or sample_id),
+            gap_attribution=gap_attribution,
+        ),
+        encoding="utf-8",
+    )
+    generated_files.add("gap_attribution.md")
 
     if expected_notes and predicted_notes:
         if not metrics_payload.get("metrics"):
