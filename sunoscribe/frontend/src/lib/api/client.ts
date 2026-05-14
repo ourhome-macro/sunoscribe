@@ -1,9 +1,10 @@
 import type { AgentDiagnoseResponse, ApplyAgentScorePatchRequest, ApplyAgentScorePatchResponse } from '@/types/agents'
-import type { PublicArtifactResponse } from '@/types/artifact'
+import type { PublicArtifactResponse, ScoreExportDownload, ScoreExportFormat } from '@/types/artifact'
 import type { AudioAnalysisReportResponse } from '@/types/audio-analysis'
 import type { DiagnosticsResponse } from '@/types/diagnostics'
 import type { ProjectDetail, ProjectStatus, ProjectSummary, StageProgressItem } from '@/types/project'
 import type { ScoreRevisionSummary } from '@/types/revision'
+import type { TaskStatusResponse } from '@/types/task'
 
 import { mockArtifacts, mockAudioAnalysisReport, mockDashboard, mockDiagnosis, mockDiagnostics, mockProjectDetail, mockProjects, mockRevision } from './mock-data'
 
@@ -11,6 +12,7 @@ const apiBaseUrl = (import.meta.env.VITE_API_BASE_URL as string | undefined)?.re
 const apiMode = (import.meta.env.VITE_API_MODE ?? 'backend').toLowerCase()
 const useMockFallback = apiMode !== 'backend'
 const accessTokenStorageKey = 'sunoscribe-access-token'
+const trackedTasksStorageKey = 'sunoscribe-tracked-project-tasks'
 
 type BackendEnvelope<T> =
   | { success: true; data: T; message?: string; pagination?: BackendPagination }
@@ -52,6 +54,11 @@ type BackendTask = {
   finished_at: string | null
 }
 
+type TrackedProjectTask = {
+  task_id: string
+  project_id: string
+}
+
 type BackendScore = {
   id: string
   project_id: string
@@ -87,6 +94,25 @@ type CreateProjectResult = {
   name: string
   media_kind: 'audio' | 'video'
   upload?: BackendUpload
+}
+
+type ApiClient = {
+  getDashboard: () => Promise<DashboardResponse>
+  listProjects: () => Promise<ProjectSummary[]>
+  getProject: (projectId: string) => Promise<ProjectDetail>
+  createProject: (input: CreateProjectInput) => Promise<CreateProjectResult>
+  listProjectRevisions: (projectId: string) => Promise<ScoreRevisionSummary[]>
+  getRevision: (revisionId: string) => Promise<ScoreRevisionSummary>
+  listArtifacts: (projectId: string) => Promise<PublicArtifactResponse[]>
+  diagnoseRevision: (revisionId: string) => Promise<AgentDiagnoseResponse>
+  getAudioAnalysisReport: (revisionId: string) => Promise<AudioAnalysisReportResponse | null>
+  generateAudioAnalysisReport: (revisionId: string) => Promise<AudioAnalysisReportResponse>
+  getDiagnostics: (projectId: string) => Promise<DiagnosticsResponse>
+  getTask: (taskId: string) => Promise<TaskStatusResponse>
+  retryTask: (taskId: string) => Promise<TaskStatusResponse>
+  getTrackedProjectTask: (projectId: string) => Promise<TaskStatusResponse | null>
+  downloadScoreExport: (scoreId: string, revisionId: string, format: ScoreExportFormat) => Promise<ScoreExportDownload>
+  applyScorePatch: (revisionId: string, requestBody: ApplyAgentScorePatchRequest) => Promise<ApplyAgentScorePatchResponse>
 }
 
 type DashboardResponse = typeof mockDashboard
@@ -168,6 +194,94 @@ async function requestPage<T>(path: string): Promise<{ data: T[]; pagination?: B
   return { data: payload.data, pagination: payload.pagination }
 }
 
+async function requestBlob(path: string): Promise<{ blob: Blob; filename: string; mime_type: string }> {
+  const response = await fetch(`${apiBaseUrl}${path}`, {
+    headers: authHeaders(),
+  })
+
+  if (!response.ok) {
+    const contentType = response.headers.get('content-type') ?? ''
+    if (contentType.includes('application/json')) {
+      const payload = (await response.json()) as BackendEnvelope<unknown>
+      const error = 'error' in payload ? payload.error : undefined
+      throw new ApiError(error?.message ?? `API request failed: ${response.status}`, {
+        status: response.status,
+        code: error?.code,
+        details: error?.details,
+      })
+    }
+    throw new ApiError(`API request failed: ${response.status}`, { status: response.status })
+  }
+
+  const blob = await response.blob()
+  return {
+    blob,
+    filename: filenameFromDisposition(response.headers.get('content-disposition')),
+    mime_type: response.headers.get('content-type') ?? blob.type,
+  }
+}
+
+function filenameFromDisposition(disposition: string | null): string {
+  if (!disposition) return 'score-export'
+  const utf8Match = disposition.match(/filename\*=UTF-8''([^;]+)/i)
+  if (utf8Match?.[1]) return decodeURIComponent(utf8Match[1].replace(/"/g, ''))
+  const asciiMatch = disposition.match(/filename="?([^";]+)"?/i)
+  return asciiMatch?.[1] ?? 'score-export'
+}
+
+function mapTask(task: BackendTask): TaskStatusResponse {
+  return {
+    task_id: String(task.task_id),
+    project_id: String(task.project_id),
+    task_type: String(task.task_type),
+    status: String(task.status),
+    progress: Number(task.progress),
+    retry_count: Number(task.retry_count),
+    max_retries: Number(task.max_retries),
+    can_retry: Boolean(task.can_retry),
+    error_message: task.error_message ?? null,
+    result_payload: task.result_payload ?? {},
+    queued_at: task.queued_at,
+    started_at: task.started_at,
+    finished_at: task.finished_at,
+  }
+}
+
+function isTaskActive(task: TaskStatusResponse | BackendTask | null | undefined): boolean {
+  return task?.status === 'queued' || task?.status === 'running' || task?.status === 'retrying'
+}
+
+function readTrackedTasks(): Record<string, TrackedProjectTask> {
+  try {
+    const raw = window.localStorage.getItem(trackedTasksStorageKey)
+    return raw ? (JSON.parse(raw) as Record<string, TrackedProjectTask>) : {}
+  } catch {
+    return {}
+  }
+}
+
+function writeTrackedTasks(tasks: Record<string, TrackedProjectTask>) {
+  window.localStorage.setItem(trackedTasksStorageKey, JSON.stringify(tasks))
+}
+
+function trackProjectTask(projectId: string, taskId: string | null | undefined) {
+  if (!taskId) return
+  const tasks = readTrackedTasks()
+  tasks[projectId] = { project_id: projectId, task_id: taskId }
+  writeTrackedTasks(tasks)
+}
+
+function untrackProjectTask(projectId: string) {
+  const tasks = readTrackedTasks()
+  if (!tasks[projectId]) return
+  delete tasks[projectId]
+  writeTrackedTasks(tasks)
+}
+
+function getTrackedTaskId(projectId: string): string | null {
+  return readTrackedTasks()[projectId]?.task_id ?? null
+}
+
 function mapProjectStatus(status: string): ProjectStatus {
   if (status === 'completed') return 'ready'
   if (status === 'pending') return 'queued'
@@ -193,25 +307,28 @@ function buildStageProgress(project: BackendProject, task?: BackendTask | null, 
   const hasSource = Boolean(project.audio_path)
   const hasRevision = revisions.length > 0
   const taskFailed = task?.status === 'failed'
-  const taskRunning = task?.status === 'running' || task?.status === 'queued' || task?.status === 'retrying' || status === 'processing'
+  const taskSucceeded = task?.status === 'succeeded'
+  const taskRunning = isTaskActive(task) || status === 'processing'
+  const progressSummary = task ? `Backend task ${task.status} · ${task.progress}%` : undefined
+  const stageComplete = hasRevision || taskSucceeded
 
   return [
     {
       stage: 'Media Ingest',
       status: hasSource ? 'success' : taskRunning ? 'running' : status === 'failed' ? 'failed' : 'pending',
-      summary: hasSource ? 'Source media has been registered by the backend.' : undefined,
+      summary: hasSource ? 'Source media has been registered by the backend.' : progressSummary,
     },
     {
       stage: 'StemService',
-      status: hasRevision ? 'success' : taskFailed ? 'failed' : taskRunning ? 'running' : 'pending',
+      status: stageComplete ? 'success' : taskFailed ? 'failed' : taskRunning ? 'running' : 'pending',
       summary: taskFailed ? task?.error_message ?? undefined : undefined,
     },
-    { stage: 'F0Track', status: hasRevision ? 'success' : taskFailed ? 'failed' : taskRunning ? 'running' : 'pending' },
-    { stage: 'PitchContourIR', status: hasRevision ? 'success' : taskFailed ? 'failed' : taskRunning ? 'running' : 'pending' },
-    { stage: 'MelodySelector', status: hasRevision ? 'success' : taskFailed ? 'failed' : taskRunning ? 'running' : 'pending' },
-    { stage: 'DP Quantizer', status: hasRevision ? 'success' : taskFailed ? 'failed' : taskRunning ? 'running' : 'pending' },
-    { stage: 'ScoreIR', status: hasRevision ? 'success' : taskFailed ? 'failed' : taskRunning ? 'running' : 'pending' },
-    { stage: 'Exports', status: hasRevision ? 'success' : taskFailed ? 'failed' : taskRunning ? 'running' : 'pending' },
+    { stage: 'F0Track', status: stageComplete ? 'success' : taskFailed ? 'failed' : taskRunning ? 'running' : 'pending' },
+    { stage: 'PitchContourIR', status: stageComplete ? 'success' : taskFailed ? 'failed' : taskRunning ? 'running' : 'pending' },
+    { stage: 'MelodySelector', status: stageComplete ? 'success' : taskFailed ? 'failed' : taskRunning ? 'running' : 'pending' },
+    { stage: 'DP Quantizer', status: stageComplete ? 'success' : taskFailed ? 'failed' : taskRunning ? 'running' : 'pending' },
+    { stage: 'ScoreIR', status: stageComplete ? 'success' : taskFailed ? 'failed' : taskRunning ? 'running' : 'pending' },
+    { stage: 'Exports', status: stageComplete ? 'success' : taskFailed ? 'failed' : taskRunning ? 'running' : 'pending' },
   ]
 }
 
@@ -352,6 +469,13 @@ function buildDiagnostics(projectId: string, task: BackendTask | null, revisions
   }
 }
 
+function projectAnalysisStatus(project: BackendProject, task: BackendTask | null, revisions: ScoreRevisionSummary[]): ProjectDetail['analysis_status'] {
+  if (task?.status === 'failed' || project.status === 'failed') return 'failed'
+  if (revisions.length > 0 || task?.status === 'succeeded' || project.status === 'completed') return 'complete'
+  if (isTaskActive(task) || project.status === 'processing') return 'running'
+  return 'not_started'
+}
+
 async function getProjectScore(projectId: string): Promise<BackendScore | null> {
   try {
     return await request<BackendScore>(`/api/projects/${projectId}/score`)
@@ -362,8 +486,17 @@ async function getProjectScore(projectId: string): Promise<BackendScore | null> 
 }
 
 async function getLatestProjectTask(projectId: string): Promise<BackendTask | null> {
-  void projectId
-  return null
+  const taskId = getTrackedTaskId(projectId)
+  if (!taskId) return null
+  try {
+    return await request<BackendTask>(`/api/tasks/${taskId}`)
+  } catch (error) {
+    if (error instanceof ApiError && error.status === 404) {
+      untrackProjectTask(projectId)
+      return null
+    }
+    throw error
+  }
 }
 
 async function createBackendProject(input: CreateProjectInput): Promise<CreateProjectResult> {
@@ -390,6 +523,7 @@ async function createBackendProject(input: CreateProjectInput): Promise<CreatePr
       body: JSON.stringify({ score_type: 'staff', key: 'C Major' }),
     })
     taskId = task.task_id
+    trackProjectTask(project.id, taskId)
   }
 
   return {
@@ -422,6 +556,58 @@ function mockClient() {
     getAudioAnalysisReport: async () => clone(mockAudioAnalysisReport),
     generateAudioAnalysisReport: async () => clone(mockAudioAnalysisReport),
     getDiagnostics: async () => clone(mockDiagnostics),
+    getTask: async (taskId: string) => ({
+      task_id: taskId,
+      project_id: 'mock-created-project',
+      task_type: 'score_generation',
+      status: 'running',
+      progress: 35,
+      retry_count: 0,
+      max_retries: 2,
+      can_retry: false,
+      error_message: null,
+      result_payload: {},
+      queued_at: new Date().toISOString(),
+      started_at: new Date().toISOString(),
+      finished_at: null,
+    }),
+    retryTask: async (taskId: string) => ({
+      task_id: taskId,
+      project_id: 'mock-created-project',
+      task_type: 'score_generation',
+      status: 'queued',
+      progress: 0,
+      retry_count: 1,
+      max_retries: 2,
+      can_retry: false,
+      error_message: null,
+      result_payload: {},
+      queued_at: new Date().toISOString(),
+      started_at: null,
+      finished_at: null,
+    }),
+    getTrackedProjectTask: async () => null,
+    downloadScoreExport: async (_scoreId: string, _revisionId: string, format: ScoreExportFormat) => {
+      const content = format === 'musicxml'
+        ? `<?xml version="1.0" encoding="UTF-8"?>
+<score-partwise version="3.1">
+  <part-list><score-part id="P1"><part-name>Lead Vocal</part-name></score-part></part-list>
+  <part id="P1">
+    <measure number="1">
+      <attributes><divisions>1</divisions><key><fifths>0</fifths></key><time><beats>4</beats><beat-type>4</beat-type></time><clef><sign>G</sign><line>2</line></clef></attributes>
+      <note><pitch><step>C</step><octave>4</octave></pitch><duration>4</duration><type>whole</type></note>
+    </measure>
+  </part>
+</score-partwise>`
+        : format === 'view' ? '{}' : ''
+      const mimeType = format === 'musicxml' ? 'application/vnd.recordare.musicxml+xml' : format === 'view' ? 'application/json' : 'audio/midi'
+      return {
+        blob: new Blob([content], { type: mimeType }),
+        filename: `mock-score.${format === 'midi' ? 'mid' : format}`,
+        mime_type: mimeType,
+        format,
+      }
+    },
     applyScorePatch: async (_revisionId: string, request: ApplyAgentScorePatchRequest): Promise<ApplyAgentScorePatchResponse> => {
       const operationNames = request.operations.map((operation) => operation.op)
       const changedIds = request.operations
@@ -489,7 +675,13 @@ const backendClient = {
       ...mapProjectSummary(project, revisions),
       description: project.source_url ?? undefined,
       current_task_id: task?.task_id,
-      analysis_status: project.status === 'failed' ? 'failed' : revisions.length > 0 ? 'complete' : project.status === 'processing' || task ? 'running' : 'not_started',
+      current_task_status: task?.status,
+      task_progress: task?.progress ?? project.progress,
+      task_error_message: task?.error_message ?? null,
+      task_can_retry: task?.can_retry ?? false,
+      task_retry_count: task?.retry_count,
+      task_max_retries: task?.max_retries,
+      analysis_status: projectAnalysisStatus(project, task, revisions),
       stage_progress: buildStageProgress(project, task, revisions),
     }
   },
@@ -534,9 +726,31 @@ const backendClient = {
   },
 
   async getDiagnostics(projectId: string): Promise<DiagnosticsResponse> {
+    const task = await getLatestProjectTask(projectId)
     const score = await getProjectScore(projectId)
     const revisions = score ? mapScoreRevisions(score) : []
-    return buildDiagnostics(projectId, null, revisions)
+    return buildDiagnostics(projectId, task, revisions)
+  },
+
+  async getTask(taskId: string): Promise<TaskStatusResponse> {
+    const task = await request<BackendTask>(`/api/tasks/${taskId}`)
+    return mapTask(task)
+  },
+
+  async retryTask(taskId: string): Promise<TaskStatusResponse> {
+    const task = await request<BackendTask>(`/api/tasks/${taskId}/retry`, { method: 'POST' })
+    trackProjectTask(task.project_id, task.task_id)
+    return mapTask(task)
+  },
+
+  async getTrackedProjectTask(projectId: string): Promise<TaskStatusResponse | null> {
+    const task = await getLatestProjectTask(projectId)
+    return task ? mapTask(task) : null
+  },
+
+  async downloadScoreExport(scoreId: string, revisionId: string, format: ScoreExportFormat): Promise<ScoreExportDownload> {
+    const payload = await requestBlob(`/api/scores/${scoreId}/export?format=${encodeURIComponent(format)}&revision_id=${encodeURIComponent(revisionId)}`)
+    return { ...payload, format }
   },
 
   async applyScorePatch(revisionId: string, requestBody: ApplyAgentScorePatchRequest): Promise<ApplyAgentScorePatchResponse> {
@@ -546,7 +760,7 @@ const backendClient = {
     })
     return mapRevision(response)
   },
-}
+} satisfies ApiClient
 
-export const apiClient = isApiConfigured() ? backendClient : mockClient()
+export const apiClient: ApiClient = isApiConfigured() ? backendClient : mockClient()
 export { ApiError, accessTokenStorageKey }

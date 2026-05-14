@@ -8,6 +8,7 @@ export interface ProjectSummary {
   created_at: string
   latest_revision: string | null
   export_status: ExportStatus
+  current_task_id?: string
 }
 
 export interface StageProgressItem {
@@ -19,6 +20,12 @@ export interface StageProgressItem {
 export interface ProjectDetail extends ProjectSummary {
   description?: string
   current_task_id?: string
+  current_task_status?: string
+  task_progress?: number
+  task_error_message?: string | null
+  task_can_retry?: boolean
+  task_retry_count?: number
+  task_max_retries?: number
   analysis_status: 'not_started' | 'running' | 'complete' | 'failed'
   stage_progress: StageProgressItem[]
 }

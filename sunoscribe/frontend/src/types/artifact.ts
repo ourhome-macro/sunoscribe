@@ -21,3 +21,12 @@ export interface ArtifactSummaryGroup {
   label: string
   artifacts: PublicArtifactResponse[]
 }
+
+export type ScoreExportFormat = 'midi' | 'musicxml' | 'view' | 'pdf'
+
+export interface ScoreExportDownload {
+  blob: Blob
+  filename: string
+  mime_type: string
+  format: ScoreExportFormat
+}

@@ -1,11 +1,13 @@
-import { useQuery } from '@tanstack/react-query'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { Link, useParams } from 'react-router-dom'
+import { toast } from 'sonner'
 
 import { AudioAnalysisPanel } from '@/components/audio-analysis/audio-analysis-panel'
 import { ArtifactSummary } from '@/components/artifacts/artifact-summary'
 import { StageProgress } from '@/components/diagnostics/stage-progress'
 import { PageHeader } from '@/components/layout/page-header'
 import { StatusBadge } from '@/components/layout/status-badge'
+import { TaskStatusCard } from '@/components/tasks/task-status-card'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { RevisionList } from '@/features/revisions/revision-list'
@@ -13,13 +15,36 @@ import { apiClient } from '@/lib/api/client'
 import { formatDateTime } from '@/lib/utils'
 
 export function ProjectDetailPage() {
+  const queryClient = useQueryClient()
   const { projectId = '' } = useParams()
-  const projectQuery = useQuery({ queryKey: ['project', projectId], queryFn: () => apiClient.getProject(projectId) })
+  const projectQuery = useQuery({
+    queryKey: ['project', projectId],
+    queryFn: () => apiClient.getProject(projectId),
+    refetchInterval: (query) => (query.state.data?.analysis_status === 'running' ? 3000 : false),
+  })
+  const trackedTaskQuery = useQuery({
+    queryKey: ['project-task', projectId],
+    queryFn: () => apiClient.getTrackedProjectTask(projectId),
+    refetchInterval: (query) => {
+      const status = query.state.data?.status
+      return status === 'queued' || status === 'running' || status === 'retrying' ? 2000 : false
+    },
+  })
   const revisionsQuery = useQuery({ queryKey: ['project-revisions', projectId], queryFn: () => apiClient.listProjectRevisions(projectId) })
   const artifactsQuery = useQuery({ queryKey: ['project-artifacts', projectId], queryFn: () => apiClient.listArtifacts(projectId) })
 
   const project = projectQuery.data
   const latestRevision = revisionsQuery.data?.[0]
+  const task = trackedTaskQuery.data
+
+  const retryMutation = useMutation({
+    mutationFn: () => apiClient.retryTask(trackedTaskQuery.data?.task_id ?? project?.current_task_id ?? ''),
+    onSuccess: (task) => {
+      queryClient.setQueryData(['project-task', projectId], task)
+      void queryClient.invalidateQueries({ queryKey: ['project', projectId] })
+      toast.success('任务已重新入队', { description: `task_id: ${task.task_id}` })
+    },
+  })
 
   return (
     <div>
@@ -61,6 +86,12 @@ export function ProjectDetailPage() {
       </div>
 
       <div className="mt-6 space-y-6">
+        <TaskStatusCard
+          task={task}
+          isLoading={trackedTaskQuery.isFetching || projectQuery.isFetching}
+          isRetrying={retryMutation.isPending}
+          onRetry={() => retryMutation.mutate()}
+        />
         <RevisionList revisions={revisionsQuery.data ?? []} />
         <AudioAnalysisPanel revisionId={latestRevision?.id} />
         <ArtifactSummary artifacts={artifactsQuery.data ?? []} />

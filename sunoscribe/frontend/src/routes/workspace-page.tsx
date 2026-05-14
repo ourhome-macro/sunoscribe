@@ -1,21 +1,23 @@
 import { useMemo, useState } from 'react'
-import { useQuery } from '@tanstack/react-query'
+import { useMutation, useQuery } from '@tanstack/react-query'
 import { Download, FileJson, FileMusic } from 'lucide-react'
 import { useSearchParams } from 'react-router-dom'
+import { toast } from 'sonner'
 
 import { GlossaryTerm } from '@/components/layout/glossary-term'
 import { NoteDetailSheet } from '@/components/notes/note-detail-sheet'
 import { UncertainNotesPanel } from '@/components/notes/uncertain-notes-panel'
 import { DiffSummary } from '@/components/score/diff-summary'
-import { OsmdPlaceholder } from '@/components/score/osmd-placeholder'
+import { OsmdScoreViewer } from '@/components/score/osmd-score-viewer'
 import { WaveformPlaceholder } from '@/components/score/waveform-placeholder'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Select } from '@/components/ui/select'
 import { apiClient } from '@/lib/api/client'
 import { formatStatus } from '@/lib/copy'
+import type { ScoreExportFormat } from '@/types/artifact'
 import type { UncertainNoteDiagnosis } from '@/types/agents'
-import type { RevisionDiffSummary } from '@/types/revision'
+import type { RevisionDiffSummary, ScoreRevisionSummary } from '@/types/revision'
 
 export function WorkspacePage() {
   const [searchParams] = useSearchParams()
@@ -24,10 +26,47 @@ export function WorkspacePage() {
   const projectQuery = useQuery({ queryKey: ['project', projectId], queryFn: () => apiClient.getProject(projectId) })
   const revisionsQuery = useQuery({ queryKey: ['project-revisions', projectId], queryFn: () => apiClient.listProjectRevisions(projectId) })
   const selectedRevisionId = revisionParam ?? revisionsQuery.data?.[0]?.id ?? ''
+  const selectedRevision = revisionsQuery.data?.find((revision) => revision.id === selectedRevisionId) ?? revisionsQuery.data?.[0]
   const diagnosisQuery = useQuery({ queryKey: ['diagnose', selectedRevisionId], queryFn: () => apiClient.diagnoseRevision(selectedRevisionId), enabled: Boolean(selectedRevisionId) })
+  const musicXmlQuery = useQuery({
+    queryKey: ['score-export', selectedRevision?.score_id, selectedRevisionId, 'musicxml'],
+    queryFn: async () => {
+      if (!selectedRevision) return null
+      const download = await apiClient.downloadScoreExport(selectedRevision.score_id, selectedRevision.id, 'musicxml')
+      return await download.blob.text()
+    },
+    enabled: Boolean(selectedRevision?.score_id && selectedRevisionId),
+    retry: false,
+  })
   const [selectedNote, setSelectedNote] = useState<UncertainNoteDiagnosis | null>(null)
   const [latestDiff, setLatestDiff] = useState<RevisionDiffSummary | null>(null)
   const [newRevisionId, setNewRevisionId] = useState<string | null>(null)
+
+  const exportMutation = useMutation({
+    mutationFn: async ({ revision, format }: { revision: ScoreRevisionSummary; format: ScoreExportFormat }) => apiClient.downloadScoreExport(revision.score_id, revision.id, format),
+    onSuccess: (download) => {
+      const href = URL.createObjectURL(download.blob)
+      const anchor = document.createElement('a')
+      anchor.href = href
+      anchor.download = download.filename
+      document.body.appendChild(anchor)
+      anchor.click()
+      anchor.remove()
+      URL.revokeObjectURL(href)
+      toast.success('导出文件已开始下载', { description: download.filename })
+    },
+    onError: (error) => {
+      toast.error('导出失败', { description: error instanceof Error ? error.message : '后端没有返回可用导出。' })
+    },
+  })
+
+  const downloadExport = (format: ScoreExportFormat) => {
+    if (!selectedRevision) {
+      toast.error('没有选中的乐谱版本')
+      return
+    }
+    exportMutation.mutate({ revision: selectedRevision, format })
+  }
 
   const revisionOptions = useMemo(
     () =>
@@ -50,20 +89,24 @@ export function WorkspacePage() {
         </div>
         <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
           <Select className="min-w-64" value={selectedRevisionId} options={revisionOptions} onChange={() => undefined} />
-          <Button variant="outline">
+          <Button variant="outline" disabled={!selectedRevision || exportMutation.isPending} onClick={() => downloadExport('musicxml')}>
             <FileMusic className="h-4 w-4" /> 导出 MusicXML
           </Button>
-          <Button variant="outline">
+          <Button variant="outline" disabled={!selectedRevision || exportMutation.isPending} onClick={() => downloadExport('midi')}>
             <Download className="h-4 w-4" /> 导出 MIDI
           </Button>
-          <Button variant="outline">
+          <Button variant="outline" disabled={!selectedRevision || exportMutation.isPending} onClick={() => downloadExport('view')}>
             <FileJson className="h-4 w-4" /> 导出前端显示数据
           </Button>
         </div>
       </div>
 
       <div className="grid gap-6 2xl:grid-cols-[minmax(0,1.15fr)_minmax(460px,0.85fr)]">
-        <OsmdPlaceholder />
+        <OsmdScoreViewer
+          musicXml={musicXmlQuery.data}
+          isLoading={musicXmlQuery.isFetching}
+          error={musicXmlQuery.error instanceof Error ? musicXmlQuery.error.message : null}
+        />
         <UncertainNotesPanel notes={diagnosisQuery.data?.uncertain_notes ?? []} onSelectNote={setSelectedNote} />
       </div>
 
@@ -77,6 +120,9 @@ export function WorkspacePage() {
           <CardContent className="space-y-3 text-sm">
             <div className="rounded-lg border bg-muted/30 p-3">{diagnosisQuery.data?.summary ?? '正在等待诊断摘要'}</div>
             <div className="rounded-lg border bg-muted/30 p-3">新乐谱版本：{newRevisionId ?? '—'}</div>
+            <div className="rounded-lg border bg-muted/30 p-3">
+              MIDI 浏览器播放尚未接入；当前提供后端受控下载，不伪装播放成功。
+            </div>
           </CardContent>
         </Card>
       </div>

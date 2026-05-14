@@ -6,16 +6,21 @@ import numpy as np
 from app.modules.pitch.config import PitchDetectionConfig
 from app.modules.pitch.detector import PitchDetector
 from app.modules.pitch.pipeline import PitchPipeline
-from app.modules.pitch.reason_codes import CONTOUR_TO_CANDIDATE_BRIDGE
+from app.modules.pitch.reason_codes import CONTOUR_TO_CANDIDATE_BRIDGE, DP_VITERBI_SEGMENTATION
 from app.modules.pitch.types import ArrangementDecision, ArrangementSegmentDecision, Note, PitchPipelineRequest
 
 
 class TestPitchPipeline(unittest.TestCase):
+    @staticmethod
+    def _frequencies_from_midi(midi_values):
+        values = np.asarray(midi_values, dtype=float)
+        return 440.0 * (2.0 ** ((values - 69.0) / 12.0))
+
     def test_frames_to_notes_keeps_moderate_vibrato_phrase(self):
         detector = PitchDetector(PitchDetectionConfig())
         times = np.arange(40, dtype=float) * 0.01
         midi_values = 60.0 + 1.2 * np.sin(np.linspace(0.0, 2.0 * np.pi, times.size))
-        frequencies = 440.0 * (2.0 ** ((midi_values - 69.0) / 12.0))
+        frequencies = self._frequencies_from_midi(midi_values)
         confidences = np.full(times.shape, 0.9, dtype=float)
 
         notes = detector._frames_to_notes(
@@ -31,9 +36,86 @@ class TestPitchPipeline(unittest.TestCase):
         self.assertGreater(notes[0].end_time - notes[0].start_time, 0.35)
         evidence = notes[0].segmentation_evidence
         self.assertEqual(evidence["backend"], "rmvpe")
+        self.assertEqual(evidence["segmentation_strategy"], "dp_viterbi")
         self.assertEqual(evidence["voiced_frame_count"], 40)
         self.assertIn("quality_factor", evidence)
         self.assertIn("adjusted_confidence", evidence)
+        self.assertIn(DP_VITERBI_SEGMENTATION, notes[0].reason_codes)
+
+    def test_dp_frames_to_notes_suppresses_short_pitch_spike(self):
+        detector = PitchDetector(PitchDetectionConfig())
+        times = np.arange(70, dtype=float) * 0.01
+        midi_values = np.full(times.shape, 60.0, dtype=float)
+        midi_values[30:32] = 66.0
+        frequencies = self._frequencies_from_midi(midi_values)
+        confidences = np.full(times.shape, 0.9, dtype=float)
+
+        notes = detector._frames_to_notes(
+            times=times,
+            frequencies=frequencies,
+            confidences=confidences,
+            duration_sec=float(times[-1]) + 0.01,
+            backend="rmvpe",
+        )
+
+        self.assertEqual([note.pitch for note in notes], ["C4"])
+        self.assertGreater(notes[0].end_time - notes[0].start_time, 0.6)
+        self.assertEqual(notes[0].segmentation_evidence["dp_raw_segment_count"], 1)
+
+    def test_dp_frames_to_notes_splits_supported_pitch_change(self):
+        detector = PitchDetector(PitchDetectionConfig())
+        times = np.arange(80, dtype=float) * 0.01
+        midi_values = np.concatenate([np.full(40, 60.0), np.full(40, 64.0)])
+        frequencies = self._frequencies_from_midi(midi_values)
+        confidences = np.full(times.shape, 0.92, dtype=float)
+
+        notes = detector._frames_to_notes(
+            times=times,
+            frequencies=frequencies,
+            confidences=confidences,
+            duration_sec=float(times[-1]) + 0.01,
+            backend="rmvpe",
+        )
+
+        self.assertEqual([note.pitch for note in notes], ["C4", "E4"])
+        self.assertLess(notes[0].end_time, notes[1].start_time + 0.02)
+
+    def test_dp_frames_to_notes_bridges_short_unvoiced_gap(self):
+        detector = PitchDetector(PitchDetectionConfig())
+        times = np.arange(60, dtype=float) * 0.01
+        midi_values = np.full(times.shape, 60.0, dtype=float)
+        frequencies = self._frequencies_from_midi(midi_values)
+        confidences = np.full(times.shape, 0.9, dtype=float)
+        confidences[28:30] = 0.05
+
+        notes = detector._frames_to_notes(
+            times=times,
+            frequencies=frequencies,
+            confidences=confidences,
+            duration_sec=float(times[-1]) + 0.01,
+            backend="rmvpe",
+        )
+
+        self.assertEqual([note.pitch for note in notes], ["C4"])
+        self.assertGreater(notes[0].end_time - notes[0].start_time, 0.55)
+
+    def test_dp_frames_to_notes_drops_low_confidence_short_island(self):
+        detector = PitchDetector(PitchDetectionConfig())
+        times = np.arange(40, dtype=float) * 0.01
+        frequencies = np.zeros(times.shape, dtype=float)
+        frequencies[12:17] = self._frequencies_from_midi(np.full(5, 60.0))
+        confidences = np.full(times.shape, 0.05, dtype=float)
+        confidences[12:17] = 0.34
+
+        notes = detector._frames_to_notes(
+            times=times,
+            frequencies=frequencies,
+            confidences=confidences,
+            duration_sec=float(times[-1]) + 0.01,
+            backend="rmvpe",
+        )
+
+        self.assertEqual(notes, [])
     def test_safe_detect_candidates_preserves_note_debug_metadata(self):
         pipeline = PitchPipeline()
         source = Note(

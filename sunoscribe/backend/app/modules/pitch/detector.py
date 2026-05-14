@@ -15,7 +15,14 @@ from .exceptions import (
     PitchDetectionFailedError,
     PitchModelUnavailableError,
 )
-from .note_utils import hz_to_midi, midi_to_note
+from .note_utils import hz_to_midi, midi_to_note, note_to_midi
+from .reason_codes import (
+    DP_LOW_CONFIDENCE_ISLAND_REJECTED,
+    DP_SHORT_FRAGMENT_REJECTED,
+    DP_SHORT_GAP_MERGED,
+    DP_SHORT_SPIKE_SUPPRESSED,
+    DP_VITERBI_SEGMENTATION,
+)
 from .types import Note
 
 
@@ -878,6 +885,28 @@ class PitchDetector:
 
         midi_smoothed = self._median_filter_nan(midi, window=smoothing_window)
 
+        dp_notes_for_gap_augmentation: list[Note] | None = None
+        if backend_key == "rmvpe":
+            strategy = str(getattr(self.config, "rmvpe_segmentation_strategy", "greedy") or "greedy").strip().lower()
+            if strategy == "dp_viterbi":
+                dp_notes_for_gap_augmentation = self._frames_to_notes_dp_viterbi(
+                    times=times,
+                    midi_smoothed=midi_smoothed,
+                    confidences=confidences,
+                    voiced=voiced,
+                    duration_sec=duration_sec,
+                    backend_key=backend_key,
+                    voiced_threshold=voiced_threshold,
+                    min_note_duration=min_note_duration,
+                    min_voiced_frames=min_voiced_frames,
+                    jump_threshold=jump_threshold,
+                    smoothing_window=smoothing_window,
+                    max_unvoiced_gap_frames=max_unvoiced_gap_frames,
+                    frame_hop_sec=frame_hop_sec,
+                )
+            elif strategy not in {"greedy", "legacy"}:
+                raise PitchDetectionFailedError(f"unsupported RMVPE segmentation strategy: {strategy}")
+
         segments: list[tuple[int, int]] = []
         segment_start: int | None = None
         last_voiced_idx: int | None = None
@@ -974,7 +1003,565 @@ class PitchDetector:
             )
 
         notes.sort(key=lambda n: (n.start_time, n.end_time))
+        if dp_notes_for_gap_augmentation is not None:
+            notes = self._merge_legacy_and_dp_notes(notes, dp_notes_for_gap_augmentation)
         return notes
+
+    def _merge_legacy_and_dp_notes(self, legacy_notes: list[Note], dp_notes: list[Note]) -> list[Note]:
+        if not dp_notes:
+            return list(legacy_notes)
+        if not legacy_notes:
+            return list(dp_notes)
+
+        merged: list[Note] = []
+        used_dp_indices: set[int] = set()
+        for legacy_note in legacy_notes:
+            replacement_index = self._find_equivalent_dp_note(legacy_note, dp_notes, used_dp_indices)
+            if replacement_index is None:
+                merged.append(legacy_note)
+                continue
+            replacement = dp_notes[replacement_index]
+            used_dp_indices.add(replacement_index)
+            evidence = dict(getattr(replacement, "segmentation_evidence", {}) or {})
+            evidence["dp_legacy_anchor_replaced"] = True
+            replacement.segmentation_evidence = evidence
+            merged.append(replacement)
+
+        for idx, dp_note in enumerate(dp_notes):
+            if idx in used_dp_indices:
+                continue
+            duration = max(0.0, float(dp_note.end_time) - float(dp_note.start_time))
+            if duration <= 0.0:
+                continue
+            max_overlap = max((self._note_overlap_sec(dp_note, existing) for existing in legacy_notes), default=0.0)
+            if max_overlap > max(0.04, duration * 0.20):
+                continue
+            evidence = dict(getattr(dp_note, "segmentation_evidence", {}) or {})
+            evidence["dp_gap_augmentation"] = True
+            evidence["dp_max_legacy_overlap_sec"] = round(float(max_overlap), 6)
+            dp_note.segmentation_evidence = evidence
+            merged.append(dp_note)
+
+        merged.sort(key=lambda n: (n.start_time, n.end_time))
+        return merged
+
+    def _find_equivalent_dp_note(
+        self,
+        legacy_note: Note,
+        dp_notes: list[Note],
+        used_dp_indices: set[int],
+    ) -> int | None:
+        legacy_duration = max(0.0, float(legacy_note.end_time) - float(legacy_note.start_time))
+        if legacy_duration <= 0.0:
+            return None
+        try:
+            legacy_pitch = note_to_midi(legacy_note.pitch)
+        except Exception:
+            return None
+
+        best_index: int | None = None
+        best_overlap = 0.0
+        for idx, dp_note in enumerate(dp_notes):
+            if idx in used_dp_indices:
+                continue
+            dp_duration = max(0.0, float(dp_note.end_time) - float(dp_note.start_time))
+            if dp_duration <= 0.0:
+                continue
+            overlap = self._note_overlap_sec(legacy_note, dp_note)
+            if overlap <= best_overlap:
+                continue
+            if overlap / legacy_duration < 0.80 or overlap / dp_duration < 0.80:
+                continue
+            try:
+                dp_pitch = note_to_midi(dp_note.pitch)
+            except Exception:
+                continue
+            if abs(int(dp_pitch) - int(legacy_pitch)) > 1:
+                continue
+            best_index = idx
+            best_overlap = overlap
+        return best_index
+
+    @staticmethod
+    def _note_overlap_sec(left: Note, right: Note) -> float:
+        start = max(float(left.start_time), float(right.start_time))
+        end = min(float(left.end_time), float(right.end_time))
+        return max(0.0, end - start)
+
+
+    def _frames_to_notes_dp_viterbi(
+        self,
+        *,
+        times: np.ndarray,
+        midi_smoothed: np.ndarray,
+        confidences: np.ndarray,
+        voiced: np.ndarray,
+        duration_sec: float,
+        backend_key: str,
+        voiced_threshold: float,
+        min_note_duration: float,
+        min_voiced_frames: int,
+        jump_threshold: float,
+        smoothing_window: int,
+        max_unvoiced_gap_frames: int,
+        frame_hop_sec: float,
+    ) -> List[Note]:
+        frame_count = int(min(times.size, midi_smoothed.size, confidences.size, voiced.size))
+        if frame_count <= 0:
+            return []
+
+        times = np.asarray(times[:frame_count], dtype=float)
+        midi_smoothed = np.asarray(midi_smoothed[:frame_count], dtype=float)
+        confidences = np.clip(
+            np.nan_to_num(np.asarray(confidences[:frame_count], dtype=float), nan=0.0, posinf=0.0, neginf=0.0),
+            0.0,
+            1.0,
+        )
+        voiced = np.asarray(voiced[:frame_count], dtype=bool)
+
+        states_by_frame = self._dp_frame_states(midi_smoothed=midi_smoothed, voiced=voiced)
+        local_stability = self._dp_local_stability(midi_smoothed, backend=backend_key)
+        path, path_score = self._dp_viterbi_path(
+            states_by_frame=states_by_frame,
+            midi_smoothed=midi_smoothed,
+            confidences=confidences,
+            voiced=voiced,
+            voiced_threshold=voiced_threshold,
+            jump_threshold=jump_threshold,
+            local_stability=local_stability,
+        )
+        if not path:
+            return []
+
+        raw_segments = self._dp_path_segments(path)
+        suppressed_spike_count = self._dp_suppressed_spike_count(
+            path=path,
+            midi_smoothed=midi_smoothed,
+            confidences=confidences,
+            voiced_threshold=voiced_threshold,
+            jump_threshold=jump_threshold,
+            max_unvoiced_gap_frames=max_unvoiced_gap_frames,
+        )
+        merged_segments, merged_gap_count = self._merge_dp_segments(
+            raw_segments,
+            frame_hop_sec=frame_hop_sec,
+            min_note_duration=min_note_duration,
+            min_voiced_frames=min_voiced_frames,
+            max_unvoiced_gap_frames=max_unvoiced_gap_frames,
+        )
+        state_changes = sum(1 for idx in range(1, len(path)) if path[idx] != path[idx - 1])
+        transition_penalty_total = self._dp_transition_penalty_total(path, jump_threshold=jump_threshold)
+        rejected_reason_counts: dict[str, int] = {}
+        notes: list[Note] = []
+
+        dp_summary = {
+            "path_score": round(float(path_score), 6),
+            "state_changes": int(state_changes),
+            "merged_gap_count": int(merged_gap_count),
+            "suppressed_spike_count": int(suppressed_spike_count),
+            "transition_penalty_total": round(float(transition_penalty_total), 6),
+            "raw_segment_count": int(len(raw_segments)),
+            "merged_segment_count": int(len(merged_segments)),
+        }
+
+        for start_idx, end_idx, _state_pitch in merged_segments:
+            note = self._build_dp_note_from_segment(
+                start_idx=start_idx,
+                end_idx=end_idx,
+                times=times,
+                midi_smoothed=midi_smoothed,
+                confidences=confidences,
+                voiced=voiced,
+                duration_sec=duration_sec,
+                backend_key=backend_key,
+                voiced_threshold=voiced_threshold,
+                min_note_duration=min_note_duration,
+                min_voiced_frames=min_voiced_frames,
+                jump_threshold=jump_threshold,
+                smoothing_window=smoothing_window,
+                frame_hop_sec=frame_hop_sec,
+                dp_summary=dp_summary,
+            )
+            if note is None:
+                self._increment_reason_count(rejected_reason_counts, DP_SHORT_FRAGMENT_REJECTED)
+                continue
+
+            duration = float(note.end_time) - float(note.start_time)
+            if duration < min_note_duration:
+                self._increment_reason_count(rejected_reason_counts, DP_SHORT_FRAGMENT_REJECTED)
+                continue
+            if int(note.segmentation_evidence.get("voiced_frame_count", 0) or 0) < min_voiced_frames:
+                self._increment_reason_count(rejected_reason_counts, DP_SHORT_FRAGMENT_REJECTED)
+                continue
+            if (
+                float(note.confidence) < max(0.35, float(self.config.confidence_threshold))
+                and duration < max(0.20, min_note_duration * 2.5)
+            ):
+                self._increment_reason_count(rejected_reason_counts, DP_LOW_CONFIDENCE_ISLAND_REJECTED)
+                continue
+
+            evidence = dict(note.segmentation_evidence)
+            evidence["dp_rejected_reason_counts"] = dict(rejected_reason_counts)
+            note.segmentation_evidence = evidence
+            notes.append(note)
+
+        notes.sort(key=lambda n: (n.start_time, n.end_time))
+        return notes
+
+    def _dp_frame_states(self, *, midi_smoothed: np.ndarray, voiced: np.ndarray) -> list[list[int | None]]:
+        radius = max(0, int(getattr(self.config, "rmvpe_dp_pitch_radius_semitones", 2) or 0))
+        states_by_frame: list[list[int | None]] = []
+        for idx, observed in enumerate(midi_smoothed):
+            states: list[int | None] = [None]
+            if bool(voiced[idx]) and np.isfinite(observed):
+                center = int(round(float(observed)))
+                for pitch in range(center - radius, center + radius + 1):
+                    if 21 <= pitch <= 108:
+                        states.append(int(pitch))
+            states_by_frame.append(states)
+        return states_by_frame
+
+    def _dp_local_stability(self, midi_smoothed: np.ndarray, *, backend: str) -> np.ndarray:
+        window = max(3, int(getattr(self.config, "rmvpe_smoothing_window", 7) or 7))
+        if window % 2 == 0:
+            window += 1
+        half = window // 2
+        stability = np.ones(midi_smoothed.shape, dtype=float)
+        for idx in range(midi_smoothed.size):
+            left = max(0, idx - half)
+            right = min(midi_smoothed.size, idx + half + 1)
+            patch = midi_smoothed[left:right]
+            patch = patch[np.isfinite(patch)]
+            if patch.size <= 1:
+                stability[idx] = 1.0
+                continue
+            center = float(np.median(patch))
+            stability[idx] = self._stability_factor(self._median_absolute_deviation(patch, center), backend=backend)
+        return np.clip(stability, 0.0, 1.0)
+
+    def _dp_viterbi_path(
+        self,
+        *,
+        states_by_frame: list[list[int | None]],
+        midi_smoothed: np.ndarray,
+        confidences: np.ndarray,
+        voiced: np.ndarray,
+        voiced_threshold: float,
+        jump_threshold: float,
+        local_stability: np.ndarray,
+    ) -> tuple[list[int | None], float]:
+        if not states_by_frame:
+            return [], 0.0
+
+        previous_scores: dict[int | None, float] = {}
+        backpointers: list[dict[int | None, int | None]] = []
+        for frame_idx, states in enumerate(states_by_frame):
+            current_scores: dict[int | None, float] = {}
+            current_backpointers: dict[int | None, int | None] = {}
+            for state in states:
+                emission = self._dp_emission_score(
+                    frame_idx=frame_idx,
+                    state=state,
+                    midi_smoothed=midi_smoothed,
+                    confidences=confidences,
+                    voiced=voiced,
+                    voiced_threshold=voiced_threshold,
+                    local_stability=local_stability,
+                )
+                if frame_idx == 0:
+                    current_scores[state] = emission
+                    current_backpointers[state] = None
+                    continue
+
+                best_previous_state: int | None = None
+                best_score = -float("inf")
+                for previous_state, previous_score in previous_scores.items():
+                    transition = self._dp_transition_score(
+                        previous_state,
+                        state,
+                        jump_threshold=jump_threshold,
+                    )
+                    score = float(previous_score) + transition + emission
+                    if score > best_score:
+                        best_score = score
+                        best_previous_state = previous_state
+                current_scores[state] = best_score
+                current_backpointers[state] = best_previous_state
+            previous_scores = current_scores
+            backpointers.append(current_backpointers)
+
+        if not previous_scores:
+            return [], 0.0
+        best_state = max(previous_scores, key=previous_scores.get)
+        best_score = float(previous_scores[best_state])
+        path: list[int | None] = [best_state]
+        for frame_idx in range(len(backpointers) - 1, 0, -1):
+            best_state = backpointers[frame_idx].get(best_state)
+            path.append(best_state)
+        path.reverse()
+        return path, best_score
+
+    def _dp_emission_score(
+        self,
+        *,
+        frame_idx: int,
+        state: int | None,
+        midi_smoothed: np.ndarray,
+        confidences: np.ndarray,
+        voiced: np.ndarray,
+        voiced_threshold: float,
+        local_stability: np.ndarray,
+    ) -> float:
+        confidence = float(confidences[frame_idx])
+        observed = float(midi_smoothed[frame_idx]) if np.isfinite(midi_smoothed[frame_idx]) else float("nan")
+        is_voiced = bool(voiced[frame_idx]) and np.isfinite(observed)
+        if state is None:
+            if not is_voiced:
+                return 0.30
+            excess_confidence = max(0.0, confidence - float(voiced_threshold))
+            return -0.25 - (0.85 * excess_confidence)
+        if not is_voiced:
+            return -2.0
+        confidence_span = max(1e-6, 1.0 - float(voiced_threshold))
+        confidence_score = max(0.0, min(1.0, (confidence - float(voiced_threshold)) / confidence_span))
+        pitch_distance = abs(observed - float(state))
+        stability = float(local_stability[frame_idx]) if frame_idx < local_stability.size else 1.0
+        return (1.05 * confidence_score) + (0.35 * stability) - (0.20 * pitch_distance) - 0.10
+
+    @staticmethod
+    def _dp_transition_score(previous_state: int | None, current_state: int | None, *, jump_threshold: float) -> float:
+        if previous_state is None and current_state is None:
+            return 0.15
+        if previous_state is None:
+            return -0.45
+        if current_state is None:
+            return -0.35
+        delta = abs(int(current_state) - int(previous_state))
+        if delta == 0:
+            return 0.55
+        score = -1.05 - (0.25 * float(delta))
+        if float(delta) >= float(jump_threshold):
+            score -= 0.65 + (0.12 * min(12.0, float(delta) - float(jump_threshold)))
+        return score
+
+    @staticmethod
+    def _dp_path_segments(path: list[int | None]) -> list[tuple[int, int, int]]:
+        segments: list[tuple[int, int, int]] = []
+        segment_start: int | None = None
+        segment_pitch: int | None = None
+        for idx, state in enumerate(path):
+            if state is None:
+                if segment_start is not None and segment_pitch is not None:
+                    segments.append((segment_start, idx - 1, int(segment_pitch)))
+                    segment_start = None
+                    segment_pitch = None
+                continue
+            if segment_start is None:
+                segment_start = idx
+                segment_pitch = int(state)
+                continue
+            if int(state) != int(segment_pitch):
+                segments.append((segment_start, idx - 1, int(segment_pitch)))
+                segment_start = idx
+                segment_pitch = int(state)
+        if segment_start is not None and segment_pitch is not None:
+            segments.append((segment_start, len(path) - 1, int(segment_pitch)))
+        return segments
+
+    def _merge_dp_segments(
+        self,
+        segments: list[tuple[int, int, int]],
+        *,
+        frame_hop_sec: float,
+        min_note_duration: float,
+        min_voiced_frames: int,
+        max_unvoiced_gap_frames: int,
+    ) -> tuple[list[tuple[int, int, int]], int]:
+        if not segments:
+            return [], 0
+        max_gap_frames = max(1, max_unvoiced_gap_frames + 1)
+        short_fragment_frames = max(min_voiced_frames, int(round(max(min_note_duration, frame_hop_sec) / max(frame_hop_sec, 1e-4))))
+        merged: list[tuple[int, int, int]] = [segments[0]]
+        merge_count = 0
+        for start_idx, end_idx, pitch in segments[1:]:
+            prev_start, prev_end, prev_pitch = merged[-1]
+            gap_frames = int(start_idx - prev_end - 1)
+            pitch_delta = abs(int(pitch) - int(prev_pitch))
+            prev_len = int(prev_end - prev_start + 1)
+            curr_len = int(end_idx - start_idx + 1)
+            same_pitch = pitch_delta == 0
+            near_short_fragment = pitch_delta <= 1 and min(prev_len, curr_len) <= max(short_fragment_frames, min_voiced_frames * 2)
+            expressive_adjacent = pitch_delta <= 2 and gap_frames <= max_gap_frames and min(prev_len, curr_len) <= max(short_fragment_frames * 3, min_voiced_frames * 5)
+            if gap_frames <= max_gap_frames and (same_pitch or near_short_fragment or expressive_adjacent):
+                kept_pitch = int(prev_pitch if prev_len >= curr_len else pitch)
+                merged[-1] = (prev_start, end_idx, kept_pitch)
+                merge_count += 1
+                continue
+            merged.append((start_idx, end_idx, pitch))
+        return merged, merge_count
+
+    def _build_dp_note_from_segment(
+        self,
+        *,
+        start_idx: int,
+        end_idx: int,
+        times: np.ndarray,
+        midi_smoothed: np.ndarray,
+        confidences: np.ndarray,
+        voiced: np.ndarray,
+        duration_sec: float,
+        backend_key: str,
+        voiced_threshold: float,
+        min_note_duration: float,
+        min_voiced_frames: int,
+        jump_threshold: float,
+        smoothing_window: int,
+        frame_hop_sec: float,
+        dp_summary: dict[str, object],
+    ) -> Note | None:
+        seg_mask = voiced[start_idx : end_idx + 1] & np.isfinite(midi_smoothed[start_idx : end_idx + 1])
+        voiced_count = int(np.sum(seg_mask))
+        if voiced_count <= 0:
+            return None
+
+        seg_midi = midi_smoothed[start_idx : end_idx + 1][seg_mask]
+        seg_conf = confidences[start_idx : end_idx + 1][seg_mask]
+        if seg_midi.size == 0:
+            return None
+
+        avg_conf = float(np.mean(seg_conf)) if seg_conf.size > 0 else 0.0
+        median_midi = float(np.median(seg_midi))
+        mad_semitones = self._median_absolute_deviation(seg_midi, median_midi)
+        span_semitones = self._pitch_span(seg_midi)
+        stability_factor = self._stability_factor(mad_semitones, backend=backend_key)
+        span_factor = self._span_factor(span_semitones, backend=backend_key)
+        quality_factor = max(0.0, min(1.0, 0.55 * stability_factor + 0.45 * span_factor))
+        legacy_adjusted_conf = avg_conf * (0.35 + 0.65 * quality_factor)
+        adjusted_conf = avg_conf * (0.65 + 0.35 * quality_factor)
+
+        start_time = max(0.0, float(times[start_idx]) - frame_hop_sec * 0.5)
+        end_time = min(float(duration_sec), float(times[end_idx]) + frame_hop_sec * 0.5)
+        if end_time <= start_time:
+            return None
+
+        pitch_midi = int(round(median_midi))
+        reason_codes = [DP_VITERBI_SEGMENTATION]
+        if int(dp_summary.get("merged_gap_count", 0) or 0) > 0:
+            reason_codes.append(DP_SHORT_GAP_MERGED)
+        if int(dp_summary.get("suppressed_spike_count", 0) or 0) > 0:
+            reason_codes.append(DP_SHORT_SPIKE_SUPPRESSED)
+
+        return Note(
+            pitch=midi_to_note(pitch_midi),
+            start_time=start_time,
+            end_time=end_time,
+            confidence=adjusted_conf,
+            reason_codes=reason_codes,
+            candidate_origin="rmvpe_dp_viterbi",
+            segmentation_evidence={
+                "backend": self._segmentation_backend(backend_key),
+                "segmentation_strategy": "dp_viterbi",
+                "source_reason_code": DP_VITERBI_SEGMENTATION,
+                "start_frame_index": int(start_idx),
+                "end_frame_index": int(end_idx),
+                "voiced_frame_count": int(voiced_count),
+                "frame_hop_sec": round(float(frame_hop_sec), 6),
+                "avg_confidence": round(float(avg_conf), 6),
+                "adjusted_confidence": round(float(adjusted_conf), 6),
+                "legacy_adjusted_confidence": round(float(legacy_adjusted_conf), 6),
+                "median_pitch_midi": round(float(median_midi), 6),
+                "mad_semitones": round(float(mad_semitones), 6),
+                "span_semitones": round(float(span_semitones), 6),
+                "stability_factor": round(float(stability_factor), 6),
+                "span_factor": round(float(span_factor), 6),
+                "quality_factor": round(float(quality_factor), 6),
+                "voiced_threshold": round(float(voiced_threshold), 6),
+                "jump_threshold_semitones": round(float(jump_threshold), 6),
+                "min_note_duration_sec": round(float(min_note_duration), 6),
+                "min_voiced_frames": int(min_voiced_frames),
+                "smoothing_window": int(smoothing_window),
+                "dp_path_score": dp_summary.get("path_score"),
+                "dp_state_changes": dp_summary.get("state_changes"),
+                "dp_merged_gap_count": dp_summary.get("merged_gap_count"),
+                "dp_suppressed_spike_count": dp_summary.get("suppressed_spike_count"),
+                "dp_transition_penalty_total": dp_summary.get("transition_penalty_total"),
+                "dp_raw_segment_count": dp_summary.get("raw_segment_count"),
+                "dp_merged_segment_count": dp_summary.get("merged_segment_count"),
+            },
+        )
+
+    def _dp_suppressed_spike_count(
+        self,
+        *,
+        path: list[int | None],
+        midi_smoothed: np.ndarray,
+        confidences: np.ndarray,
+        voiced_threshold: float,
+        jump_threshold: float,
+        max_unvoiced_gap_frames: int,
+    ) -> int:
+        count = 0
+        idx = 0
+        max_gap = max(1, max_unvoiced_gap_frames + 1)
+        while idx < len(path):
+            state = path[idx]
+            observed = midi_smoothed[idx] if idx < midi_smoothed.size else np.nan
+            confidence = confidences[idx] if idx < confidences.size else 0.0
+            is_pitch_spike = (
+                state is not None
+                and np.isfinite(observed)
+                and float(confidence) >= float(voiced_threshold)
+                and abs(float(observed) - float(state)) >= float(jump_threshold)
+            )
+            is_rest_spike = path[idx] is None
+            if not is_pitch_spike and not is_rest_spike:
+                idx += 1
+                continue
+
+            start_idx = idx
+            while idx < len(path):
+                state = path[idx]
+                observed = midi_smoothed[idx] if idx < midi_smoothed.size else np.nan
+                confidence = confidences[idx] if idx < confidences.size else 0.0
+                pitch_spike = (
+                    state is not None
+                    and np.isfinite(observed)
+                    and float(confidence) >= float(voiced_threshold)
+                    and abs(float(observed) - float(state)) >= float(jump_threshold)
+                )
+                rest_spike = state is None
+                if not pitch_spike and not rest_spike:
+                    break
+                idx += 1
+            end_idx = idx - 1
+            if start_idx == 0 or idx >= len(path) or (end_idx - start_idx + 1) > max_gap:
+                continue
+
+            left_state = path[start_idx - 1]
+            right_state = path[idx]
+            if left_state is None or right_state is None or abs(int(left_state) - int(right_state)) > 1:
+                continue
+
+            patch_midi = midi_smoothed[start_idx : end_idx + 1]
+            patch_conf = confidences[start_idx : end_idx + 1]
+            valid = np.isfinite(patch_midi) & (patch_conf >= voiced_threshold)
+            if not np.any(valid):
+                continue
+            if np.max(np.abs(patch_midi[valid] - float(left_state))) >= float(jump_threshold):
+                count += 1
+        return count
+
+    def _dp_transition_penalty_total(self, path: list[int | None], *, jump_threshold: float) -> float:
+        total = 0.0
+        for idx in range(1, len(path)):
+            score = self._dp_transition_score(path[idx - 1], path[idx], jump_threshold=jump_threshold)
+            if score < 0.0:
+                total += abs(float(score))
+        return total
+
+    @staticmethod
+    def _increment_reason_count(counts: dict[str, int], reason_code: str) -> None:
+        counts[reason_code] = int(counts.get(reason_code, 0)) + 1
 
     def _estimate_frame_hop_sec(self, times: np.ndarray) -> float:
         if times.size >= 2:

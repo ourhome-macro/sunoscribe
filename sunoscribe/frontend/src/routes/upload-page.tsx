@@ -1,10 +1,11 @@
 import { useMemo, useState } from 'react'
-import { useMutation } from '@tanstack/react-query'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { toast } from 'sonner'
 
 import { StageProgress } from '@/components/diagnostics/stage-progress'
 import { GlossaryTerm } from '@/components/layout/glossary-term'
 import { PageHeader } from '@/components/layout/page-header'
+import { TaskStatusCard } from '@/components/tasks/task-status-card'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
@@ -25,10 +26,12 @@ const uploadStages: StageProgressItem[] = [
 ]
 
 export function UploadPage() {
+  const queryClient = useQueryClient()
   const [name, setName] = useState('')
   const [mediaKind, setMediaKind] = useState<'audio' | 'video'>('audio')
   const [file, setFile] = useState<File | null>(null)
   const [started, setStarted] = useState(false)
+  const [taskId, setTaskId] = useState<string | null>(null)
 
   const stages = useMemo(
     () => uploadStages.map((stage, index) => ({ ...stage, status: started && index === 0 ? 'running' : stage.status }) as StageProgressItem),
@@ -39,7 +42,27 @@ export function UploadPage() {
     mutationFn: () => apiClient.createProject({ name, media_kind: mediaKind, file }),
     onSuccess: (result) => {
       setStarted(true)
+      setTaskId(result.task_id)
       toast.success('已开始分析这首歌', { description: `歌曲 ID：${result.project_id} · 任务：${result.task_id}` })
+    },
+  })
+
+  const taskQuery = useQuery({
+    queryKey: ['task', taskId],
+    queryFn: () => apiClient.getTask(taskId ?? ''),
+    enabled: Boolean(taskId),
+    refetchInterval: (query) => {
+      const status = query.state.data?.status
+      return status === 'queued' || status === 'running' || status === 'retrying' ? 2000 : false
+    },
+  })
+
+  const retryMutation = useMutation({
+    mutationFn: () => apiClient.retryTask(taskId ?? ''),
+    onSuccess: (task) => {
+      setTaskId(task.task_id)
+      queryClient.setQueryData(['task', task.task_id], task)
+      toast.success('任务已重新入队', { description: `task_id: ${task.task_id}` })
     },
   })
 
@@ -78,6 +101,11 @@ export function UploadPage() {
             <Button className="w-full" disabled={!name || !file || mutation.isPending} onClick={() => mutation.mutate()}>
               开始扒谱
             </Button>
+            {mutation.isError ? (
+              <div className="rounded-lg border border-destructive/40 bg-destructive/10 p-3 text-sm text-destructive">
+                {mutation.error instanceof Error ? mutation.error.message : '上传或创建任务失败。'}
+              </div>
+            ) : null}
           </CardContent>
         </Card>
 
@@ -90,6 +118,15 @@ export function UploadPage() {
             <StageProgress stages={stages} />
           </CardContent>
         </Card>
+      </div>
+
+      <div className="mt-6">
+        <TaskStatusCard
+          task={taskQuery.data}
+          isLoading={taskQuery.isFetching}
+          isRetrying={retryMutation.isPending}
+          onRetry={() => retryMutation.mutate()}
+        />
       </div>
     </div>
   )
