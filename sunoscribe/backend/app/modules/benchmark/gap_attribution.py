@@ -19,6 +19,10 @@ from .reason_codes import (
     CANDIDATE_FORMATION_SHORT_FRAGMENT_CLUSTER,
     CANDIDATE_FORMATION_SPLITS_BIG_GAP,
     CANDIDATE_FORMATION_TOO_SHORT,
+    DEBUG_ATTR_BRIDGE_SEGMENTATION_REJECTED,
+    DEBUG_ATTR_BRIDGE_SEGMENTATION_WEAK_QUALITY,
+    DEBUG_ATTR_SELECTOR_REJECTED_UNSTABLE_SEGMENT,
+    DEBUG_ATTR_SELECTOR_REJECTED_WEAK_SEGMENT,
     DELETED_CANDIDATE_LARGE_PITCH_JUMP,
     DELETED_CANDIDATE_LOW_CONFIDENCE,
     DELETED_CANDIDATE_OVERLAP,
@@ -90,6 +94,7 @@ def build_gap_attribution(
     raw_candidates = _candidate_records(candidate_payload, source="raw_notes")
     legacy_selected = _candidate_records(candidate_payload, source="legacy_selected_notes")
     selected_notes = _artifact_records(selected_payload, kind="selected_melody")
+    selected_rejected_candidates = _selected_rejected_candidate_records(selected_payload)
     quantized_notes = _artifact_records(quantized_payload, kind="quantized_notes")
     score_ir_notes = _artifact_records(score_ir_payload, kind="score_ir")
     pitch_contours = _contour_records(contour_payload)
@@ -122,6 +127,7 @@ def build_gap_attribution(
         contour_bridge_rejections=contour_bridge_rejections,
         f0_spans=f0_spans,
         low_f0_spans=low_f0_spans,
+        selected_rejected_candidates=selected_rejected_candidates,
     )
     top_lost_expected = _top_lost_expected_notes(
         unmatched_expected=unmatched_expected,
@@ -135,6 +141,7 @@ def build_gap_attribution(
         f0_spans=f0_spans,
         low_f0_spans=low_f0_spans,
         pitch_shift_for_reference_eval=octave_shift,
+        selected_rejected_candidates=selected_rejected_candidates,
     )
     top_deleted_candidates = _top_deleted_candidates(
         raw_candidates=raw_candidates,
@@ -199,6 +206,10 @@ def build_gap_attribution(
             predicted_notes=predicted_notes,
         ),
         "contour_to_candidate_bridge": _contour_bridge_summary(candidate_payload),
+        "debug_attribution": _debug_attribution_summary(
+            selected_rejected_candidates=selected_rejected_candidates,
+            contour_bridge_rejections=contour_bridge_rejections,
+        ),
         "top_gaps": top_gaps,
         "top_lost_expected_notes": top_lost_expected,
         "top_deleted_candidates": top_deleted_candidates,
@@ -337,6 +348,7 @@ def _top_gap_attributions(
     contour_bridge_rejections: list[dict[str, Any]],
     f0_spans: list[dict[str, Any]],
     low_f0_spans: list[dict[str, Any]],
+    selected_rejected_candidates: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
     records = sorted([record for record in final_records if _duration(record) > 0], key=lambda item: (_start(item), _end(item)))
     gaps: list[dict[str, Any]] = []
@@ -359,6 +371,7 @@ def _top_gap_attributions(
             contour_bridge_rejections=contour_bridge_rejections,
             f0_spans=f0_spans,
             low_f0_spans=low_f0_spans,
+            selected_rejected_candidates=selected_rejected_candidates,
         )
         gaps.append(
             {
@@ -388,6 +401,7 @@ def _top_lost_expected_notes(
     f0_spans: list[dict[str, Any]],
     low_f0_spans: list[dict[str, Any]],
     pitch_shift_for_reference_eval: int,
+    selected_rejected_candidates: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     for index, note in enumerate(unmatched_expected):
@@ -399,6 +413,7 @@ def _top_lost_expected_notes(
         predicted_matches = _records_matching_note(predicted_records, note, pitch_shift=pitch_shift_for_reference_eval)
         contour_matches = _records_matching_note(pitch_contours, note, pitch_shift=pitch_shift_for_reference_eval, pitch_tolerance=1.5)
         bridge_rejections = _records_overlapping(contour_bridge_rejections, note.start, note.end)
+        selector_rejections = _records_overlapping(selected_rejected_candidates, note.start, note.end)
         f0_overlap = _span_overlap_summary(f0_spans, note.start, note.end, target_pitch=note.pitch, pitch_shift=pitch_shift_for_reference_eval)
         low_f0_overlap = _span_overlap_summary(low_f0_spans, note.start, note.end)
 
@@ -444,6 +459,10 @@ def _top_lost_expected_notes(
                     "contour_bridge_rejections_in_gap": len(bridge_rejections),
                     "top_contour_bridge_rejections": _compact_bridge_rejection_records(bridge_rejections),
                     "top_contour_bridge_segmentation_summaries": _compact_bridge_segmentation_summaries(bridge_rejections),
+                    "debug_attribution": _debug_attribution_summary(
+                        selected_rejected_candidates=selector_rejections,
+                        contour_bridge_rejections=bridge_rejections,
+                    ),
                     "f0_voiced_overlap": f0_overlap,
                     "low_confidence_or_unvoiced_overlap": low_f0_overlap,
                     "pitch_shift_for_reference_eval_semitones": pitch_shift_for_reference_eval,
@@ -511,6 +530,7 @@ def _classify_interval(
     contour_bridge_rejections: list[dict[str, Any]],
     f0_spans: list[dict[str, Any]],
     low_f0_spans: list[dict[str, Any]],
+    selected_rejected_candidates: list[dict[str, Any]],
 ) -> dict[str, Any]:
     start = float(interval["start"])
     end = float(interval["end"])
@@ -520,6 +540,7 @@ def _classify_interval(
     score_inside = _records_overlapping(score_ir_notes, start, end)
     contours_inside = _records_overlapping(pitch_contours, start, end)
     bridge_rejections_inside = _records_overlapping(contour_bridge_rejections, start, end)
+    selector_rejections_inside = _records_overlapping(selected_rejected_candidates, start, end)
     f0_overlap = _span_overlap_summary(f0_spans, start, end)
     low_f0_overlap = _span_overlap_summary(low_f0_spans, start, end)
 
@@ -553,6 +574,10 @@ def _classify_interval(
             "contour_bridge_rejections_in_gap": len(bridge_rejections_inside),
             "top_contour_bridge_rejections": _compact_bridge_rejection_records(bridge_rejections_inside),
             "top_contour_bridge_segmentation_summaries": _compact_bridge_segmentation_summaries(bridge_rejections_inside),
+            "debug_attribution": _debug_attribution_summary(
+                selected_rejected_candidates=selector_rejections_inside,
+                contour_bridge_rejections=bridge_rejections_inside,
+            ),
             "selector_stage_reason_counts": _selector_stage_reason_counts(deleted_inside, selected_notes=selected_notes),
             "top_selector_removed_candidates": _compact_selector_removed_candidates(deleted_inside, selected_notes=selected_notes),
             "candidate_formation_opportunity": _candidate_formation_opportunity(
@@ -664,6 +689,13 @@ def _candidate_records(payload: Any, *, source: str) -> list[dict[str, Any]]:
         items = []
         prefix = source
     return _records_from_items(items if isinstance(items, list) else [], kind=source, prefix=prefix)
+
+
+def _selected_rejected_candidate_records(payload: Any) -> list[dict[str, Any]]:
+    if not isinstance(payload, dict):
+        return []
+    items = payload.get("rejected_candidates") if isinstance(payload.get("rejected_candidates"), list) else []
+    return _records_from_items(items, kind="selected_rejected_candidate", prefix="selected_rejected")
 
 
 def _contour_bridge_summary(candidate_payload: Any) -> dict[str, Any]:
@@ -820,6 +852,7 @@ def _compact_segmentation_attempt_summary(summary: Any) -> dict[str, Any] | None
     if not isinstance(summary, dict):
         return None
     attempts = summary.get("attempts") if isinstance(summary.get("attempts"), list) else []
+    compact_attempts = [_compact_segmentation_attempt(item) for item in attempts[:TOP_LIMIT] if isinstance(item, dict)]
     return {
         "enabled": summary.get("enabled"),
         "candidate_count": summary.get("candidate_count"),
@@ -830,7 +863,11 @@ def _compact_segmentation_attempt_summary(summary: Any) -> dict[str, Any] | None
         "guard_reason_counts": dict(summary.get("guard_reason_counts") or {})
         if isinstance(summary.get("guard_reason_counts"), dict)
         else {},
-        "attempts": [_compact_segmentation_attempt(item) for item in attempts[:TOP_LIMIT] if isinstance(item, dict)],
+        "quality_factor_stats": _segmentation_evidence_stats(attempts, "quality_factor"),
+        "mad_semitones_stats": _segmentation_evidence_stats(attempts, "mad_semitones"),
+        "span_semitones_stats": _segmentation_evidence_stats(attempts, "span_semitones"),
+        "attempt_guard_reason_counts": _guard_reason_counts(attempts),
+        "attempts": compact_attempts,
     }
 
 
@@ -882,12 +919,88 @@ def _compact_selector_removed_candidates(
     return rows
 
 
+def _debug_attribution_summary(
+    *,
+    selected_rejected_candidates: list[dict[str, Any]],
+    contour_bridge_rejections: list[dict[str, Any]],
+) -> dict[str, Any]:
+    selector_summary = _selector_rejected_segmentation_summary(selected_rejected_candidates)
+    bridge_summary = _bridge_rejected_segmentation_summary(contour_bridge_rejections)
+    reason_codes: list[str] = []
+    reason_codes.extend(selector_summary.get("reason_codes") or [])
+    reason_codes.extend(bridge_summary.get("reason_codes") or [])
+    return {
+        "diagnostic_only": True,
+        "production_mutation_allowed": False,
+        "reason_codes": sorted(set(str(code) for code in reason_codes if code)),
+        "selector_rejected_segmentation_summary": selector_summary,
+        "bridge_rejected_segmentation_summary": bridge_summary,
+    }
+
+
+def _selector_rejected_segmentation_summary(candidates: list[dict[str, Any]]) -> dict[str, Any]:
+    with_evidence = [candidate for candidate in candidates if isinstance(candidate.get("segmentation_evidence"), dict) and candidate.get("segmentation_evidence")]
+    reason_codes: list[str] = []
+    if any((_as_float((candidate.get("segmentation_evidence") or {}).get("quality_factor")) or 1.0) < 0.55 for candidate in with_evidence):
+        reason_codes.append(DEBUG_ATTR_SELECTOR_REJECTED_WEAK_SEGMENT)
+    if any(
+        ((_as_float((candidate.get("segmentation_evidence") or {}).get("mad_semitones")) or 0.0) >= 1.0)
+        or ((_as_float((candidate.get("segmentation_evidence") or {}).get("span_semitones")) or 0.0) >= 3.0)
+        for candidate in with_evidence
+    ):
+        reason_codes.append(DEBUG_ATTR_SELECTOR_REJECTED_UNSTABLE_SEGMENT)
+    return {
+        "count": len(candidates),
+        "with_segmentation_evidence_count": len(with_evidence),
+        "reason_codes": sorted(set(reason_codes)),
+        "reason_code_counts": _reason_code_counts(candidates),
+        "quality_factor_stats": _record_segmentation_evidence_stats(with_evidence, "quality_factor"),
+        "mad_semitones_stats": _record_segmentation_evidence_stats(with_evidence, "mad_semitones"),
+        "span_semitones_stats": _record_segmentation_evidence_stats(with_evidence, "span_semitones"),
+        "examples": _compact_selector_removed_candidates(with_evidence, selected_notes=[])[: min(TOP_LIMIT, 5)],
+    }
+
+
+def _bridge_rejected_segmentation_summary(records: list[dict[str, Any]]) -> dict[str, Any]:
+    attempts: list[dict[str, Any]] = []
+    guard_reason_counts: Counter[str] = Counter()
+    for record in records:
+        evidence = record.get("contour_bridge_evidence") if isinstance(record.get("contour_bridge_evidence"), dict) else {}
+        summary = evidence.get("segmentation_attempt_summary") if isinstance(evidence.get("segmentation_attempt_summary"), dict) else {}
+        for reason, count in (summary.get("guard_reason_counts") or {}).items() if isinstance(summary.get("guard_reason_counts"), dict) else []:
+            guard_reason_counts[str(reason)] += int(count or 0)
+        for attempt in summary.get("attempts") if isinstance(summary.get("attempts"), list) else []:
+            if isinstance(attempt, dict):
+                attempts.append(attempt)
+                for reason in attempt.get("guard_reason_codes") or [] if isinstance(attempt.get("guard_reason_codes"), list) else []:
+                    guard_reason_counts[str(reason)] += 1
+
+    reason_codes: list[str] = []
+    if records or attempts:
+        reason_codes.append(DEBUG_ATTR_BRIDGE_SEGMENTATION_REJECTED)
+    if any((_as_float((attempt.get("segmentation_evidence") or {}).get("quality_factor")) or 1.0) < 0.55 for attempt in attempts):
+        reason_codes.append(DEBUG_ATTR_BRIDGE_SEGMENTATION_WEAK_QUALITY)
+    return {
+        "count": len(records),
+        "attempt_count": len(attempts),
+        "reason_codes": sorted(set(reason_codes)),
+        "guard_reason_counts": dict(sorted(guard_reason_counts.items())),
+        "quality_factor_stats": _segmentation_evidence_stats(attempts, "quality_factor"),
+        "mad_semitones_stats": _segmentation_evidence_stats(attempts, "mad_semitones"),
+        "span_semitones_stats": _segmentation_evidence_stats(attempts, "span_semitones"),
+        "examples": [_compact_segmentation_attempt(attempt) for attempt in attempts[: min(TOP_LIMIT, 5)]],
+    }
+
+
 def _compact_note_segmentation_evidence(evidence: Any) -> dict[str, Any] | None:
     if not isinstance(evidence, dict) or not evidence:
         return None
     keys = [
         "backend",
+        "start_frame_index",
+        "end_frame_index",
         "voiced_frame_count",
+        "frame_hop_sec",
         "avg_confidence",
         "adjusted_confidence",
         "quality_factor",
@@ -899,6 +1012,58 @@ def _compact_note_segmentation_evidence(evidence: Any) -> dict[str, Any] | None:
         "jump_threshold_semitones",
     ]
     return {key: evidence.get(key) for key in keys if key in evidence}
+
+
+def _record_segmentation_evidence_stats(records: list[dict[str, Any]], key: str) -> dict[str, Any] | None:
+    values = []
+    for record in records:
+        evidence = record.get("segmentation_evidence") if isinstance(record.get("segmentation_evidence"), dict) else {}
+        value = _as_float(evidence.get(key))
+        if value is not None and math.isfinite(value):
+            values.append(value)
+    return _numeric_stats(values)
+
+
+def _segmentation_evidence_stats(items: list[Any], key: str) -> dict[str, Any] | None:
+    values = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        evidence = item.get("segmentation_evidence") if isinstance(item.get("segmentation_evidence"), dict) else {}
+        value = _as_float(evidence.get(key))
+        if value is not None and math.isfinite(value):
+            values.append(value)
+    return _numeric_stats(values)
+
+
+def _numeric_stats(values: list[float]) -> dict[str, Any] | None:
+    if not values:
+        return None
+    ordered = sorted(float(value) for value in values)
+    return {
+        "count": len(ordered),
+        "min": _round(ordered[0]),
+        "median": _round(median(ordered)),
+        "max": _round(ordered[-1]),
+    }
+
+
+def _reason_code_counts(records: list[dict[str, Any]]) -> dict[str, int]:
+    counts: Counter[str] = Counter()
+    for record in records:
+        for reason in record.get("reason_codes") or [] if isinstance(record.get("reason_codes"), list) else []:
+            counts[str(reason)] += 1
+    return dict(sorted(counts.items()))
+
+
+def _guard_reason_counts(items: list[Any]) -> dict[str, int]:
+    counts: Counter[str] = Counter()
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        for reason in item.get("guard_reason_codes") or [] if isinstance(item.get("guard_reason_codes"), list) else []:
+            counts[str(reason)] += 1
+    return dict(sorted(counts.items()))
 
 
 def _selector_stage_reason(candidate: dict[str, Any], *, selected_notes: list[dict[str, Any]]) -> str:

@@ -10,6 +10,9 @@ from app.modules.benchmark.midi_metrics import MidiMetricConfig, NoteEvent
 from app.modules.benchmark.reason_codes import (
     CANDIDATE_FORMATION_LOW_OCTAVE_CLUSTER,
     CANDIDATE_FORMATION_SPLITS_BIG_GAP,
+    DEBUG_ATTR_BRIDGE_SEGMENTATION_REJECTED,
+    DEBUG_ATTR_SELECTOR_REJECTED_UNSTABLE_SEGMENT,
+    DEBUG_ATTR_SELECTOR_REJECTED_WEAK_SEGMENT,
     GAP_ATTR_CANDIDATE_EXISTS_SELECTOR_REMOVED,
     GAP_ATTR_F0_EXISTS_NO_CANDIDATE,
     GAP_ATTR_QUANTIZATION_EXPORT_INDUCED,
@@ -87,7 +90,21 @@ class GapAttributionTests(unittest.TestCase):
                     "selected_notes": [
                         _selected("raw_left", 0.0, 0.4, 60),
                         _selected("raw_right", 2.0, 2.4, 64),
-                    ]
+                    ],
+                    "rejected_candidates": [
+                        {
+                            **_candidate("raw_low", 1.0, 1.3, 46, confidence=0.8),
+                            "segmentation_evidence": {
+                                "backend": "rmvpe",
+                                "start_frame_index": 100,
+                                "end_frame_index": 130,
+                                "frame_hop_sec": 0.01,
+                                "quality_factor": 0.42,
+                                "mad_semitones": 1.2,
+                                "span_semitones": 3.4,
+                            },
+                        }
+                    ],
                 },
             )
 
@@ -107,6 +124,14 @@ class GapAttributionTests(unittest.TestCase):
             gap_evidence = result["top_gaps"][0]["evidence"]
             self.assertEqual(gap_evidence["selector_stage_reason_counts"], {SELECTOR_STAGE_PITCH_RANGE: 1})
             self.assertEqual(gap_evidence["top_selector_removed_candidates"][0]["selector_stage_reason"], SELECTOR_STAGE_PITCH_RANGE)
+            debug_summary = gap_evidence["debug_attribution"]["selector_rejected_segmentation_summary"]
+            self.assertEqual(debug_summary["quality_factor_stats"]["median"], 0.42)
+            self.assertEqual(debug_summary["span_semitones_stats"]["median"], 3.4)
+            self.assertIn(DEBUG_ATTR_SELECTOR_REJECTED_WEAK_SEGMENT, debug_summary["reason_codes"])
+            self.assertIn(DEBUG_ATTR_SELECTOR_REJECTED_UNSTABLE_SEGMENT, debug_summary["reason_codes"])
+            compact_evidence = debug_summary["examples"][0]["segmentation_evidence"]
+            self.assertEqual(compact_evidence["start_frame_index"], 100)
+            self.assertEqual(compact_evidence["frame_hop_sec"], 0.01)
 
     def test_gap_selector_removed_includes_candidate_formation_opportunity(self) -> None:
         with TemporaryDirectory() as tmp:
@@ -366,7 +391,11 @@ class GapAttributionTests(unittest.TestCase):
             self.assertEqual(rejection["guard_reason_codes"], ["contour_candidate_no_local_context"])
             summary = evidence["top_contour_bridge_segmentation_summaries"][0]
             self.assertEqual(summary["reason_codes"], ["contour_segmentation_all_segments_rejected"])
+            self.assertEqual(summary["attempt_guard_reason_counts"], {"contour_candidate_no_local_context": 1})
             self.assertEqual(summary["attempts"][0]["segment_frame_count"], 8)
+            debug_summary = evidence["debug_attribution"]["bridge_rejected_segmentation_summary"]
+            self.assertIn(DEBUG_ATTR_BRIDGE_SEGMENTATION_REJECTED, debug_summary["reason_codes"])
+            self.assertEqual(debug_summary["guard_reason_counts"], {"contour_candidate_no_local_context": 2})
             self.assertTrue(result["diagnostic_only"])
             self.assertFalse(result["production_mutation_allowed"])
 

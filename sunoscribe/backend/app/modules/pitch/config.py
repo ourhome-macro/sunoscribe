@@ -32,6 +32,8 @@ class PitchDetectionConfig:
     rmvpe_note_mad_bad_semitones: float = 1.6
     rmvpe_note_span_soft_semitones: float = 1.2
     rmvpe_note_span_hard_semitones: float = 6.0
+    rmvpe_segmentation_strategy: str = "dp_viterbi"  # "dp_viterbi" / "greedy"
+    rmvpe_dp_pitch_radius_semitones: int = 2
 
     # CREPE settings
     crepe_model_capacity: str = "full"  # tiny/small/medium/large/full

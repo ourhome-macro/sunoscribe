@@ -50,3 +50,8 @@ CANDIDATE_FORMATION_PITCH_OUT_OF_RANGE = "candidate_formation_pitch_out_of_range
 CANDIDATE_FORMATION_SPLITS_BIG_GAP = "candidate_formation_splits_big_gap"
 CANDIDATE_FORMATION_TOO_SHORT = "candidate_formation_too_short"
 CANDIDATE_FORMATION_SAFE = "candidate_formation_safe"
+
+DEBUG_ATTR_SELECTOR_REJECTED_WEAK_SEGMENT = "debug_attr_selector_rejected_weak_segment"
+DEBUG_ATTR_SELECTOR_REJECTED_UNSTABLE_SEGMENT = "debug_attr_selector_rejected_unstable_segment"
+DEBUG_ATTR_BRIDGE_SEGMENTATION_REJECTED = "debug_attr_bridge_segmentation_rejected"
+DEBUG_ATTR_BRIDGE_SEGMENTATION_WEAK_QUALITY = "debug_attr_bridge_segmentation_weak_quality"
