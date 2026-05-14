@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import unittest
 
@@ -135,6 +135,44 @@ class TestRuleBasedMelodySelector(unittest.TestCase):
         self.assertEqual(bridged["contour_bridge_evidence"]["source_contour_id"], "pc_1")
         self.assertEqual(bridged["contour_bridge_guard_reason_codes"], [])
         self.assertEqual(result["summary"]["input_source"], "melody_candidates.selected_notes_preselected+contour_bridge_raw_notes")
+    def test_selection_artifact_preserves_segmentation_evidence_for_diagnostics(self) -> None:
+        result = RuleBasedMelodySelector(MelodySelectionConfig(phrase_postprocess_enabled=False)).select(
+            note_candidates={
+                "melody_candidates": {
+                    "notes": [
+                        {
+                            "id": "raw_diag",
+                            "start_time": 0.0,
+                            "end_time": 0.4,
+                            "pitch": "C4",
+                            "confidence": 0.9,
+                            "segmentation_evidence": {
+                                "backend": "rmvpe",
+                                "quality_factor": 0.82,
+                                "adjusted_confidence": 0.73,
+                            },
+                        },
+                        {
+                            "id": "rejected_diag",
+                            "start_time": 1.0,
+                            "end_time": 1.4,
+                            "pitch": "C4",
+                            "confidence": 0.1,
+                            "segmentation_evidence": {
+                                "backend": "rmvpe",
+                                "quality_factor": 0.31,
+                                "adjusted_confidence": 0.1,
+                            },
+                        },
+                    ]
+                }
+            }
+        )
+
+        selected = next(item for item in result["selected_notes"] if item["candidate_id"] == "raw_diag")
+        rejected = next(item for item in result["rejected_candidates"] if item["candidate_id"] == "rejected_diag")
+        self.assertEqual(selected["segmentation_evidence"]["quality_factor"], 0.82)
+        self.assertEqual(rejected["segmentation_evidence"]["quality_factor"], 0.31)
 
 
     def test_post_f0_contour_bridge_creates_missing_high_confidence_contour(self) -> None:

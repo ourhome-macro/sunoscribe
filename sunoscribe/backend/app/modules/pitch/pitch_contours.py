@@ -161,6 +161,7 @@ class PitchContourBuilder:
             "vibrato_extent_cents": _round_or_none(extent_cents if has_vibrato else None),
             "has_vibrato": bool(has_vibrato),
             "has_glide": bool(has_glide),
+            "frame_samples": _frame_samples(frames),
             "source": "f0_track",
             "reason_codes": _unique(reason_codes),
         }
@@ -194,6 +195,23 @@ def _safe_float(value: Any) -> float | None:
 
 def _round_or_none(value: float | None) -> float | None:
     return round(float(value), 6) if value is not None and math.isfinite(float(value)) else None
+
+
+def _frame_samples(frames: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    samples: list[dict[str, Any]] = []
+    for frame in frames:
+        time_sec = _safe_float(frame.get("time_sec"))
+        if time_sec is None:
+            continue
+        samples.append(
+            {
+                "time_sec": round(float(time_sec), 6),
+                "pitch_midi": _round_or_none(_safe_float(frame.get("midi_float"))),
+                "confidence": _round_or_none(_safe_float(frame.get("confidence"))),
+                "voiced": bool(frame.get("voiced")),
+            }
+        )
+    return samples
 
 
 def _turn_count(values: list[float]) -> int:

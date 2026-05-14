@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import unittest
 
@@ -25,6 +25,9 @@ class TestPitchContourBuilder(unittest.TestCase):
         contour = payload["contours"][0]
         self.assertEqual(contour["frame_count"], 3)
         self.assertAlmostEqual(contour["pitch_center_midi"], 60.0, places=1)
+        self.assertEqual(len(contour["frame_samples"]), 3)
+        self.assertEqual(contour["frame_samples"][0]["time_sec"], 0.0)
+        self.assertEqual(contour["frame_samples"][0]["pitch_midi"], 60.0)
 
     def test_bridges_short_unvoiced_gap(self) -> None:
         builder = PitchContourBuilder(PitchContourConfig(max_unvoiced_gap_sec=0.04))

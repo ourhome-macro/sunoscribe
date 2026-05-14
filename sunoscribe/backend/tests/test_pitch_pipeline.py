@@ -23,11 +23,56 @@ class TestPitchPipeline(unittest.TestCase):
             frequencies=frequencies,
             confidences=confidences,
             duration_sec=float(times[-1]) + 0.01,
+            backend="rmvpe",
         )
 
         self.assertEqual(len(notes), 1)
         self.assertEqual(notes[0].pitch, "C4")
         self.assertGreater(notes[0].end_time - notes[0].start_time, 0.35)
+        evidence = notes[0].segmentation_evidence
+        self.assertEqual(evidence["backend"], "rmvpe")
+        self.assertEqual(evidence["voiced_frame_count"], 40)
+        self.assertIn("quality_factor", evidence)
+        self.assertIn("adjusted_confidence", evidence)
+    def test_safe_detect_candidates_preserves_note_debug_metadata(self):
+        pipeline = PitchPipeline()
+        source = Note(
+            pitch="C4",
+            start_time=0.0,
+            end_time=0.4,
+            confidence=0.9,
+            candidate_id="raw_1",
+            reason_codes=[CONTOUR_TO_CANDIDATE_BRIDGE],
+            segmentation_evidence={"backend": "rmvpe", "quality_factor": 0.82},
+            contour_bridge_evidence={"source_contour_id": "pc_1"},
+        )
+        cache = {}
+        artifacts = {}
+        warnings = []
+
+        with patch.object(pipeline, "_detect_with_backend", return_value=[source]):
+            first = pipeline._safe_detect_candidates(
+                audio_path="dummy.wav",
+                cache=cache,
+                artifact_cache=artifacts,
+                warnings=warnings,
+                role="lead",
+                backend="rmvpe",
+            )
+        second = pipeline._safe_detect_candidates(
+            audio_path="dummy.wav",
+            cache=cache,
+            artifact_cache=artifacts,
+            warnings=warnings,
+            role="lead",
+            backend="rmvpe",
+        )
+
+        self.assertEqual(first[0].candidate_id, "raw_1")
+        self.assertEqual(first[0].segmentation_evidence["quality_factor"], 0.82)
+        self.assertEqual(first[0].contour_bridge_evidence["source_contour_id"], "pc_1")
+        self.assertEqual(second[0].candidate_id, "raw_1")
+        self.assertEqual(second[0].segmentation_evidence["backend"], "rmvpe")
 
     def test_run_with_mocks(self):
         pipeline = PitchPipeline()

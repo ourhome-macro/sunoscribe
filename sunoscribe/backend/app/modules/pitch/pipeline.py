@@ -19,6 +19,7 @@ from .melody_source_arbitrator import MelodySourceArbitrator
 from .pitch_contours import PitchContourBuilder
 from .midi_exporter import MidiExporter
 from .quantizer import NoteQuantizer
+from .reason_codes import CONTOUR_TO_CANDIDATE_BRIDGE
 from .rhythm_analyzer import RhythmAnalyzer
 from .types import (
     ArrangementDecision,
@@ -247,15 +248,7 @@ class PitchPipeline:
         if cache_key in cache:
             if cache_key not in artifact_cache:
                 artifact_cache[cache_key] = None
-            return [
-                Note(
-                    pitch=str(note.pitch),
-                    start_time=float(note.start_time),
-                    end_time=float(note.end_time),
-                    confidence=float(note.confidence),
-                )
-                for note in cache[cache_key]
-            ]
+            return [self._clone_note(note) for note in cache[cache_key]]
 
         try:
             detected = self._detect_with_backend(normalized_path, backend=backend)
@@ -275,15 +268,7 @@ class PitchPipeline:
         artifact_cache[cache_key] = self._clone_detection_artifacts(
             getattr(self.detector, "last_detection_artifacts", None)
         )
-        return [
-            Note(
-                pitch=str(note.pitch),
-                start_time=float(note.start_time),
-                end_time=float(note.end_time),
-                confidence=float(note.confidence),
-            )
-            for note in detected
-        ]
+        return [self._clone_note(note) for note in detected]
 
     def _detect_with_backend(self, audio_path: str, *, backend: str | None = None) -> list[Note]:
         if not backend:
@@ -384,7 +369,7 @@ class PitchPipeline:
             "contour_bridge_candidate_count": sum(
                 1
                 for note in notes or []
-                if getattr(note, "candidate_origin", None) == "contour_to_candidate_bridge"
+                if getattr(note, "candidate_origin", None) == CONTOUR_TO_CANDIDATE_BRIDGE
             ),
         }
 
@@ -502,14 +487,7 @@ class PitchPipeline:
         candidates: list[Note] = []
         for note in decision.selected_support_notes:
             if any(self._note_overlaps_window(note, float(segment.start_time), float(segment.end_time)) for segment in segments):
-                candidates.append(
-                    Note(
-                        pitch=str(note.pitch),
-                        start_time=float(note.start_time),
-                        end_time=float(note.end_time),
-                        confidence=float(note.confidence),
-                    )
-                )
+                candidates.append(self._clone_note(note))
         return candidates
 
     def _select_instrumental_topline(self, notes: list[Note]) -> list[Note]:
@@ -560,15 +538,28 @@ class PitchPipeline:
             resolved.append(item)
 
         return [
-            Note(
-                pitch=str(item.note.pitch),
-                start_time=float(item.note.start_time),
-                end_time=float(item.note.end_time),
-                confidence=float(item.note.confidence),
-            )
+            self._clone_note(item.note)
             for item in resolved
             if float(item.note.end_time) > float(item.note.start_time)
         ]
+
+    @staticmethod
+    def _clone_note(note: Note) -> Note:
+        return Note(
+            pitch=str(note.pitch),
+            start_time=float(note.start_time),
+            end_time=float(note.end_time),
+            confidence=float(note.confidence),
+            reason_codes=list(getattr(note, "reason_codes", []) or []),
+            candidate_id=getattr(note, "candidate_id", None),
+            source_candidate_id=getattr(note, "source_candidate_id", None),
+            source_candidate_ids=list(getattr(note, "source_candidate_ids", []) or []),
+            source_contour_ids=list(getattr(note, "source_contour_ids", []) or []),
+            candidate_origin=getattr(note, "candidate_origin", None),
+            contour_bridge_evidence=dict(getattr(note, "contour_bridge_evidence", {}) or {}),
+            contour_bridge_guard_reason_codes=list(getattr(note, "contour_bridge_guard_reason_codes", []) or []),
+            segmentation_evidence=dict(getattr(note, "segmentation_evidence", {}) or {}),
+        )
 
     @staticmethod
     def _hook_priority_key(item: _ScoredHookNote) -> tuple[float, int, float, float]:

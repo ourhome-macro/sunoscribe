@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 from collections import Counter
 from dataclasses import dataclass
@@ -229,6 +229,8 @@ class RuleBasedMelodySelector:
             normalized["contour_bridge_evidence"] = dict(note["contour_bridge_evidence"])
         if "contour_bridge_guard_reason_codes" in note:
             normalized["contour_bridge_guard_reason_codes"] = list(note.get("contour_bridge_guard_reason_codes") or [])
+        if isinstance(note.get("segmentation_evidence"), dict):
+            normalized["segmentation_evidence"] = dict(note["segmentation_evidence"])
         return normalized
 
     def _candidate_from_contour(self, contour: dict[str, Any], index: int) -> dict[str, Any]:
@@ -550,6 +552,8 @@ class RuleBasedMelodySelector:
             selected["contour_bridge_evidence"] = dict(candidate["contour_bridge_evidence"])
         if "contour_bridge_guard_reason_codes" in candidate:
             selected["contour_bridge_guard_reason_codes"] = list(candidate.get("contour_bridge_guard_reason_codes") or [])
+        if isinstance(candidate.get("segmentation_evidence"), dict):
+            selected["segmentation_evidence"] = dict(candidate["segmentation_evidence"])
         if candidate.get("candidate_origin") is not None:
             selected["candidate_origin"] = candidate.get("candidate_origin")
         return selected
@@ -575,6 +579,8 @@ class RuleBasedMelodySelector:
             selected["contour_bridge_evidence"] = dict(candidate["contour_bridge_evidence"])
         if "contour_bridge_guard_reason_codes" in candidate:
             selected["contour_bridge_guard_reason_codes"] = list(candidate.get("contour_bridge_guard_reason_codes") or [])
+        if isinstance(candidate.get("segmentation_evidence"), dict):
+            selected["segmentation_evidence"] = dict(candidate["segmentation_evidence"])
         if candidate.get("candidate_origin") is not None:
             selected["candidate_origin"] = candidate.get("candidate_origin")
         return selected
@@ -618,7 +624,7 @@ class RuleBasedMelodySelector:
     def _rejected(candidate: dict[str, Any], reasons: list[str]) -> dict[str, Any]:
         reason_codes = _unique(reasons + ([UNCERTAIN] if reasons else []))
         pitch_center = candidate.get("pitch_center_midi")
-        return {
+        rejected = {
             "candidate_id": candidate["candidate_id"],
             "start_time_sec": round(float(candidate["start_time_sec"]), 6),
             "end_time_sec": round(float(candidate["end_time_sec"]), 6),
@@ -626,6 +632,9 @@ class RuleBasedMelodySelector:
             "confidence": round(float(candidate["confidence"]), 6),
             "reason_codes": reason_codes,
         }
+        if isinstance(candidate.get("segmentation_evidence"), dict):
+            rejected["segmentation_evidence"] = dict(candidate["segmentation_evidence"])
+        return rejected
 
 
 def selected_notes_to_pitch_notes(selected_melody: dict[str, Any] | None) -> list[dict[str, Any]]:

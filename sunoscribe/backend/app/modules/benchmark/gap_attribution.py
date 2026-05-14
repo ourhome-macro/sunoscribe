@@ -9,6 +9,16 @@ from typing import Any
 
 from .midi_metrics import MidiMetricConfig, NoteEvent, compute_midi_continuity_metrics, compute_midi_metrics
 from .reason_codes import (
+    CANDIDATE_FORMATION_CONTEXT_PITCH_MISMATCH,
+    CANDIDATE_FORMATION_LOW_CONFIDENCE,
+    CANDIDATE_FORMATION_LOW_COVERAGE,
+    CANDIDATE_FORMATION_LOW_OCTAVE_CLUSTER,
+    CANDIDATE_FORMATION_NO_LOCAL_CONTEXT,
+    CANDIDATE_FORMATION_PITCH_OUT_OF_RANGE,
+    CANDIDATE_FORMATION_SAFE,
+    CANDIDATE_FORMATION_SHORT_FRAGMENT_CLUSTER,
+    CANDIDATE_FORMATION_SPLITS_BIG_GAP,
+    CANDIDATE_FORMATION_TOO_SHORT,
     DELETED_CANDIDATE_LARGE_PITCH_JUMP,
     DELETED_CANDIDATE_LOW_CONFIDENCE,
     DELETED_CANDIDATE_OVERLAP,
@@ -26,7 +36,15 @@ from .reason_codes import (
     LOST_EXPECTED_RAW_F0_MISSING,
     LOST_EXPECTED_REFERENCE_ONLY,
     LOST_EXPECTED_UNCLASSIFIED,
+    SELECTOR_STAGE_CONFLICT_OR_BIG_LEAP,
+    SELECTOR_STAGE_FINAL_SHORT_CLEANUP,
+    SELECTOR_STAGE_LOW_CONFIDENCE,
+    SELECTOR_STAGE_PITCH_RANGE,
+    SELECTOR_STAGE_POSTPROCESS_REMOVED,
+    SELECTOR_STAGE_SHORT_DURATION,
+    SELECTOR_STAGE_UNKNOWN,
 )
+from app.modules.pitch.reason_codes import BRIDGE_FROM_F0_CONTOUR, CONTOUR_TO_CANDIDATE_BRIDGE
 
 
 GAP_THRESHOLD_SEC = 0.5
@@ -75,6 +93,7 @@ def build_gap_attribution(
     quantized_notes = _artifact_records(quantized_payload, kind="quantized_notes")
     score_ir_notes = _artifact_records(score_ir_payload, kind="score_ir")
     pitch_contours = _contour_records(contour_payload)
+    contour_bridge_rejections = _contour_bridge_rejection_records(candidate_payload)
     f0_frames = _f0_frames(f0_payload)
     f0_spans = _voiced_spans(f0_frames)
     low_f0_spans = _low_confidence_spans(f0_frames, _vocal_activity_segments(vocal_payload, f0_payload))
@@ -100,6 +119,7 @@ def build_gap_attribution(
         quantized_notes=quantized_notes,
         score_ir_notes=score_ir_notes,
         pitch_contours=pitch_contours,
+        contour_bridge_rejections=contour_bridge_rejections,
         f0_spans=f0_spans,
         low_f0_spans=low_f0_spans,
     )
@@ -111,6 +131,7 @@ def build_gap_attribution(
         score_ir_notes=score_ir_notes,
         predicted_records=_note_events_to_records(predicted_notes, prefix="predicted_midi"),
         pitch_contours=pitch_contours,
+        contour_bridge_rejections=contour_bridge_rejections,
         f0_spans=f0_spans,
         low_f0_spans=low_f0_spans,
         pitch_shift_for_reference_eval=octave_shift,
@@ -177,6 +198,7 @@ def build_gap_attribution(
             score_ir_notes=score_ir_notes,
             predicted_notes=predicted_notes,
         ),
+        "contour_to_candidate_bridge": _contour_bridge_summary(candidate_payload),
         "top_gaps": top_gaps,
         "top_lost_expected_notes": top_lost_expected,
         "top_deleted_candidates": top_deleted_candidates,
@@ -208,6 +230,7 @@ def build_gap_attribution_markdown(
     reference = gap_attribution.get("reference_alignment") if isinstance(gap_attribution.get("reference_alignment"), dict) else {}
     layer_summary = gap_attribution.get("layer_summary") if isinstance(gap_attribution.get("layer_summary"), dict) else {}
     retention = gap_attribution.get("retention") if isinstance(gap_attribution.get("retention"), dict) else {}
+    contour_bridge = gap_attribution.get("contour_to_candidate_bridge") if isinstance(gap_attribution.get("contour_to_candidate_bridge"), dict) else {}
     reason_counts = gap_attribution.get("reason_counts") if isinstance(gap_attribution.get("reason_counts"), dict) else {}
     fix_focus = gap_attribution.get("recommended_fix_focus") if isinstance(gap_attribution.get("recommended_fix_focus"), list) else []
     quantization_export = gap_attribution.get("quantization_export") if isinstance(gap_attribution.get("quantization_export"), dict) else {}
@@ -263,6 +286,15 @@ def build_gap_attribution_markdown(
             f"- quantized_to_score_ir_count_ratio: {_fmt(retention.get('quantized_to_score_ir_count_ratio'))}",
             f"- score_ir_to_predicted_count_ratio: {_fmt(retention.get('score_ir_to_predicted_count_ratio'))}",
             "",
+            "## Contour-To-Candidate Bridge",
+            f"- enabled: {_fmt(contour_bridge.get('enabled'))}",
+            f"- candidate_count: {_fmt(contour_bridge.get('candidate_count'))}",
+            f"- accepted_count: {_fmt(contour_bridge.get('accepted_count'))}",
+            f"- rejected_count: {_fmt(contour_bridge.get('rejected_count'))}",
+            f"- raw_bridge_candidate_count: {_fmt(contour_bridge.get('raw_bridge_candidate_count'))}",
+            f"- selected_bridge_candidate_count: {_fmt(contour_bridge.get('selected_bridge_candidate_count'))}",
+            f"- guard_reason_counts: {_fmt(contour_bridge.get('guard_reason_counts'))}",
+            "",
             "## Reason Counts",
             f"- gaps: {_fmt(reason_counts.get('gaps'))}",
             f"- lost_expected_notes: {_fmt(reason_counts.get('lost_expected_notes'))}",
@@ -302,6 +334,7 @@ def _top_gap_attributions(
     quantized_notes: list[dict[str, Any]],
     score_ir_notes: list[dict[str, Any]],
     pitch_contours: list[dict[str, Any]],
+    contour_bridge_rejections: list[dict[str, Any]],
     f0_spans: list[dict[str, Any]],
     low_f0_spans: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
@@ -323,6 +356,7 @@ def _top_gap_attributions(
             quantized_notes=quantized_notes,
             score_ir_notes=score_ir_notes,
             pitch_contours=pitch_contours,
+            contour_bridge_rejections=contour_bridge_rejections,
             f0_spans=f0_spans,
             low_f0_spans=low_f0_spans,
         )
@@ -350,6 +384,7 @@ def _top_lost_expected_notes(
     score_ir_notes: list[dict[str, Any]],
     predicted_records: list[dict[str, Any]],
     pitch_contours: list[dict[str, Any]],
+    contour_bridge_rejections: list[dict[str, Any]],
     f0_spans: list[dict[str, Any]],
     low_f0_spans: list[dict[str, Any]],
     pitch_shift_for_reference_eval: int,
@@ -363,6 +398,7 @@ def _top_lost_expected_notes(
         score_matches = _records_matching_note(score_ir_notes, note, pitch_shift=pitch_shift_for_reference_eval)
         predicted_matches = _records_matching_note(predicted_records, note, pitch_shift=pitch_shift_for_reference_eval)
         contour_matches = _records_matching_note(pitch_contours, note, pitch_shift=pitch_shift_for_reference_eval, pitch_tolerance=1.5)
+        bridge_rejections = _records_overlapping(contour_bridge_rejections, note.start, note.end)
         f0_overlap = _span_overlap_summary(f0_spans, note.start, note.end, target_pitch=note.pitch, pitch_shift=pitch_shift_for_reference_eval)
         low_f0_overlap = _span_overlap_summary(low_f0_spans, note.start, note.end)
 
@@ -405,6 +441,9 @@ def _top_lost_expected_notes(
                     "score_ir_matches": len(score_matches),
                     "predicted_midi_matches": len(predicted_matches),
                     "pitch_contour_matches": len(contour_matches),
+                    "contour_bridge_rejections_in_gap": len(bridge_rejections),
+                    "top_contour_bridge_rejections": _compact_bridge_rejection_records(bridge_rejections),
+                    "top_contour_bridge_segmentation_summaries": _compact_bridge_segmentation_summaries(bridge_rejections),
                     "f0_voiced_overlap": f0_overlap,
                     "low_confidence_or_unvoiced_overlap": low_f0_overlap,
                     "pitch_shift_for_reference_eval_semitones": pitch_shift_for_reference_eval,
@@ -469,6 +508,7 @@ def _classify_interval(
     quantized_notes: list[dict[str, Any]],
     score_ir_notes: list[dict[str, Any]],
     pitch_contours: list[dict[str, Any]],
+    contour_bridge_rejections: list[dict[str, Any]],
     f0_spans: list[dict[str, Any]],
     low_f0_spans: list[dict[str, Any]],
 ) -> dict[str, Any]:
@@ -479,6 +519,7 @@ def _classify_interval(
     quantized_inside = _records_overlapping(quantized_notes, start, end)
     score_inside = _records_overlapping(score_ir_notes, start, end)
     contours_inside = _records_overlapping(pitch_contours, start, end)
+    bridge_rejections_inside = _records_overlapping(contour_bridge_rejections, start, end)
     f0_overlap = _span_overlap_summary(f0_spans, start, end)
     low_f0_overlap = _span_overlap_summary(low_f0_spans, start, end)
 
@@ -509,6 +550,18 @@ def _classify_interval(
             "quantized_notes_in_gap": len(quantized_inside),
             "score_ir_notes_in_gap": len(score_inside),
             "pitch_contours_in_gap": len(contours_inside),
+            "contour_bridge_rejections_in_gap": len(bridge_rejections_inside),
+            "top_contour_bridge_rejections": _compact_bridge_rejection_records(bridge_rejections_inside),
+            "top_contour_bridge_segmentation_summaries": _compact_bridge_segmentation_summaries(bridge_rejections_inside),
+            "selector_stage_reason_counts": _selector_stage_reason_counts(deleted_inside, selected_notes=selected_notes),
+            "top_selector_removed_candidates": _compact_selector_removed_candidates(deleted_inside, selected_notes=selected_notes),
+            "candidate_formation_opportunity": _candidate_formation_opportunity(
+                deleted_inside,
+                gap_start=start,
+                gap_end=end,
+                left_context=_previous_record(selected_notes, start),
+                right_context=_next_record(selected_notes, end),
+            ),
             "f0_voiced_overlap": f0_overlap,
             "low_confidence_or_unvoiced_overlap": low_f0_overlap,
         },
@@ -613,6 +666,383 @@ def _candidate_records(payload: Any, *, source: str) -> list[dict[str, Any]]:
     return _records_from_items(items if isinstance(items, list) else [], kind=source, prefix=prefix)
 
 
+def _contour_bridge_summary(candidate_payload: Any) -> dict[str, Any]:
+    if not isinstance(candidate_payload, dict):
+        return {"available": False}
+    melody = candidate_payload.get("melody_candidates") if isinstance(candidate_payload.get("melody_candidates"), dict) else {}
+    analysis = melody.get("analysis_info") if isinstance(melody.get("analysis_info"), dict) else {}
+    bridge = analysis.get("contour_to_candidate_bridge") if isinstance(analysis.get("contour_to_candidate_bridge"), dict) else {}
+    raw_notes = melody.get("notes") if isinstance(melody.get("notes"), list) else []
+    selected_notes = melody.get("selected_notes") if isinstance(melody.get("selected_notes"), list) else []
+    raw_bridge_notes = [note for note in raw_notes if _is_contour_bridge_note(note)]
+    selected_bridge_notes = [note for note in selected_notes if _is_contour_bridge_note(note)]
+    return {
+        "available": bool(bridge),
+        "version": bridge.get("version"),
+        "enabled": bridge.get("enabled"),
+        "candidate_count": bridge.get("candidate_count"),
+        "accepted_count": bridge.get("accepted_count"),
+        "rejected_count": bridge.get("rejected_count"),
+        "guard_reason_counts": dict(bridge.get("guard_reason_counts") or {}) if isinstance(bridge.get("guard_reason_counts"), dict) else {},
+        "accepted_candidates": _compact_bridge_items(bridge.get("accepted_candidates")),
+        "top_rejected_candidates": _compact_bridge_items(bridge.get("rejected_candidates")),
+        "raw_bridge_candidate_count": len(raw_bridge_notes),
+        "selected_bridge_candidate_count": len(selected_bridge_notes),
+        "raw_bridge_candidates": [_public_note(record) for record in _records_from_items(raw_bridge_notes, kind="raw_notes", prefix="raw_bridge")[:TOP_LIMIT]],
+        "selected_bridge_candidates": [_public_note(record) for record in _records_from_items(selected_bridge_notes, kind="legacy_selected_notes", prefix="selected_bridge")[:TOP_LIMIT]],
+    }
+
+
+def _contour_bridge_rejection_records(candidate_payload: Any) -> list[dict[str, Any]]:
+    if not isinstance(candidate_payload, dict):
+        return []
+    melody = candidate_payload.get("melody_candidates") if isinstance(candidate_payload.get("melody_candidates"), dict) else {}
+    analysis = melody.get("analysis_info") if isinstance(melody.get("analysis_info"), dict) else {}
+    bridge = analysis.get("contour_to_candidate_bridge") if isinstance(analysis.get("contour_to_candidate_bridge"), dict) else {}
+    items = bridge.get("rejected_candidates") if isinstance(bridge.get("rejected_candidates"), list) else []
+    records: list[dict[str, Any]] = []
+    for index, item in enumerate(items):
+        if not isinstance(item, dict):
+            continue
+        evidence = item.get("evidence") if isinstance(item.get("evidence"), dict) else {}
+        start = _as_float(_first_present(item, "start_time_sec", "start_time", "start"))
+        end = _as_float(_first_present(item, "end_time_sec", "end_time", "end"))
+        duration = _as_float(_first_present(item, "duration_sec", "duration"))
+        if start is None:
+            start = _as_float(_first_present(evidence, "candidate_start_time_sec", "source_start_time_sec"))
+        if end is None:
+            end = _as_float(_first_present(evidence, "candidate_end_time_sec", "source_end_time_sec"))
+        if end is None and start is not None and duration is not None:
+            end = start + duration
+        if start is None or end is None:
+            continue
+        record = {
+            "id": str(item.get("candidate_id") or f"contour_bridge_rejection_{index + 1:05d}"),
+            "kind": "contour_bridge_rejection",
+            "start_sec": float(start),
+            "end_sec": float(end),
+            "duration_sec": max(0.0, float(end) - float(start)),
+            "pitch_midi": _pitch_midi(item),
+            "confidence": _as_float(_first_present(item, "confidence", "mean_confidence")),
+            "reason_codes": list(item.get("reason_codes") or []) if isinstance(item.get("reason_codes"), list) else [],
+            "candidate_id": item.get("candidate_id"),
+            "source_contour_id": item.get("source_contour_id") or evidence.get("source_contour_id"),
+            "source_contour_ids": [str(item.get("source_contour_id") or evidence.get("source_contour_id"))]
+            if item.get("source_contour_id") or evidence.get("source_contour_id")
+            else [],
+            "candidate_origin": CONTOUR_TO_CANDIDATE_BRIDGE,
+            "contour_bridge_guard_reason_codes": list(item.get("contour_bridge_guard_reason_codes") or [])
+            if isinstance(item.get("contour_bridge_guard_reason_codes"), list)
+            else [],
+            "contour_bridge_evidence": evidence,
+        }
+        if record["pitch_midi"] is not None:
+            record["pitch_name"] = _pitch_name(int(round(float(record["pitch_midi"]))))
+        records.append(record)
+    records.sort(key=lambda item: (_start(item), _end(item), _pitch(item) or -1.0, str(item.get("id") or "")))
+    return records
+
+
+def _is_contour_bridge_note(item: Any) -> bool:
+    if not isinstance(item, dict):
+        return False
+    if str(item.get("candidate_origin") or "") == CONTOUR_TO_CANDIDATE_BRIDGE:
+        return True
+    reason_codes = [str(code) for code in item.get("reason_codes") or []] if isinstance(item.get("reason_codes"), list) else []
+    return CONTOUR_TO_CANDIDATE_BRIDGE in reason_codes or BRIDGE_FROM_F0_CONTOUR in reason_codes
+
+
+def _compact_bridge_items(items: Any) -> list[dict[str, Any]]:
+    compacted: list[dict[str, Any]] = []
+    if not isinstance(items, list):
+        return compacted
+    for item in items[:TOP_LIMIT]:
+        if not isinstance(item, dict):
+            continue
+        evidence = item.get("evidence") if isinstance(item.get("evidence"), dict) else {}
+        compacted.append(
+            {
+                "candidate_id": item.get("candidate_id"),
+                "source_contour_id": item.get("source_contour_id"),
+                "start_time_sec": _round_optional(item.get("start_time_sec")),
+                "end_time_sec": _round_optional(item.get("end_time_sec")),
+                "duration_sec": _round_optional(item.get("duration_sec")),
+                "pitch_center_midi": _round_optional(item.get("pitch_center_midi")),
+                "confidence": _round_optional(item.get("confidence")),
+                "reason_codes": list(item.get("reason_codes") or []),
+                "guard_reason_codes": list(item.get("contour_bridge_guard_reason_codes") or []),
+                "nearest_raw_gap": evidence.get("nearest_raw_gap") if isinstance(evidence.get("nearest_raw_gap"), dict) else None,
+                "raw_overlap_duration_sec": _round_optional(evidence.get("raw_overlap_duration_sec")),
+                "selected_context_overlap_duration_sec": _round_optional(evidence.get("selected_context_overlap_duration_sec")),
+                "vocal_activity_overlap_ratio": _round_optional(evidence.get("vocal_activity_overlap_ratio")),
+            }
+        )
+    return compacted
+
+
+def _compact_bridge_rejection_records(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    compacted: list[dict[str, Any]] = []
+    for record in records[:TOP_LIMIT]:
+        evidence = record.get("contour_bridge_evidence") if isinstance(record.get("contour_bridge_evidence"), dict) else {}
+        compacted.append(
+            {
+                **_public_note(record),
+                "source_contour_id": record.get("source_contour_id"),
+                "guard_reason_codes": list(record.get("contour_bridge_guard_reason_codes") or []),
+                "nearest_raw_gap": evidence.get("nearest_raw_gap") if isinstance(evidence.get("nearest_raw_gap"), dict) else None,
+                "raw_overlap_duration_sec": _round_optional(evidence.get("raw_overlap_duration_sec")),
+                "selected_context_overlap_duration_sec": _round_optional(evidence.get("selected_context_overlap_duration_sec")),
+                "vocal_activity_overlap_ratio": _round_optional(evidence.get("vocal_activity_overlap_ratio")),
+                "segmentation_attempt_summary": _compact_segmentation_attempt_summary(evidence.get("segmentation_attempt_summary")),
+            }
+        )
+    return compacted
+
+
+def _compact_bridge_segmentation_summaries(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    summaries: list[dict[str, Any]] = []
+    for record in records[:TOP_LIMIT]:
+        evidence = record.get("contour_bridge_evidence") if isinstance(record.get("contour_bridge_evidence"), dict) else {}
+        summary = _compact_segmentation_attempt_summary(evidence.get("segmentation_attempt_summary"))
+        if not summary:
+            continue
+        summaries.append(
+            {
+                "candidate_id": record.get("candidate_id"),
+                "source_contour_id": record.get("source_contour_id"),
+                **summary,
+            }
+        )
+    return summaries
+
+
+def _compact_segmentation_attempt_summary(summary: Any) -> dict[str, Any] | None:
+    if not isinstance(summary, dict):
+        return None
+    attempts = summary.get("attempts") if isinstance(summary.get("attempts"), list) else []
+    return {
+        "enabled": summary.get("enabled"),
+        "candidate_count": summary.get("candidate_count"),
+        "attempted_count": summary.get("attempted_count"),
+        "accepted_count": summary.get("accepted_count"),
+        "rejected_count": summary.get("rejected_count"),
+        "reason_codes": list(summary.get("reason_codes") or []),
+        "guard_reason_counts": dict(summary.get("guard_reason_counts") or {})
+        if isinstance(summary.get("guard_reason_counts"), dict)
+        else {},
+        "attempts": [_compact_segmentation_attempt(item) for item in attempts[:TOP_LIMIT] if isinstance(item, dict)],
+    }
+
+
+def _compact_segmentation_attempt(item: dict[str, Any]) -> dict[str, Any]:
+    segmentation_evidence = item.get("segmentation_evidence") if isinstance(item.get("segmentation_evidence"), dict) else {}
+    return {
+        "candidate_id": item.get("candidate_id"),
+        "start_time_sec": _round_optional(item.get("start_time_sec")),
+        "end_time_sec": _round_optional(item.get("end_time_sec")),
+        "duration_sec": _round_optional(item.get("duration_sec")),
+        "pitch_center_midi": _round_optional(item.get("pitch_center_midi")),
+        "confidence": _round_optional(item.get("confidence")),
+        "guard_reason_codes": list(item.get("guard_reason_codes") or []),
+        "nearest_raw_gap": item.get("nearest_raw_gap") if isinstance(item.get("nearest_raw_gap"), dict) else None,
+        "raw_overlap_duration_sec": _round_optional(item.get("raw_overlap_duration_sec")),
+        "left_context_pitch_midi": _round_optional(item.get("left_context_pitch_midi")),
+        "right_context_pitch_midi": _round_optional(item.get("right_context_pitch_midi")),
+        "left_context_gap_sec": _round_optional(item.get("left_context_gap_sec")),
+        "right_context_gap_sec": _round_optional(item.get("right_context_gap_sec")),
+        "segment_index": segmentation_evidence.get("segment_index"),
+        "segment_frame_count": segmentation_evidence.get("segment_frame_count"),
+        "segment_pitch_range_semitones": _round_optional(segmentation_evidence.get("segment_pitch_range_semitones")),
+        "segment_mean_confidence": _round_optional(segmentation_evidence.get("segment_mean_confidence")),
+    }
+
+
+def _selector_stage_reason_counts(candidates: list[dict[str, Any]], *, selected_notes: list[dict[str, Any]]) -> dict[str, int]:
+    counts: Counter[str] = Counter()
+    for candidate in candidates:
+        counts[_selector_stage_reason(candidate, selected_notes=selected_notes)] += 1
+    return dict(sorted(counts.items()))
+
+
+def _compact_selector_removed_candidates(
+    candidates: list[dict[str, Any]],
+    *,
+    selected_notes: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for candidate in candidates[:TOP_LIMIT]:
+        rows.append(
+            {
+                **_public_note(candidate),
+                "selector_stage_reason": _selector_stage_reason(candidate, selected_notes=selected_notes),
+                "segmentation_evidence": _compact_note_segmentation_evidence(candidate.get("segmentation_evidence")),
+                "nearest_selected_overlap": _max_overlap(candidate, selected_notes),
+            }
+        )
+    return rows
+
+
+def _compact_note_segmentation_evidence(evidence: Any) -> dict[str, Any] | None:
+    if not isinstance(evidence, dict) or not evidence:
+        return None
+    keys = [
+        "backend",
+        "voiced_frame_count",
+        "avg_confidence",
+        "adjusted_confidence",
+        "quality_factor",
+        "stability_factor",
+        "span_factor",
+        "mad_semitones",
+        "span_semitones",
+        "voiced_threshold",
+        "jump_threshold_semitones",
+    ]
+    return {key: evidence.get(key) for key in keys if key in evidence}
+
+
+def _selector_stage_reason(candidate: dict[str, Any], *, selected_notes: list[dict[str, Any]]) -> str:
+    pitch = _pitch(candidate)
+    confidence = _as_float(candidate.get("confidence"))
+    duration = _duration(candidate)
+    if pitch is None or pitch < 48.0 or pitch > 84.0:
+        return SELECTOR_STAGE_PITCH_RANGE
+    if duration < SHORT_CANDIDATE_THRESHOLD_SEC and confidence is not None and confidence < 0.62:
+        return SELECTOR_STAGE_SHORT_DURATION
+    if confidence is not None and confidence < 0.52:
+        return SELECTOR_STAGE_LOW_CONFIDENCE
+    if duration < SHORT_CANDIDATE_THRESHOLD_SEC:
+        return SELECTOR_STAGE_FINAL_SHORT_CLEANUP
+    if _max_overlap(candidate, selected_notes).get("duration_sec"):
+        return SELECTOR_STAGE_POSTPROCESS_REMOVED
+    jump = _candidate_pitch_jump(candidate, None, None)
+    if jump is not None and jump >= LARGE_PITCH_JUMP_SEMITONES:
+        return SELECTOR_STAGE_CONFLICT_OR_BIG_LEAP
+    return SELECTOR_STAGE_UNKNOWN
+
+
+def _candidate_formation_opportunity(
+    candidates: list[dict[str, Any]],
+    *,
+    gap_start: float,
+    gap_end: float,
+    left_context: dict[str, Any] | None,
+    right_context: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    if not candidates:
+        return None
+    ordered = sorted(candidates, key=lambda item: (_start(item), _end(item), _pitch(item) or -1.0))
+    pitches = [_pitch(item) for item in ordered]
+    durations = [_duration(item) for item in ordered]
+    confidences = [_as_float(item.get("confidence")) for item in ordered]
+    total_fragment_duration = sum(duration for duration in durations if duration > 0)
+    start = min(_start(item) for item in ordered)
+    end = max(_end(item) for item in ordered)
+    duration = max(0.0, end - start)
+    weighted_pitch = _weighted_average(
+        [(pitch, duration) for pitch, duration in zip(pitches, durations) if pitch is not None and duration > 0]
+    )
+    weighted_confidence = _weighted_average(
+        [(confidence, duration) for confidence, duration in zip(confidences, durations) if confidence is not None and duration > 0]
+    )
+    coverage_ratio = _safe_divide(total_fragment_duration, duration) if duration > 0 else None
+    shifted_pitch = weighted_pitch + 12.0 if weighted_pitch is not None and weighted_pitch < 48.0 else weighted_pitch
+    left_pitch = _pitch(left_context) if left_context is not None else None
+    right_pitch = _pitch(right_context) if right_context is not None else None
+    context_pitches = [pitch for pitch in (left_pitch, right_pitch) if pitch is not None]
+    reason_codes: list[str] = []
+    low_octave_cluster = weighted_pitch is not None and weighted_pitch < 48.0 and shifted_pitch is not None
+    if low_octave_cluster:
+        reason_codes.append(CANDIDATE_FORMATION_LOW_OCTAVE_CLUSTER)
+    elif any(duration < SHORT_CANDIDATE_THRESHOLD_SEC for duration in durations):
+        reason_codes.append(CANDIDATE_FORMATION_SHORT_FRAGMENT_CLUSTER)
+    if duration < 0.18:
+        reason_codes.append(CANDIDATE_FORMATION_TOO_SHORT)
+    if weighted_confidence is None or weighted_confidence < 0.62:
+        reason_codes.append(CANDIDATE_FORMATION_LOW_CONFIDENCE)
+    if coverage_ratio is None or coverage_ratio < 0.45:
+        reason_codes.append(CANDIDATE_FORMATION_LOW_COVERAGE)
+    if shifted_pitch is None or shifted_pitch < 48.0 or shifted_pitch > 84.0:
+        reason_codes.append(CANDIDATE_FORMATION_PITCH_OUT_OF_RANGE)
+    if not context_pitches:
+        reason_codes.append(CANDIDATE_FORMATION_NO_LOCAL_CONTEXT)
+    elif shifted_pitch is not None:
+        nearest_delta = min(abs(shifted_pitch - pitch) for pitch in context_pitches)
+        if nearest_delta > 4.0:
+            reason_codes.append(CANDIDATE_FORMATION_CONTEXT_PITCH_MISMATCH)
+    if _would_split_big_gap(gap_start=gap_start, gap_end=gap_end, candidate_start=start, candidate_end=end):
+        reason_codes.append(CANDIDATE_FORMATION_SPLITS_BIG_GAP)
+    if not any(reason for reason in reason_codes if reason not in {CANDIDATE_FORMATION_LOW_OCTAVE_CLUSTER, CANDIDATE_FORMATION_SHORT_FRAGMENT_CLUSTER}):
+        reason_codes.append(CANDIDATE_FORMATION_SAFE)
+
+    return {
+        "candidate_count": len(ordered),
+        "source_candidate_ids": [str(item.get("candidate_id") or item.get("id") or "") for item in ordered],
+        "start_sec": _round(start),
+        "end_sec": _round(end),
+        "duration_sec": _round(duration),
+        "fragment_duration_sec": _round(total_fragment_duration),
+        "coverage_ratio": _round_optional(coverage_ratio),
+        "pitch_center_midi": _round_optional(weighted_pitch),
+        "shifted_pitch_center_midi": _round_optional(shifted_pitch),
+        "confidence": _round_optional(weighted_confidence),
+        "mean_confidence": _round_optional(weighted_confidence),
+        "left_context_pitch_midi": _round_optional(left_pitch),
+        "right_context_pitch_midi": _round_optional(right_pitch),
+        "left_gap_sec": _round_optional(start - _end(left_context)) if left_context is not None else None,
+        "right_gap_sec": _round_optional(_start(right_context) - end) if right_context is not None else None,
+        "reason_codes": _unique_text(reason_codes),
+        "fragments": [_public_note(item) for item in ordered[:TOP_LIMIT]],
+    }
+
+
+def _previous_record(records: list[dict[str, Any]], end: float) -> dict[str, Any] | None:
+    previous = [record for record in records if _end(record) <= end]
+    return max(previous, key=lambda item: _end(item), default=None)
+
+
+def _next_record(records: list[dict[str, Any]], start: float) -> dict[str, Any] | None:
+    following = [record for record in records if _start(record) >= start]
+    return min(following, key=lambda item: _start(item), default=None)
+
+
+def _would_split_big_gap(*, gap_start: float, gap_end: float, candidate_start: float, candidate_end: float) -> bool:
+    big_gap = GAP_THRESHOLD_SEC
+    original_gap = max(0.0, gap_end - gap_start)
+    if original_gap <= big_gap:
+        return False
+    left_gap = max(0.0, candidate_start - gap_start)
+    right_gap = max(0.0, gap_end - candidate_end)
+    before_big_count = 1 if original_gap > big_gap else 0
+    after_big_count = int(left_gap > big_gap) + int(right_gap > big_gap)
+    return after_big_count > before_big_count
+
+
+def _weighted_average(values: list[tuple[float | None, float]]) -> float | None:
+    numerator = 0.0
+    denominator = 0.0
+    for value, weight in values:
+        if value is None or weight <= 0:
+            continue
+        numerator += float(value) * float(weight)
+        denominator += float(weight)
+    if denominator <= 0:
+        return None
+    return numerator / denominator
+
+
+def _unique_text(values: list[str]) -> list[str]:
+    seen: set[str] = set()
+    result: list[str] = []
+    for value in values:
+        text = str(value or "").strip()
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        result.append(text)
+    return result
+
+
 def _artifact_records(payload: Any, *, kind: str) -> list[dict[str, Any]]:
     if not isinstance(payload, dict):
         return []
@@ -671,6 +1101,9 @@ def _record_from_item(item: dict[str, Any], *, kind: str, fallback_id: str) -> d
         "source_candidate_id": item.get("source_candidate_id"),
         "quantized_note_id": item.get("quantized_note_id") or item.get("id") if kind == "quantized_notes" else item.get("quantized_note_id"),
         "source_contour_ids": list(item.get("source_contour_ids") or []) if isinstance(item.get("source_contour_ids"), list) else [],
+        "candidate_origin": item.get("candidate_origin"),
+        "segmentation_evidence": dict(item.get("segmentation_evidence") or {}) if isinstance(item.get("segmentation_evidence"), dict) else {},
+        "contour_bridge_guard_reason_codes": list(item.get("contour_bridge_guard_reason_codes") or []) if isinstance(item.get("contour_bridge_guard_reason_codes"), list) else [],
         "quantized_start_time_sec": _as_float(item.get("quantized_start_time_sec")),
         "quantized_end_time_sec": _as_float(item.get("quantized_end_time_sec")),
         "quantized_duration_sec": _as_float(item.get("quantized_duration_sec")),
@@ -1128,7 +1561,7 @@ def _pitch_midi(item: dict[str, Any]) -> float | None:
 
 
 def _parse_pitch_name(value: str) -> float | None:
-    match = value.strip().upper().replace("♯", "#").replace("♭", "B")
+    match = value.strip().upper().replace("\u266f", "#").replace("\u266d", "B")
     if len(match) < 2:
         return None
     if len(match) >= 3 and match[1] in {"#", "B"}:
@@ -1223,6 +1656,9 @@ def _public_note(record: dict[str, Any] | None) -> dict[str, Any] | None:
         "candidate_id": record.get("candidate_id"),
         "source_candidate_id": record.get("source_candidate_id"),
         "quantized_note_id": record.get("quantized_note_id"),
+        "candidate_origin": record.get("candidate_origin"),
+        "source_contour_ids": list(record.get("source_contour_ids") or []),
+        "contour_bridge_guard_reason_codes": list(record.get("contour_bridge_guard_reason_codes") or []),
     }
 
 
@@ -1235,7 +1671,7 @@ def _markdown_gap_table(items: Any, *, heading: str) -> list[str]:
     for item in rows:
         evidence = item.get("evidence") if isinstance(item.get("evidence"), dict) else {}
         lines.append(
-            "| {start} | {end} | {dur} | {cls} | raw={raw}, selected={selected}, f0={f0}, low_f0={low_f0} |".format(
+            "| {start} | {end} | {dur} | {cls} | raw={raw}, selected={selected}, f0={f0}, low_f0={low_f0}, selector_stage={selector_stage} |".format(
                 start=_fmt(item.get("start_sec")),
                 end=_fmt(item.get("end_sec")),
                 dur=_fmt(item.get("duration_sec")),
@@ -1244,6 +1680,7 @@ def _markdown_gap_table(items: Any, *, heading: str) -> list[str]:
                 selected=_fmt(evidence.get("selected_notes_in_gap")),
                 f0=_fmt((evidence.get("f0_voiced_overlap") or {}).get("duration_sec") if isinstance(evidence.get("f0_voiced_overlap"), dict) else None),
                 low_f0=_fmt((evidence.get("low_confidence_or_unvoiced_overlap") or {}).get("duration_sec") if isinstance(evidence.get("low_confidence_or_unvoiced_overlap"), dict) else None),
+                selector_stage=_escape_md(_fmt(evidence.get("selector_stage_reason_counts"))),
             )
         )
     return lines

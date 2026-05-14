@@ -15,6 +15,9 @@ from .reason_codes import (
     CONTOUR_CANDIDATE_NO_LOCAL_CONTEXT,
     CONTOUR_CANDIDATE_NO_RAW_GAP,
     CONTOUR_CANDIDATE_SPLITS_BIG_GAP,
+    CONTOUR_SEGMENTATION_ALL_SEGMENTS_REJECTED,
+    CONTOUR_SEGMENTATION_BRIDGE,
+    CONTOUR_SEGMENTATION_NO_STABLE_SUBSEGMENT,
     CONTOUR_TO_CANDIDATE_BRIDGE,
     LOW_CONFIDENCE,
     LOW_VOICED_RATIO,
@@ -43,6 +46,12 @@ class ContourToCandidateBridgeConfig:
     context_gap_sec: float = 4.0
     big_gap_sec: float = 0.5
     low_octave_context_tolerance_semitones: int = 4
+    segmentation_enabled: bool = True
+    segmentation_min_source_duration_sec: float = 2.5
+    segmentation_min_subsegment_duration_sec: float = 0.18
+    segmentation_max_subsegment_duration_sec: float = 0.75
+    segmentation_max_pitch_range_semitones: float = 1.25
+    segmentation_max_frame_gap_sec: float = 0.04
 
 
 @dataclass(frozen=True)
@@ -103,10 +112,50 @@ class ContourToCandidateBridge:
             candidate["contour_bridge_evidence"] = evidence
             candidate["contour_bridge_guard_reason_codes"] = guard_reasons
             if guard_reasons:
+                segment_attempts: list[dict[str, Any]] = []
+                segment_accepted_count = 0
+                segment_guard_counts: Counter[str] = Counter()
+                segment_candidates = self._segmentation_candidates_from_contour(contour, index)
+                segment_rejected_items: list[dict[str, Any]] = []
                 rejected_item = self._summary_item(candidate)
-                rejected.append(rejected_item)
                 for reason in guard_reasons:
                     guard_counts[reason] += 1
+                for segment_candidate in segment_candidates:
+                    segment_evidence = self._evidence(
+                        candidate=segment_candidate,
+                        contour=contour,
+                        raw_candidates=working_notes,
+                        vocal_segments=vocal_segments,
+                    )
+                    segment_guard_reasons = self._guard_reasons(
+                        segment_candidate,
+                        segment_evidence,
+                        vocal_segments_available=bool(vocal_segments),
+                    )
+                    segment_candidate["contour_bridge_evidence"] = segment_evidence
+                    segment_candidate["contour_bridge_guard_reason_codes"] = segment_guard_reasons
+                    segment_attempts.append(self._segmentation_attempt_item(segment_candidate))
+                    if segment_guard_reasons:
+                        segment_rejected_item = self._summary_item(segment_candidate)
+                        segment_rejected_items.append(segment_rejected_item)
+                        for reason in segment_guard_reasons:
+                            guard_counts[reason] += 1
+                            segment_guard_counts[reason] += 1
+                        continue
+                    segment_note = self._note_from_candidate(segment_candidate)
+                    working_notes.append(segment_note)
+                    segment_accepted_item = self._summary_item(segment_candidate)
+                    accepted.append(segment_accepted_item)
+                    segment_accepted_count += 1
+                    guard_counts[CONTOUR_SEGMENTATION_BRIDGE] += 1
+                rejected_item["evidence"]["segmentation_attempt_summary"] = self._segmentation_attempt_summary(
+                    segment_candidates=segment_candidates,
+                    segment_attempts=segment_attempts,
+                    accepted_count=segment_accepted_count,
+                    guard_counts=segment_guard_counts,
+                )
+                rejected.append(rejected_item)
+                rejected.extend(segment_rejected_items)
                 continue
 
             note = self._note_from_candidate(candidate)
@@ -162,6 +211,72 @@ class ContourToCandidateBridge:
             "source_candidate_ids": [],
         }
 
+    def _segmentation_candidates_from_contour(self, contour: dict[str, Any], contour_index: int) -> list[dict[str, Any]]:
+        if not self.config.segmentation_enabled:
+            return []
+        source_duration = _safe_float(_first(contour, "duration_sec", "duration")) or 0.0
+        if source_duration < float(self.config.segmentation_min_source_duration_sec):
+            return []
+        source_id = str(contour.get("id") or f"pc_{contour_index:05d}")
+        frames = _normalized_frame_samples(contour.get("frame_samples"))
+        if not frames:
+            return []
+        segments = _stable_frame_segments(
+            frames,
+            min_confidence=float(self.config.min_confidence),
+            max_frame_gap_sec=float(self.config.segmentation_max_frame_gap_sec),
+            max_pitch_range_semitones=float(self.config.segmentation_max_pitch_range_semitones),
+        )
+        candidates: list[dict[str, Any]] = []
+        for segment_index, segment in enumerate(segments, start=1):
+            if not segment:
+                continue
+            times = [float(frame["time_sec"]) for frame in segment]
+            pitches = [float(frame["pitch_midi"]) for frame in segment]
+            confidences = [float(frame["confidence"]) for frame in segment]
+            hop = _median_positive_delta(sorted(times))
+            start = min(times)
+            end = max(times) + hop
+            duration = max(0.0, end - start)
+            if duration < float(self.config.segmentation_min_subsegment_duration_sec):
+                continue
+            if duration > float(self.config.segmentation_max_subsegment_duration_sec):
+                continue
+            pitch_range = max(pitches) - min(pitches) if pitches else 0.0
+            candidate = self._candidate_from_contour(
+                {
+                    "id": f"{source_id}:seg_{segment_index:02d}",
+                    "start_time_sec": start,
+                    "end_time_sec": end,
+                    "duration_sec": duration,
+                    "pitch_center_midi": _median(pitches),
+                    "mean_confidence": sum(confidences) / max(1, len(confidences)),
+                    "voiced_ratio": 1.0,
+                    "stability": max(0.0, min(1.0, 1.0 - (pitch_range / max(0.001, self.config.segmentation_max_pitch_range_semitones * 2.0)))),
+                    "has_glide": False,
+                    "has_vibrato": bool(contour.get("has_vibrato")) and pitch_range <= float(self.config.segmentation_max_pitch_range_semitones),
+                    "reason_codes": contour.get("reason_codes") or [],
+                },
+                segment_index,
+            )
+            candidate["candidate_id"] = f"contour_segment_bridge:{source_id}:seg_{segment_index:02d}"
+            candidate["source_contour_id"] = source_id
+            candidate["source_contour_ids"] = [source_id]
+            candidate["reason_codes"] = _unique(
+                list(candidate.get("reason_codes") or []) + [CONTOUR_SEGMENTATION_BRIDGE]
+            )
+            candidate["segmentation_evidence"] = {
+                "source_contour_id": source_id,
+                "source_contour_start_time_sec": _round_optional(_first(contour, "start_time_sec", "start_time", "start")),
+                "source_contour_end_time_sec": _round_optional(_first(contour, "end_time_sec", "end_time", "end")),
+                "source_contour_duration_sec": _round_optional(source_duration),
+                "segment_index": segment_index,
+                "segment_frame_count": len(segment),
+                "segment_pitch_range_semitones": round(float(pitch_range), 6),
+                "segment_mean_confidence": round(sum(confidences) / max(1, len(confidences)), 6),
+            }
+            candidates.append(candidate)
+        return candidates
     def _evidence(
         self,
         *,
@@ -212,6 +327,7 @@ class ContourToCandidateBridge:
             "right_context_gap_sec": context.get("right_gap_sec"),
             "applied_guard_reason_codes": [],
             "source_contour_reason_codes": list(candidate.get("source_contour_reason_codes") or []),
+            "segmentation_evidence": dict(candidate.get("segmentation_evidence") or {}),
         }
 
     def _guard_reasons(
@@ -234,7 +350,8 @@ class ContourToCandidateBridge:
             reasons.append(LOW_VOICED_RATIO)
         if duration < float(self.config.min_duration_sec):
             reasons.append(TOO_SHORT)
-        if duration > float(self.config.max_duration_sec):
+        duration_too_long = duration > float(self.config.max_duration_sec)
+        if duration_too_long:
             reasons.append(TOO_UNSTABLE)
         octave_evidence = None
         if pitch is not None and pitch < float(self.config.vocal_min_midi):
@@ -270,7 +387,12 @@ class ContourToCandidateBridge:
             reasons.append(BRIDGE_VOCAL_ACTIVITY_UNSUPPORTED)
 
         reasons = _unique(reasons)
-        if TOO_UNSTABLE in reasons and (candidate.get("has_glide") or candidate.get("has_vibrato")) and len(reasons) == 1:
+        if (
+            not duration_too_long
+            and TOO_UNSTABLE in reasons
+            and (candidate.get("has_glide") or candidate.get("has_vibrato"))
+            and len(reasons) == 1
+        ):
             candidate["reason_codes"] = _unique(list(candidate.get("reason_codes") or []) + [BRIDGE_UNSTABLE_CONTOUR_GUARDED])
             reasons = []
         if not reasons:
@@ -396,6 +518,50 @@ class ContourToCandidateBridge:
             "evidence": dict(candidate.get("contour_bridge_evidence") or {}),
         }
 
+    @staticmethod
+    def _segmentation_attempt_item(candidate: dict[str, Any]) -> dict[str, Any]:
+        evidence = dict(candidate.get("contour_bridge_evidence") or {})
+        return {
+            "candidate_id": candidate.get("candidate_id"),
+            "start_time_sec": candidate.get("start_time_sec"),
+            "end_time_sec": candidate.get("end_time_sec"),
+            "duration_sec": candidate.get("duration_sec"),
+            "pitch_center_midi": candidate.get("pitch_center_midi"),
+            "confidence": candidate.get("confidence"),
+            "guard_reason_codes": list(candidate.get("contour_bridge_guard_reason_codes") or []),
+            "nearest_raw_gap": evidence.get("nearest_raw_gap"),
+            "raw_overlap_duration_sec": evidence.get("raw_overlap_duration_sec"),
+            "left_context_pitch_midi": evidence.get("left_context_pitch_midi"),
+            "right_context_pitch_midi": evidence.get("right_context_pitch_midi"),
+            "left_context_gap_sec": evidence.get("left_context_gap_sec"),
+            "right_context_gap_sec": evidence.get("right_context_gap_sec"),
+            "segmentation_evidence": dict(evidence.get("segmentation_evidence") or {}),
+        }
+
+    @staticmethod
+    def _segmentation_attempt_summary(
+        *,
+        segment_candidates: list[dict[str, Any]],
+        segment_attempts: list[dict[str, Any]],
+        accepted_count: int,
+        guard_counts: Counter[str],
+    ) -> dict[str, Any]:
+        reason_codes: list[str] = []
+        if not segment_candidates:
+            reason_codes.append(CONTOUR_SEGMENTATION_NO_STABLE_SUBSEGMENT)
+        elif accepted_count <= 0:
+            reason_codes.append(CONTOUR_SEGMENTATION_ALL_SEGMENTS_REJECTED)
+        return {
+            "enabled": True,
+            "candidate_count": len(segment_candidates),
+            "attempted_count": len(segment_attempts),
+            "accepted_count": int(accepted_count),
+            "rejected_count": max(0, len(segment_attempts) - int(accepted_count)),
+            "reason_codes": reason_codes,
+            "guard_reason_counts": dict(sorted(guard_counts.items())),
+            "attempts": segment_attempts,
+        }
+
 
 def _raw_gaps(notes: list[Note]) -> list[dict[str, Any]]:
     ordered = sorted(notes, key=lambda note: (float(note.start_time), float(note.end_time), str(note.pitch)))
@@ -461,6 +627,70 @@ def _note_pitch_midi(note: Note) -> float | None:
     except Exception:
         return None
 
+
+def _normalized_frame_samples(value: Any) -> list[dict[str, float]]:
+    if not isinstance(value, list):
+        return []
+    frames: list[dict[str, float]] = []
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        time_sec = _safe_float(_first(item, "time_sec", "time"))
+        pitch = _safe_float(_first(item, "pitch_midi", "midi_float", "midi"))
+        confidence = _safe_float(item.get("confidence"))
+        if time_sec is None or pitch is None or confidence is None:
+            continue
+        if not bool(item.get("voiced", True)):
+            continue
+        frames.append({"time_sec": float(time_sec), "pitch_midi": float(pitch), "confidence": float(confidence)})
+    return sorted(frames, key=lambda frame: frame["time_sec"])
+
+
+def _stable_frame_segments(
+    frames: list[dict[str, float]],
+    *,
+    min_confidence: float,
+    max_frame_gap_sec: float,
+    max_pitch_range_semitones: float,
+) -> list[list[dict[str, float]]]:
+    segments: list[list[dict[str, float]]] = []
+    current: list[dict[str, float]] = []
+    for frame in frames:
+        if float(frame["confidence"]) < min_confidence:
+            if current:
+                segments.append(current)
+                current = []
+            continue
+        if current:
+            previous = current[-1]
+            pitch_values = [float(item["pitch_midi"]) for item in current] + [float(frame["pitch_midi"])]
+            if (
+                float(frame["time_sec"]) - float(previous["time_sec"]) > max_frame_gap_sec
+                or max(pitch_values) - min(pitch_values) > max_pitch_range_semitones
+            ):
+                segments.append(current)
+                current = []
+        current.append(frame)
+    if current:
+        segments.append(current)
+    return segments
+
+
+def _median(values: list[float]) -> float | None:
+    if not values:
+        return None
+    ordered = sorted(float(value) for value in values)
+    mid = len(ordered) // 2
+    if len(ordered) % 2:
+        return ordered[mid]
+    return (ordered[mid - 1] + ordered[mid]) / 2.0
+
+
+def _median_positive_delta(values: list[float]) -> float:
+    deltas = [float(right) - float(left) for left, right in zip(values, values[1:]) if float(right) > float(left)]
+    if not deltas:
+        return 0.01
+    return float(_median(deltas) or 0.01)
 
 def _pitch_center(payload: dict[str, Any]) -> float | None:
     value = _safe_float(_first(payload, "pitch_center_midi", "median_midi", "mean_midi", "midi_float", "pitch_midi"))

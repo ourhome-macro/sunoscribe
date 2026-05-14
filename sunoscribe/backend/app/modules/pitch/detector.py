@@ -952,6 +952,24 @@ class PitchDetector:
                     start_time=start_time,
                     end_time=end_time,
                     confidence=adjusted_conf,
+                    segmentation_evidence={
+                        "backend": self._segmentation_backend(backend_key),
+                        "start_frame_index": int(start_idx),
+                        "end_frame_index": int(end_idx),
+                        "voiced_frame_count": int(voiced_count),
+                        "frame_hop_sec": round(float(frame_hop_sec), 6),
+                        "avg_confidence": round(float(avg_conf), 6),
+                        "adjusted_confidence": round(float(adjusted_conf), 6),
+                        "median_pitch_midi": round(float(median_midi), 6),
+                        "mad_semitones": round(float(mad_semitones), 6),
+                        "span_semitones": round(float(span_semitones), 6),
+                        "stability_factor": round(float(stability_factor), 6),
+                        "span_factor": round(float(span_factor), 6),
+                        "quality_factor": round(float(quality_factor), 6),
+                        "voiced_threshold": round(float(voiced_threshold), 6),
+                        "jump_threshold_semitones": round(float(jump_threshold), 6),
+                        "min_note_duration_sec": round(float(min_note_duration), 6),
+                    },
                 )
             )
 

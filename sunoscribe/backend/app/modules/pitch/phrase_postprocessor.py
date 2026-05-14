@@ -821,6 +821,8 @@ class PhraseAwarePostprocessor:
             note["contour_bridge_evidence"] = dict(raw["contour_bridge_evidence"])
         if "contour_bridge_guard_reason_codes" in raw:
             note["contour_bridge_guard_reason_codes"] = list(raw.get("contour_bridge_guard_reason_codes") or [])
+        if isinstance(raw.get("segmentation_evidence"), dict):
+            note["segmentation_evidence"] = dict(raw["segmentation_evidence"])
         note["reason_codes"] = _unique([str(value) for value in raw.get("reason_codes") or [] if str(value).strip()])
         return note
 
@@ -838,6 +840,7 @@ class PhraseAwarePostprocessor:
             "candidate_origin": getattr(note, "candidate_origin", None),
             "contour_bridge_evidence": dict(getattr(note, "contour_bridge_evidence", {}) or {}),
             "contour_bridge_guard_reason_codes": list(getattr(note, "contour_bridge_guard_reason_codes", []) or []),
+            "segmentation_evidence": dict(getattr(note, "segmentation_evidence", {}) or {}),
             "reason_codes": list(getattr(note, "reason_codes", []) or []),
         }
 
@@ -857,6 +860,7 @@ class PhraseAwarePostprocessor:
             candidate_origin=str(note.get("candidate_origin")) if note.get("candidate_origin") is not None else None,
             contour_bridge_evidence=dict(note.get("contour_bridge_evidence") or {}),
             contour_bridge_guard_reason_codes=[str(item) for item in note.get("contour_bridge_guard_reason_codes") or []],
+            segmentation_evidence=dict(note.get("segmentation_evidence") or {}),
         )
 
     def _clone_note(self, note: dict[str, Any]) -> dict[str, Any]:
@@ -867,6 +871,8 @@ class PhraseAwarePostprocessor:
             cloned["contour_bridge_evidence"] = dict(note["contour_bridge_evidence"])
         if "contour_bridge_guard_reason_codes" in note:
             cloned["contour_bridge_guard_reason_codes"] = list(note.get("contour_bridge_guard_reason_codes") or [])
+        if isinstance(note.get("segmentation_evidence"), dict):
+            cloned["segmentation_evidence"] = dict(note["segmentation_evidence"])
         cloned["reason_codes"] = list(note.get("reason_codes") or [])
         return cloned
 

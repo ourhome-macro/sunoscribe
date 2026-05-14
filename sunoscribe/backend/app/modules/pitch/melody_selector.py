@@ -46,6 +46,7 @@ class MelodySelector:
             )
 
         prepared: list[Note] = []
+        pending_low_octave_notes: list[Note] = []
         removed_pitch_range = 0
         removed_low_confidence = 0
         removed_short = 0
@@ -61,7 +62,10 @@ class MelodySelector:
             if pitch_midi < int(self.config.melody_pitch_min_midi) or pitch_midi > int(self.config.melody_pitch_max_midi):
                 rescued_note = self._rescue_low_octave_note(note, sorted_notes=sorted_notes)
                 if rescued_note is None:
-                    removed_pitch_range += 1
+                    if self._is_low_octave_second_pass_candidate(note):
+                        pending_low_octave_notes.append(note)
+                    else:
+                        removed_pitch_range += 1
                     continue
                 note = rescued_note
                 pitch_midi = self._to_midi(note.pitch)
@@ -90,15 +94,16 @@ class MelodySelector:
                     end_time=float(note.end_time),
                     confidence=confidence,
                     reason_codes=list(getattr(note, "reason_codes", []) or []),
-                    candidate_id=getattr(note, "candidate_id", None),
-                    source_candidate_id=getattr(note, "source_candidate_id", None),
-                    source_candidate_ids=list(getattr(note, "source_candidate_ids", []) or []),
-                    source_contour_ids=list(getattr(note, "source_contour_ids", []) or []),
-                    candidate_origin=getattr(note, "candidate_origin", None),
-                    contour_bridge_evidence=dict(getattr(note, "contour_bridge_evidence", {}) or {}),
-                    contour_bridge_guard_reason_codes=list(getattr(note, "contour_bridge_guard_reason_codes", []) or []),
+                    **self._note_metadata_kwargs(note),
                 )
             )
+
+        if pending_low_octave_notes:
+            prepared, unresolved_low_octave_count = self._rescue_pending_low_octave_notes(
+                pending_low_octave_notes,
+                prepared,
+            )
+            removed_pitch_range += unresolved_low_octave_count
 
         merged_notes, merged_count_a = self._merge_adjacent(prepared)
         postprocessed_notes, postprocess_result = self.postprocessor.process_notes(merged_notes)
@@ -152,15 +157,72 @@ class MelodySelector:
             max_iterations=2,
         )
 
+    def _is_low_octave_second_pass_candidate(self, note: Note) -> bool:
+        if not bool(self.config.melody_low_octave_rescue_enabled):
+            return False
+        pitch_midi = self._to_midi(note.pitch)
+        if pitch_midi is None or pitch_midi >= int(self.config.melody_pitch_min_midi):
+            return False
+        if pitch_midi + 12 > int(self.config.melody_pitch_max_midi):
+            return False
+        return self._low_octave_rescue_quality_ok(note)
+
+    def _rescue_pending_low_octave_notes(
+        self,
+        pending_notes: list[Note],
+        prepared_notes: list[Note],
+    ) -> tuple[list[Note], int]:
+        if not pending_notes:
+            return prepared_notes, 0
+        rescued_notes: list[Note] = []
+        unresolved_notes = sorted(
+            pending_notes,
+            key=lambda item: (float(item.start_time), float(item.end_time), str(item.pitch)),
+        )
+        context_notes = list(prepared_notes)
+
+        for iteration in range(4):
+            if not unresolved_notes:
+                break
+            ordered_notes = sorted(
+                unresolved_notes,
+                key=lambda item: (float(item.start_time), float(item.end_time), str(item.pitch)),
+                reverse=bool(iteration % 2),
+            )
+            next_unresolved: list[Note] = []
+            rescued_this_pass = False
+            for note in ordered_notes:
+                rescued_note = self._rescue_low_octave_note(note, sorted_notes=context_notes + unresolved_notes)
+                if rescued_note is None:
+                    next_unresolved.append(note)
+                    continue
+                rescued_notes.append(rescued_note)
+                context_notes.append(rescued_note)
+                rescued_this_pass = True
+            unresolved_notes = next_unresolved
+            if not rescued_this_pass:
+                break
+
+        if not rescued_notes:
+            return prepared_notes, len(unresolved_notes)
+        combined = sorted(prepared_notes + rescued_notes, key=lambda item: (float(item.start_time), float(item.end_time), str(item.pitch)))
+        return combined, len(unresolved_notes)
+
+    def _low_octave_rescue_quality_ok(self, note: Note) -> bool:
+        duration = self._duration_sec(note)
+        confidence = float(note.confidence)
+        if duration >= float(self.config.melody_min_duration_sec):
+            return confidence >= float(self.config.melody_min_confidence)
+        return confidence >= float(self.config.melody_short_note_min_confidence)
+
     def _rescue_low_octave_note(self, note: Note, *, sorted_notes: list[Note]) -> Note | None:
         if not bool(self.config.melody_low_octave_rescue_enabled):
             return None
         pitch_midi = self._to_midi(note.pitch)
         if pitch_midi is None or pitch_midi >= int(self.config.melody_pitch_min_midi):
             return None
-        duration = self._duration_sec(note)
         confidence = float(note.confidence)
-        if duration < float(self.config.melody_min_duration_sec) or confidence < float(self.config.melody_min_confidence):
+        if not self._low_octave_rescue_quality_ok(note):
             return None
 
         left_note, right_note = self._nearest_context_notes(note, sorted_notes=sorted_notes)
@@ -319,6 +381,12 @@ class MelodySelector:
                     source_contour_ids=self._unique_reason_codes(
                         list(getattr(current, "source_contour_ids", []) or [])
                         + list(getattr(nxt, "source_contour_ids", []) or [])
+                    ),
+                    candidate_origin=self._merged_candidate_origin(current, nxt),
+                    contour_bridge_evidence=self._merged_contour_bridge_evidence(current, nxt),
+                    contour_bridge_guard_reason_codes=self._unique_reason_codes(
+                        list(getattr(current, "contour_bridge_guard_reason_codes", []) or [])
+                        + list(getattr(nxt, "contour_bridge_guard_reason_codes", []) or [])
                     ),
                 )
                 continue
@@ -696,6 +764,13 @@ class MelodySelector:
                         + list(getattr(cur_note, "source_contour_ids", []) or [])
                         + list(getattr(next_note, "source_contour_ids", []) or [])
                     ),
+                    candidate_origin=self._merged_candidate_origin(prev_note, cur_note, next_note),
+                    contour_bridge_evidence=self._merged_contour_bridge_evidence(prev_note, cur_note, next_note),
+                    contour_bridge_guard_reason_codes=self._unique_reason_codes(
+                        list(getattr(prev_note, "contour_bridge_guard_reason_codes", []) or [])
+                        + list(getattr(cur_note, "contour_bridge_guard_reason_codes", []) or [])
+                        + list(getattr(next_note, "contour_bridge_guard_reason_codes", []) or [])
+                    ),
                 )
                 idx += 2
                 continue
@@ -716,14 +791,45 @@ class MelodySelector:
             end_time=float(note.end_time),
             confidence=float(note.confidence),
             reason_codes=list(getattr(note, "reason_codes", []) or []),
-            candidate_id=getattr(note, "candidate_id", None),
-            source_candidate_id=getattr(note, "source_candidate_id", None),
-            source_candidate_ids=list(getattr(note, "source_candidate_ids", []) or []),
-            source_contour_ids=list(getattr(note, "source_contour_ids", []) or []),
-            candidate_origin=getattr(note, "candidate_origin", None),
-            contour_bridge_evidence=dict(getattr(note, "contour_bridge_evidence", {}) or {}),
-            contour_bridge_guard_reason_codes=list(getattr(note, "contour_bridge_guard_reason_codes", []) or []),
+            **MelodySelector._note_metadata_kwargs(note),
         )
+
+    @staticmethod
+    def _note_metadata_kwargs(note: Note) -> dict[str, object]:
+        return {
+            "candidate_id": getattr(note, "candidate_id", None),
+            "source_candidate_id": getattr(note, "source_candidate_id", None),
+            "source_candidate_ids": list(getattr(note, "source_candidate_ids", []) or []),
+            "source_contour_ids": list(getattr(note, "source_contour_ids", []) or []),
+            "candidate_origin": getattr(note, "candidate_origin", None),
+            "contour_bridge_evidence": dict(getattr(note, "contour_bridge_evidence", {}) or {}),
+            "contour_bridge_guard_reason_codes": list(getattr(note, "contour_bridge_guard_reason_codes", []) or []),
+            "segmentation_evidence": dict(getattr(note, "segmentation_evidence", {}) or {}),
+        }
+
+    @staticmethod
+    def _merged_candidate_origin(*notes: Note) -> str | None:
+        origins = [
+            str(getattr(note, "candidate_origin", "") or "").strip()
+            for note in notes
+            if str(getattr(note, "candidate_origin", "") or "").strip()
+        ]
+        if not origins:
+            return None
+        return origins[0] if len(set(origins)) == 1 else "merged"
+
+    @staticmethod
+    def _merged_contour_bridge_evidence(*notes: Note) -> dict[str, object]:
+        evidence_items = [
+            dict(getattr(note, "contour_bridge_evidence", {}) or {})
+            for note in notes
+            if getattr(note, "contour_bridge_evidence", None)
+        ]
+        if not evidence_items:
+            return {}
+        if len(evidence_items) == 1:
+            return evidence_items[0]
+        return {"merged_contour_bridge_evidence": evidence_items}
 
     @staticmethod
     def _duration_sec(note: Note) -> float:
