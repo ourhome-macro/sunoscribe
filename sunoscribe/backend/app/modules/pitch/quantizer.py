@@ -51,18 +51,7 @@ class NoteQuantizer:
                     lyric=None,
                     source=getattr(note, "source", None),
                     reason_codes=list(getattr(note, "reason_codes", []) or []),
-                    candidate_id=getattr(note, "candidate_id", None),
-                    source_candidate_id=getattr(note, "source_candidate_id", None)
-                    or getattr(note, "candidate_id", None),
-                    source_candidate_ids=list(getattr(note, "source_candidate_ids", []) or []),
-                    source_contour_ids=list(getattr(note, "source_contour_ids", []) or []),
-                    source_f0_frame_range=dict(getattr(note, "source_f0_frame_range", {}) or {}),
-                    candidate_origin=getattr(note, "candidate_origin", None),
-                    contour_bridge_evidence=dict(getattr(note, "contour_bridge_evidence", {}) or {}),
-                    contour_bridge_guard_reason_codes=list(
-                        getattr(note, "contour_bridge_guard_reason_codes", []) or []
-                    ),
-                    segmentation_evidence=dict(getattr(note, "segmentation_evidence", {}) or {}),
+                    **self._lineage_kwargs(note),
                 )
             )
 
@@ -104,7 +93,7 @@ class NoteQuantizer:
                 )
 
                 if can_merge:
-                    merged[-1] = self._merged_note(prev, note)
+                    merged[-1] = self._merge_notes(prev, note)
                     continue
 
                 merged.append(note)
@@ -114,56 +103,141 @@ class NoteQuantizer:
 
         return merged
 
-    def _merged_note(self, left: Note, right: Note) -> Note:
+    def _merge_notes(self, prev: Note, note: Note) -> Note:
+        lineage = self._merged_lineage_kwargs(prev, note)
         return Note(
-            pitch=left.pitch,
-            start_time=float(left.start_time),
-            end_time=max(float(left.end_time), float(right.end_time)),
-            confidence=max(float(left.confidence), float(right.confidence)),
+            pitch=prev.pitch,
+            start_time=float(prev.start_time),
+            end_time=max(float(prev.end_time), float(note.end_time)),
+            confidence=max(float(prev.confidence), float(note.confidence)),
             reason_codes=_unique_reason_codes(
-                list(getattr(left, "reason_codes", []) or [])
-                + list(getattr(right, "reason_codes", []) or [])
+                list(getattr(prev, "reason_codes", []) or [])
+                + list(getattr(note, "reason_codes", []) or [])
             ),
-            candidate_id=getattr(left, "candidate_id", None) or getattr(right, "candidate_id", None),
-            source_candidate_id=getattr(left, "source_candidate_id", None)
-            or getattr(left, "candidate_id", None)
-            or getattr(right, "source_candidate_id", None)
-            or getattr(right, "candidate_id", None),
-            source_candidate_ids=_merged_source_candidate_ids(left, right),
-            source_contour_ids=_unique_strings(
-                list(getattr(left, "source_contour_ids", []) or [])
-                + list(getattr(right, "source_contour_ids", []) or [])
-            ),
-            source_f0_frame_range=_merged_f0_frame_range(left, right),
-            candidate_origin=_merged_origin(left, right),
-            contour_bridge_evidence=_merged_mapping_field(left, right, "contour_bridge_evidence"),
-            contour_bridge_guard_reason_codes=_unique_strings(
-                list(getattr(left, "contour_bridge_guard_reason_codes", []) or [])
-                + list(getattr(right, "contour_bridge_guard_reason_codes", []) or [])
-            ),
-            segmentation_evidence=_merged_mapping_field(left, right, "segmentation_evidence"),
+            candidate_origin="quantizer.merge_same_pitch",
+            **lineage,
         )
 
-    def _trimmed_note(self, note: Note, *, start_time: float, end_time: float) -> Note:
+    def _trim_note_end(self, note: Note, end_time: float) -> Note:
         return Note(
             pitch=note.pitch,
-            start_time=float(start_time),
+            start_time=float(note.start_time),
             end_time=float(end_time),
             confidence=float(note.confidence),
             reason_codes=list(getattr(note, "reason_codes", []) or []),
-            candidate_id=getattr(note, "candidate_id", None),
-            source_candidate_id=getattr(note, "source_candidate_id", None),
-            source_candidate_ids=list(getattr(note, "source_candidate_ids", []) or []),
-            source_contour_ids=list(getattr(note, "source_contour_ids", []) or []),
-            source_f0_frame_range=dict(getattr(note, "source_f0_frame_range", {}) or {}),
             candidate_origin=getattr(note, "candidate_origin", None),
-            contour_bridge_evidence=dict(getattr(note, "contour_bridge_evidence", {}) or {}),
-            contour_bridge_guard_reason_codes=list(
-                getattr(note, "contour_bridge_guard_reason_codes", []) or []
-            ),
-            segmentation_evidence=dict(getattr(note, "segmentation_evidence", {}) or {}),
+            **self._lineage_kwargs(note),
         )
 
+    def _trim_note_start(self, note: Note, start_time: float) -> Note:
+        return Note(
+            pitch=note.pitch,
+            start_time=float(start_time),
+            end_time=float(note.end_time),
+            confidence=float(note.confidence),
+            reason_codes=list(getattr(note, "reason_codes", []) or []),
+            candidate_origin=getattr(note, "candidate_origin", None),
+            **self._lineage_kwargs(note),
+        )
+
+    @classmethod
+    def _lineage_kwargs(cls, note: Note) -> dict:
+        source_candidate_id = getattr(note, "source_candidate_id", None) or getattr(note, "candidate_id", None)
+        source_candidate_ids = cls._source_candidate_ids(note)
+        if source_candidate_id and str(source_candidate_id) not in source_candidate_ids:
+            source_candidate_ids = [str(source_candidate_id)] + source_candidate_ids
+        return {
+            "candidate_id": getattr(note, "candidate_id", None),
+            "source_candidate_id": str(source_candidate_id) if source_candidate_id else None,
+            "source_candidate_ids": source_candidate_ids,
+            "source_contour_ids": cls._unique_strings(getattr(note, "source_contour_ids", []) or []),
+            "contour_bridge_evidence": dict(getattr(note, "contour_bridge_evidence", {}) or {}),
+            "contour_bridge_guard_reason_codes": cls._unique_strings(
+                getattr(note, "contour_bridge_guard_reason_codes", []) or []
+            ),
+            "segmentation_evidence": dict(getattr(note, "segmentation_evidence", {}) or {}),
+        }
+
+    @classmethod
+    def _merged_lineage_kwargs(cls, prev: Note, note: Note) -> dict:
+        prev_lineage = cls._lineage_kwargs(prev)
+        note_lineage = cls._lineage_kwargs(note)
+        source_candidate_ids = cls._unique_strings(
+            list(prev_lineage.get("source_candidate_ids") or [])
+            + list(note_lineage.get("source_candidate_ids") or [])
+        )
+        source_contour_ids = cls._unique_strings(
+            list(prev_lineage.get("source_contour_ids") or [])
+            + list(note_lineage.get("source_contour_ids") or [])
+        )
+        segmentation_evidence = dict(prev_lineage.get("segmentation_evidence") or {})
+        note_segmentation = dict(note_lineage.get("segmentation_evidence") or {})
+        prev_frame_range = segmentation_evidence.get("source_f0_frame_range")
+        note_frame_range = note_segmentation.get("source_f0_frame_range")
+        merged_frame_range = cls._merge_frame_ranges(prev_frame_range, note_frame_range)
+        original_frame_ranges = [
+            dict(frame_range)
+            for frame_range in (prev_frame_range, note_frame_range)
+            if isinstance(frame_range, dict)
+        ]
+        if merged_frame_range:
+            segmentation_evidence["source_f0_frame_range"] = merged_frame_range
+            segmentation_evidence["merged_source_f0_frame_ranges"] = original_frame_ranges
+        contour_bridge_evidence = dict(prev_lineage.get("contour_bridge_evidence") or {})
+        note_bridge_evidence = dict(note_lineage.get("contour_bridge_evidence") or {})
+        if note_bridge_evidence:
+            contour_bridge_evidence["merged_sources"] = [contour_bridge_evidence, note_bridge_evidence]
+        return {
+            "candidate_id": getattr(prev, "candidate_id", None) or getattr(note, "candidate_id", None),
+            "source_candidate_id": (source_candidate_ids[0] if source_candidate_ids else None),
+            "source_candidate_ids": source_candidate_ids,
+            "source_contour_ids": source_contour_ids,
+            "contour_bridge_evidence": contour_bridge_evidence,
+            "contour_bridge_guard_reason_codes": cls._unique_strings(
+                list(prev_lineage.get("contour_bridge_guard_reason_codes") or [])
+                + list(note_lineage.get("contour_bridge_guard_reason_codes") or [])
+            ),
+            "segmentation_evidence": segmentation_evidence,
+        }
+
+    @classmethod
+    def _source_candidate_ids(cls, note: Note) -> list[str]:
+        values = []
+        for attr in ("source_candidate_id", "candidate_id"):
+            value = getattr(note, attr, None)
+            if value:
+                values.append(value)
+        values.extend(getattr(note, "source_candidate_ids", []) or [])
+        return cls._unique_strings(values)
+
+    @staticmethod
+    def _merge_frame_ranges(left: object, right: object) -> dict:
+        if not isinstance(left, dict):
+            return dict(right) if isinstance(right, dict) else {}
+        if not isinstance(right, dict):
+            return dict(left)
+        start_values = [value for value in (left.get("start_frame_index"), right.get("start_frame_index")) if value is not None]
+        end_values = [value for value in (left.get("end_frame_index"), right.get("end_frame_index")) if value is not None]
+        if not start_values or not end_values:
+            return dict(left)
+        start = int(min(start_values))
+        end = int(max(end_values))
+        result = dict(left)
+        result["start_frame_index"] = start
+        result["end_frame_index"] = end
+        result["frame_count"] = max(1, end - start + 1)
+        return result
+
+    @staticmethod
+    def _unique_strings(values: object) -> list[str]:
+        seen: set[str] = set()
+        result: list[str] = []
+        for value in values or []:
+            text = str(value or "").strip()
+            if text and text not in seen:
+                seen.add(text)
+                result.append(text)
+        return result
     @staticmethod
     def _is_mergeable_pitch(
         left: str,
@@ -195,10 +269,10 @@ class NoteQuantizer:
                 # 优先保留高置信度音符的完整时长，截断另一条以消除重叠。
                 if note.confidence > prev.confidence:
                     new_prev_end = max(float(prev.start_time), float(note.start_time) - min_gap)
-                    resolved[-1] = self._trimmed_note(prev, start_time=float(prev.start_time), end_time=new_prev_end)
+                    resolved[-1] = self._trim_note_end(prev, new_prev_end)
                 else:
                     adjusted_start = min(float(note.end_time), float(prev.end_time) + min_gap)
-                    note = self._trimmed_note(note, start_time=adjusted_start, end_time=float(note.end_time))
+                    note = self._trim_note_start(note, adjusted_start)
 
             if note.end_time > note.start_time:
                 resolved.append(note)
@@ -261,90 +335,4 @@ def _unique_reason_codes(values: list[str]) -> list[str]:
             seen.add(text)
             result.append(text)
     return result
-
-
-def _merged_source_candidate_ids(left: Note, right: Note) -> list[str]:
-    values = [
-        getattr(left, "source_candidate_id", None),
-        getattr(left, "candidate_id", None),
-        *list(getattr(left, "source_candidate_ids", []) or []),
-        getattr(right, "source_candidate_id", None),
-        getattr(right, "candidate_id", None),
-        *list(getattr(right, "source_candidate_ids", []) or []),
-    ]
-    return _unique_strings(values)
-
-
-def _merged_f0_frame_range(left: Note, right: Note) -> dict[str, object]:
-    ranges = [
-        dict(getattr(left, "source_f0_frame_range", {}) or {}),
-        dict(getattr(right, "source_f0_frame_range", {}) or {}),
-    ]
-    present = [item for item in ranges if item]
-    if not present:
-        return {}
-    merged: dict[str, object] = {}
-    numeric_min_fields = ("start_frame_index", "start_time_sec", "start_time")
-    numeric_max_fields = ("end_frame_index", "end_time_sec", "end_time")
-    for field in numeric_min_fields:
-        values = [_safe_number(item.get(field)) for item in present]
-        values = [value for value in values if value is not None]
-        if values:
-            merged[field] = int(min(values)) if field.endswith("index") else min(values)
-    for field in numeric_max_fields:
-        values = [_safe_number(item.get(field)) for item in present]
-        values = [value for value in values if value is not None]
-        if values:
-            merged[field] = int(max(values)) if field.endswith("index") else max(values)
-    for item in present:
-        for key, value in item.items():
-            if key not in merged and value is not None:
-                merged[key] = value
-    return merged
-
-
-def _merged_origin(left: Note, right: Note) -> str | None:
-    origins = _unique_strings([getattr(left, "candidate_origin", None), getattr(right, "candidate_origin", None)])
-    if not origins:
-        return None
-    return origins[0] if len(origins) == 1 else "+".join(origins)
-
-
-def _merged_mapping_field(left: Note, right: Note, field_name: str) -> dict[str, object]:
-    left_value = dict(getattr(left, field_name, {}) or {})
-    right_value = dict(getattr(right, field_name, {}) or {})
-    if not left_value:
-        return right_value
-    if not right_value:
-        return left_value
-    merged = dict(left_value)
-    for key, value in right_value.items():
-        if key not in merged:
-            merged[key] = value
-        elif merged[key] != value:
-            merged[f"right_{key}"] = value
-    return merged
-
-
-def _unique_strings(values: list[object]) -> list[str]:
-    seen: set[str] = set()
-    result: list[str] = []
-    for value in values:
-        text = str(value or "").strip()
-        if text and text not in seen:
-            seen.add(text)
-            result.append(text)
-    return result
-
-
-def _safe_number(value: object) -> float | None:
-    try:
-        if value is None:
-            return None
-        number = float(value)
-    except (TypeError, ValueError):
-        return None
-    if number != number or abs(number) == float("inf"):
-        return None
-    return number
 

@@ -3,9 +3,11 @@ from unittest.mock import patch
 
 import numpy as np
 
+from app.modules.analysis_ir.types import AnalysisIR, AnalysisIRMeta
 from app.modules.pitch.config import PitchDetectionConfig
 from app.modules.pitch.detector import PitchDetector
 from app.modules.pitch.pipeline import PitchPipeline
+from app.modules.score_ir.builder import ScoreIRBuilder
 from app.modules.pitch.reason_codes import CONTOUR_TO_CANDIDATE_BRIDGE, DP_VITERBI_SEGMENTATION
 from app.modules.pitch.types import ArrangementDecision, ArrangementSegmentDecision, F0Frame, F0Track, Note, PitchPipelineRequest
 
@@ -27,6 +29,26 @@ class TestPitchPipeline(unittest.TestCase):
                 F0Frame(time_sec=0.3, frequency_hz=261.63, confidence=0.9, voiced=True, pitch_midi=60.0),
                 F0Frame(time_sec=0.5, frequency_hz=261.63, confidence=0.9, voiced=True, pitch_midi=60.0),
             ],
+            vocal_activity=[],
+            analysis_info={"extractor": "test_extractor", "authoritative": True},
+        )
+
+    @staticmethod
+    def _two_contour_f0_track(source_stem: str = "lead", input_audio_path: str = "dummy.wav") -> F0Track:
+        return F0Track(
+            source_stem=source_stem,
+            input_audio_path=input_audio_path,
+            backend="rmvpe",
+            frames=[
+                F0Frame(time_sec=0.1, frequency_hz=261.63, confidence=0.9, voiced=True, pitch_midi=60.0),
+                F0Frame(time_sec=0.3, frequency_hz=261.63, confidence=0.9, voiced=True, pitch_midi=60.0),
+                F0Frame(time_sec=0.5, frequency_hz=261.63, confidence=0.9, voiced=True, pitch_midi=60.0),
+                F0Frame(time_sec=0.8, frequency_hz=0.0, confidence=0.0, voiced=False, pitch_midi=None),
+                F0Frame(time_sec=1.0, frequency_hz=293.66, confidence=0.9, voiced=True, pitch_midi=62.0),
+                F0Frame(time_sec=1.2, frequency_hz=293.66, confidence=0.9, voiced=True, pitch_midi=62.0),
+                F0Frame(time_sec=1.4, frequency_hz=293.66, confidence=0.9, voiced=True, pitch_midi=62.0),
+            ],
+            vocal_activity=[],
             analysis_info={"extractor": "test_extractor", "authoritative": True},
         )
 
@@ -344,7 +366,7 @@ class TestPitchPipeline(unittest.TestCase):
         with patch.object(pipeline.detector, "detect", side_effect=_detect), patch.object(
             pipeline.f0_extractor,
             "extract",
-            side_effect=RuntimeError("test extractor disabled"),
+            return_value=self._two_contour_f0_track(input_audio_path="dummy.wav"),
         ), patch.object(
             pipeline.beat_tracker, "track", return_value=_BeatResult()
         ), patch.object(pipeline.key_analyzer, "analyze", return_value=_KeyResult()), patch.object(
@@ -367,7 +389,13 @@ class TestPitchPipeline(unittest.TestCase):
         self.assertEqual(result.semantic_audio.melody_candidates.analysis_info["candidate_authority"], "note_candidate_set_v2")
         self.assertEqual(result.semantic_audio.melody_candidates.analysis_info["candidate_count"], 2)
         self.assertTrue(result.lead_notes[0].source_contour_ids)
+        self.assertEqual(result.analysis_info["raw_notes_semantics"], "detector_segmentation_optional_evidence")
         self.assertEqual(result.analysis_info["quantize_mode"], "adaptive")
+        self.assertEqual(result.analysis_info["confidence_policy"]["policy_version"], "lead_vocal_confidence_policy_v1")
+        self.assertEqual(
+            result.semantic_audio.melody_candidates.analysis_info["quantized_notes"]["confidence_policy"]["threshold_change_reason"],
+            "mvp_recall_bias_lower_confidence_gates",
+        )
         self.assertEqual(result.analysis_info["measure_segmentation"], "enabled")
         self.assertIn("has_accompaniment", result.analysis_info)
         self.assertIn("downbeat_method", result.analysis_info)
@@ -379,7 +407,8 @@ class TestPitchPipeline(unittest.TestCase):
         self.assertIsNotNone(result.f0_track)
         self.assertEqual(result.f0_track.backend, "rmvpe")
         self.assertEqual(len(result.f0_track.frames), 7)
-        self.assertEqual(len(result.semantic_audio.f0_track.vocal_activity), 1)
+        self.assertEqual(len(result.semantic_audio.f0_track.vocal_activity), 0)
+        self.assertEqual(len(result.semantic_audio.f0_track.frames), 7)
 
     def test_pipeline_builds_authoritative_candidates_from_f0_when_raw_detector_notes_empty(self):
         pipeline = PitchPipeline()
@@ -430,9 +459,9 @@ class TestPitchPipeline(unittest.TestCase):
         self.assertEqual(len(result.semantic_audio.melody_candidates.notes), 1)
         candidate = result.semantic_audio.melody_candidates.notes[0]
         self.assertEqual(candidate.source_contour_ids, ["pc_00001"])
-        self.assertTrue(candidate.source_f0_frame_range)
+        self.assertTrue(candidate.segmentation_evidence["source_f0_frame_range"])
         self.assertEqual(result.semantic_audio.melody_candidates.analysis_info["candidate_authority"], "note_candidate_set_v2")
-        self.assertEqual(result.semantic_audio.melody_candidates.analysis_info["raw_candidates_empty"], True)
+        self.assertEqual(result.semantic_audio.melody_candidates.analysis_info["raw_detector_evidence_count"], 0)
         self.assertEqual(result.analysis_info["lead_selection_authoritative"], True)
         self.assertEqual(result.lead_notes[0].source_candidate_id, candidate.candidate_id)
 
@@ -507,7 +536,7 @@ class TestPitchPipeline(unittest.TestCase):
         with patch.object(pipeline.detector, "detect", side_effect=_detect), patch.object(
             pipeline.f0_extractor,
             "extract",
-            side_effect=RuntimeError("test extractor disabled"),
+            return_value=self._two_contour_f0_track(input_audio_path="dummy.wav"),
         ), patch.object(
             pipeline.beat_tracker, "track", return_value=_BeatResult()
         ), patch.object(pipeline.key_analyzer, "analyze", return_value=_KeyResult()), patch.object(
@@ -518,13 +547,13 @@ class TestPitchPipeline(unittest.TestCase):
             result = pipeline.run("dummy.wav")
 
         bridged_raw = [note for note in result.raw_notes if note.candidate_origin == CONTOUR_TO_CANDIDATE_BRIDGE]
-        self.assertEqual(len(bridged_raw), 1)
-        self.assertIn(CONTOUR_TO_CANDIDATE_BRIDGE, bridged_raw[0].reason_codes)
-        self.assertEqual(bridged_raw[0].contour_bridge_evidence["raw_overlap_duration_sec"], 0.0)
+        self.assertEqual(bridged_raw, [])
         bridge_summary = result.semantic_audio.melody_candidates.analysis_info["contour_to_candidate_bridge"]
-        self.assertEqual(bridge_summary["accepted_count"], 1)
-        self.assertEqual(result.semantic_audio.melody_candidates.analysis_info["contour_bridge_candidate_count"], 1)
-        self.assertTrue(any(CONTOUR_TO_CANDIDATE_BRIDGE in note.reason_codes for note in result.lead_notes))
+        self.assertEqual(result.semantic_audio.melody_candidates.analysis_info["contour_to_candidate_bridge_mode"], "shadow_diagnostics_only")
+        self.assertIn("accepted_count", bridge_summary)
+        self.assertFalse(any(note.candidate_origin == CONTOUR_TO_CANDIDATE_BRIDGE for note in result.lead_notes))
+        self.assertEqual(result.semantic_audio.melody_candidates.analysis_info["candidate_authority"], "note_candidate_set_v2")
+        self.assertEqual(result.analysis_info["lead_candidate_authority"], "note_candidate_set_v2")
 
     def test_time_signature_and_anacrusis_with_downbeats(self):
         cfg = PitchDetectionConfig(beats_per_bar=3, beat_unit=8)
@@ -656,14 +685,116 @@ class TestPitchPipeline(unittest.TestCase):
 
         self.assertEqual(result.analysis_info["detected_note_count"], 3)
         self.assertEqual(result.analysis_info["melody_note_count"], 1)
-        self.assertEqual(result.analysis_info["melody_notes_removed"], 2)
+        self.assertEqual(result.analysis_info["melody_notes_removed"], 0)
+        self.assertEqual(result.analysis_info["raw_detector_evidence_count"], 3)
+        self.assertEqual(result.semantic_audio.melody_candidates.analysis_info["raw_detector_role"], "optional_evidence")
         self.assertEqual(len(result.raw_notes), 3)
         self.assertEqual(len(result.lead_notes), 1)
         self.assertEqual(result.lead_notes[0].pitch, "C4")
         self.assertEqual(result.lead_notes[0].source_contour_ids, ["pc_00001"])
         self.assertEqual(result.semantic_audio.melody_candidates.analysis_info["candidate_authority"], "note_candidate_set_v2")
-        self.assertEqual(result.semantic_audio.melody_candidates.analysis_info["candidate_count"], 3)
+        self.assertEqual(result.semantic_audio.melody_candidates.analysis_info["candidate_count"], 1)
         self.assertEqual(result.semantic_audio.melody_candidates.analysis_info["selected_count"], 1)
+
+
+    def test_pipeline_builds_authoritative_candidates_when_raw_detector_notes_empty(self):
+        pipeline = PitchPipeline()
+
+        class _BeatResult:
+            bpm = 120.0
+            beat_times = [0.0, 0.5, 1.0, 1.5]
+            confidence = 0.93
+
+        class _KeyResult:
+            key = "C Major"
+            confidence = 0.89
+            method = "librosa"
+
+        class _DownbeatResult:
+            downbeat_times = [0.0]
+            method = "librosa"
+            confidence = 0.8
+            beats_per_bar = 4
+
+        with patch.object(pipeline.detector, "detect", return_value=[]), patch.object(
+            pipeline.f0_extractor,
+            "extract",
+            return_value=self._authoritative_f0_track(input_audio_path="vocals.wav"),
+        ), patch.object(
+            pipeline.beat_tracker, "track", return_value=_BeatResult()
+        ), patch.object(pipeline.key_analyzer, "analyze", return_value=_KeyResult()), patch.object(
+            pipeline.downbeat_tracker, "track", return_value=_DownbeatResult()
+        ), patch(
+            "app.modules.pitch.pipeline.get_audio_duration", return_value=2.0
+        ):
+            result = pipeline.run("vocals.wav")
+
+        self.assertEqual(result.raw_notes, [])
+        self.assertGreaterEqual(len(result.semantic_audio.melody_candidates.notes), 1)
+        self.assertGreaterEqual(len(result.lead_notes), 1)
+        self.assertGreaterEqual(len(result.measures[0]["notes"]), 1)
+        candidate = result.semantic_audio.melody_candidates.notes[0]
+        selected = result.lead_notes[0]
+        quantized = result.measures[0]["notes"][0]
+        self.assertEqual(result.analysis_info["lead_candidate_authority"], "note_candidate_set_v2")
+        self.assertIn("confidence_policy", result.semantic_audio.melody_candidates.analysis_info["note_candidate_set"]["analysis_info"])
+        self.assertIn("confidence_policy", result.semantic_audio.melody_candidates.analysis_info["quantized_notes"])
+        self.assertEqual(result.analysis_info["raw_detector_evidence_count"], 0)
+        self.assertEqual(result.semantic_audio.melody_candidates.analysis_info["raw_detector_role"], "optional_evidence")
+        self.assertTrue(candidate.source_contour_ids)
+        self.assertTrue(candidate.source_candidate_ids)
+        self.assertTrue(candidate.segmentation_evidence["source_f0_frame_range"])
+        self.assertEqual(selected.source_candidate_id, candidate.candidate_id)
+        self.assertEqual(quantized["source_candidate_id"], candidate.candidate_id)
+        self.assertTrue(quantized["source_contour_ids"])
+        self.assertTrue(quantized["source_f0_frame_range"])
+
+    def test_score_ir_notes_trace_back_to_candidate_f0_frame_range(self):
+        pipeline = PitchPipeline()
+
+        class _BeatResult:
+            bpm = 120.0
+            beat_times = [0.0, 0.5, 1.0, 1.5]
+            confidence = 0.93
+
+        class _KeyResult:
+            key = "C Major"
+            confidence = 0.89
+            method = "librosa"
+
+        class _DownbeatResult:
+            downbeat_times = [0.0]
+            method = "librosa"
+            confidence = 0.8
+            beats_per_bar = 4
+
+        with patch.object(pipeline.detector, "detect", return_value=[]), patch.object(
+            pipeline.f0_extractor,
+            "extract",
+            return_value=self._authoritative_f0_track(input_audio_path="vocals.wav"),
+        ), patch.object(
+            pipeline.beat_tracker, "track", return_value=_BeatResult()
+        ), patch.object(pipeline.key_analyzer, "analyze", return_value=_KeyResult()), patch.object(
+            pipeline.downbeat_tracker, "track", return_value=_DownbeatResult()
+        ), patch(
+            "app.modules.pitch.pipeline.get_audio_duration", return_value=2.0
+        ):
+            result = pipeline.run("vocals.wav")
+
+        candidate_by_id = {
+            note.candidate_id: note
+            for note in result.semantic_audio.melody_candidates.notes
+            if note.candidate_id
+        }
+        score_ir = ScoreIRBuilder().build(result)
+        self.assertGreaterEqual(len(score_ir.notes), 1)
+        for score_note in score_ir.notes:
+            source_candidate_id = score_note.source_candidate_id
+            self.assertIsNotNone(source_candidate_id)
+            self.assertIn(source_candidate_id, candidate_by_id)
+            candidate = candidate_by_id[source_candidate_id]
+            self.assertTrue(candidate.source_contour_ids)
+            self.assertTrue(candidate.segmentation_evidence["source_f0_frame_range"])
 
     def test_pipeline_uses_split_inputs_for_semantic_roles(self):
         pipeline = PitchPipeline()
@@ -797,7 +928,7 @@ class TestPitchPipeline(unittest.TestCase):
         decision = result.analysis_info.get("arrangement_decision")
         self.assertIsInstance(decision, dict)
         self.assertEqual(decision["policy"], "deterministic_melody_source_arbitration")
-        self.assertEqual(decision["lead_source"], "rmvpe")
+        self.assertEqual(decision["lead_source"], "note_candidate_set_v2")
         self.assertEqual(decision["lead_source_stem"], "vocals")
         self.assertEqual(decision["lead_note_count"], 1)
         self.assertIn("support_note_count", decision)

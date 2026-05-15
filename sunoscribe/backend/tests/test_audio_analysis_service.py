@@ -15,6 +15,186 @@ from app.services.media_ingest_service import MediaIngestService
 from app.services.workspace import ProjectWorkspace
 
 
+def _typed_lineage() -> dict:
+    return {
+        "source_candidate_id": "sem_raw_1",
+        "source_candidate_ids": ["sem_raw_1"],
+        "source_contour_ids": ["pc_00001"],
+        "source_f0_frame_range": {
+            "start_frame_index": 0,
+            "end_frame_index": 3,
+            "frame_count": 4,
+        },
+    }
+
+
+def _typed_pitch_contours_payload() -> dict:
+    return {
+        "version": "pitch_contours_v1",
+        "schema_version": "pitch_contour_set_v1",
+        "contours": [
+            {
+                "contour_id": "pc_00001",
+                "start_frame_index": 0,
+                "end_frame_index": 3,
+                "start_time_sec": 0.10,
+                "end_time_sec": 0.34,
+                "frame_count": 4,
+                "mean_confidence": 0.92,
+                "pitch_center_midi": 57.0,
+            }
+        ],
+    }
+
+
+def _typed_note_candidate_set_payload() -> dict:
+    lineage = _typed_lineage()
+    return {
+        "version": "note_candidate_builder_v1",
+        "schema_version": "note_candidate_set_v2",
+        "builder_version": "note_candidate_builder_v1",
+        "lineage_contract": {
+            "stage": "NoteCandidateSet",
+            "input_stages": ["F0Track", "PitchContourSet"],
+            "required_candidate_fields": [
+                "candidate_id",
+                "source_contour_ids",
+                "source_f0_frame_range",
+            ],
+        },
+        "analysis_info": {
+            "builder_version": "note_candidate_builder_v1",
+            "candidate_authority": "note_candidate_set_v2",
+            "production_input_source": "f0_track.pitch_contours",
+        },
+        "melody_candidates": {
+            "role": "melody_candidates",
+            "schema_version": "note_candidate_set_v2",
+            "source_stem": "vocals",
+            "input_audio_path": "vocals.wav",
+            "notes": [
+                {
+                    "candidate_id": "sem_raw_1",
+                    "stable_id": "sem_raw_1",
+                    "pitch": "A3",
+                    "start_time": 0.10,
+                    "end_time": 0.34,
+                    "pitch_center_midi": 57.0,
+                    "confidence": 0.88,
+                    **lineage,
+                }
+            ],
+            "selected_notes": [],
+            "analysis_info": {
+                "candidate_authority": "note_candidate_set_v2",
+                "candidate_count": 1,
+                "selected_count": 0,
+            },
+        },
+    }
+
+
+def _typed_selected_melody_payload() -> dict:
+    lineage = _typed_lineage()
+    return {
+        "version": "selected_melody_v2",
+        "schema_version": "selected_melody_v2",
+        "selected_notes": [
+            {
+                "candidate_id": "sem_raw_1",
+                "stable_id": "sem_raw_1",
+                "start_time": 0.10,
+                "end_time": 0.34,
+                "pitch": "A3",
+                "pitch_center_midi": 57.0,
+                "confidence": 0.93,
+                **lineage,
+            }
+        ],
+        "rejected_candidates": [],
+        "analysis_info": {"input_source": "note_candidate_set_v2.notes", "candidate_count": 1},
+    }
+
+
+def _typed_quantized_notes_payload() -> dict:
+    lineage = _typed_lineage()
+    return {
+        "version": "pitch_pipeline_quantized_notes_v1",
+        "schema_version": "quantized_note_set_v2",
+        "quantizer_backend": "pitch_pipeline_quantizer",
+        "requested_quantizer_backend": "pitch_pipeline_quantizer",
+        "fallback_used": False,
+        "fallback_reason": None,
+        "notes": [
+            {
+                "id": "qn_001_0001",
+                "quantized_note_id": "qn_001_0001",
+                "pitch": "A3",
+                "pitch_midi": 57,
+                "start_time": 0.10,
+                "end_time": 0.34,
+                "start_time_sec": 0.10,
+                "end_time_sec": 0.34,
+                "quantized_start_time_sec": 0.0,
+                "quantized_end_time_sec": 0.5,
+                "quantized_duration_sec": 0.5,
+                "duration_beats": 1.0,
+                "note_type": "quarter",
+                "measure_num": 1,
+                "measure_index": 0,
+                "beat_position": 1.0,
+                "beat_in_measure": 1.0,
+                "confidence": 0.93,
+                **lineage,
+            }
+        ],
+        "summary": {"note_count": 1},
+    }
+
+
+def _typed_melody_candidate_set() -> NoteCandidateSet:
+    lineage = _typed_lineage()
+    return NoteCandidateSet(
+        role="melody_candidates",
+        source_stem="vocals",
+        input_audio_path="vocals.wav",
+        notes=[
+            Note(
+                pitch="A3",
+                start_time=0.10,
+                end_time=0.34,
+                confidence=0.88,
+                candidate_id="sem_raw_1",
+                source_candidate_id="sem_raw_1",
+                source_candidate_ids=["sem_raw_1"],
+                source_contour_ids=["pc_00001"],
+                segmentation_evidence={"source_f0_frame_range": lineage["source_f0_frame_range"]},
+            )
+        ],
+        selected_notes=[
+            Note(
+                pitch="A3",
+                start_time=0.10,
+                end_time=0.34,
+                confidence=0.93,
+                candidate_id="sem_raw_1",
+                source_candidate_id="sem_raw_1",
+                source_candidate_ids=["sem_raw_1"],
+                source_contour_ids=["pc_00001"],
+                segmentation_evidence={"source_f0_frame_range": lineage["source_f0_frame_range"]},
+            )
+        ],
+        analysis_info={
+            "candidate_authority": "note_candidate_set_v2",
+            "production_input_source": "f0_track.pitch_contours",
+            "pitch_contours": _typed_pitch_contours_payload(),
+            "note_candidate_set": _typed_note_candidate_set_payload(),
+            "selected_melody": _typed_selected_melody_payload(),
+            "quantized_notes": _typed_quantized_notes_payload(),
+        },
+    )
+
+
 class _FakeSeparator:
     def __init__(self, stems: dict[str, Path]) -> None:
         self._stems = stems
@@ -63,6 +243,11 @@ class _CapturePitchPipeline:
                 duration_sec=3.0,
                 time_signature="4/4",
             ),
+            analysis_info={
+                "lead_note_source": "quantized_notes",
+                "lead_candidate_authority": "note_candidate_set_v2",
+                "lead_selection_authoritative": True,
+            },
             measures=[
                 {
                     "measure_num": 1,
@@ -70,12 +255,22 @@ class _CapturePitchPipeline:
                     "end_time": 1.0,
                     "notes": [
                         {
+                            "id": "qn_001_0001",
+                            "quantized_note_id": "qn_001_0001",
                             "pitch": "A3",
                             "start_time": 0.0,
                             "end_time": 0.5,
                             "duration_beats": 1.0,
                             "note_type": "quarter",
                             "confidence": 0.9,
+                            "source_candidate_id": "sem_raw_1",
+                            "source_candidate_ids": ["sem_raw_1"],
+                            "source_contour_ids": ["pc_00001"],
+                            "source_f0_frame_range": {
+                                "start_frame_index": 0,
+                                "end_frame_index": 2,
+                                "frame_count": 3,
+                            },
                         }
                     ],
                 }
@@ -104,6 +299,7 @@ class _CapturePitchPipeline:
             ),
             semantic_audio=SemanticAudioResult(
                 source_stems=dict(request.source_stems),
+                melody_candidates=_typed_melody_candidate_set(),
                 rhythm_grid=RhythmGrid(
                     source_stem="drums",
                     input_audio_path="drums.wav",
@@ -161,6 +357,11 @@ class _SemanticCandidatePitchPipeline:
                 duration_sec=3.0,
                 time_signature="4/4",
             ),
+            analysis_info={
+                "lead_note_source": "quantized_notes",
+                "lead_candidate_authority": "note_candidate_set_v2",
+                "lead_selection_authoritative": True,
+            },
             measures=[
                 {
                     "measure_num": 1,
@@ -193,30 +394,7 @@ class _SemanticCandidatePitchPipeline:
             ),
             semantic_audio=SemanticAudioResult(
                 source_stems=dict(request.source_stems),
-                melody_candidates=NoteCandidateSet(
-                    role="melody_candidates",
-                    source_stem="vocals",
-                    input_audio_path=str(request.lead_audio_path),
-                    notes=[
-                        Note(
-                            pitch="A3",
-                            start_time=0.10,
-                            end_time=0.34,
-                            confidence=0.88,
-                            candidate_id="sem_raw_1",
-                        )
-                    ],
-                    selected_notes=[
-                        Note(
-                            pitch="A3",
-                            start_time=0.10,
-                            end_time=0.34,
-                            confidence=0.93,
-                            candidate_id="sem_selected_1",
-                        )
-                    ],
-                    analysis_info={"backend": "semantic_detector_v1"},
-                ),
+                melody_candidates=_typed_melody_candidate_set(),
                 rhythm_grid=RhythmGrid(
                     source_stem="drums",
                     input_audio_path="drums.wav",
@@ -227,6 +405,13 @@ class _SemanticCandidatePitchPipeline:
                 ),
             ),
         )
+
+
+class _MissingTypedNoteCandidateArtifactPitchPipeline(_SemanticCandidatePitchPipeline):
+    def run(self, request):
+        result = super().run(request)
+        result.semantic_audio.melody_candidates.analysis_info.pop("note_candidate_set", None)
+        return result
 
 
 class _CaptureMelodySelector:
@@ -245,9 +430,10 @@ class _CaptureMelodySelector:
                     "end_time_sec": 0.3,
                     "pitch_center_midi": 57,
                     "confidence": 0.9,
-                    "source_contour_ids": ["pc_00001"],
+                    "source_candidate_id": "sel_1",
                     "source_candidate_ids": ["sel_1"],
-                    "source_f0_frame_range": {"start_frame_index": 0, "end_frame_index": 2},
+                    "source_contour_ids": ["pc_00001"],
+                    "source_f0_frame_range": {"start_frame_index": 0, "end_frame_index": 2, "frame_count": 3},
                     "reason_codes": [],
                 }
             ],
@@ -373,10 +559,11 @@ class TestAudioAnalysisService(unittest.TestCase):
                 workspace=workspace,
             )
 
-            self.assertIsNotNone(selector.last_kwargs)
-            self.assertEqual(selector.last_kwargs["vocal_activity"]["segments"][0]["state"], "vocal")
-            self.assertEqual(result.selected_melody_dict["selected_notes"][0]["candidate_id"], "sel_1")
+            self.assertIsNone(selector.last_kwargs)
+            self.assertEqual(result.selected_melody_dict["selected_notes"][0]["candidate_id"], "sem_raw_1")
             self.assertEqual(result.vocal_activity_dict["segments"][0]["source_stem"], "vocals")
+            self.assertEqual(result.pitch_contours_dict["contours"][0]["contour_id"], "pc_00001")
+            self.assertEqual(result.quantized_notes_dict["notes"][0]["source_candidate_id"], "sem_raw_1")
 
     def test_melody_transcription_builds_note_candidates_with_raw_source_trace(self) -> None:
         with TemporaryDirectory() as temp_dir:
@@ -416,20 +603,13 @@ class TestAudioAnalysisService(unittest.TestCase):
             )
 
             self.assertIsNotNone(result.note_candidates_dict)
-            self.assertTrue(result.note_candidates_dict["builder_version"])
+            self.assertEqual(result.note_candidates_dict["schema_version"], "note_candidate_set_v2")
             melody_payload = result.note_candidates_dict["melody_candidates"]
-            self.assertEqual(melody_payload["selected_notes"], [])
-            self.assertEqual(melody_payload["raw_source"]["selected_notes"][0]["candidate_id"], "sem_selected_1")
-            self.assertEqual(melody_payload["raw_source"]["notes"][0]["candidate_id"], "sem_raw_1")
-            built_note = melody_payload["notes"][0]
-            self.assertTrue(built_note["stable_id"])
-            self.assertEqual(built_note["source_candidate_ids"][0], "sem_raw_1")
-            self.assertEqual(built_note["source_contour_ids"], ["pc_00001"])
-            self.assertIsNotNone(selector.last_kwargs)
-            self.assertEqual(selector.last_kwargs["note_candidates"]["melody_candidates"]["selected_notes"], [])
-            self.assertEqual(result.selected_melody_dict["selected_notes"][0]["source_candidate_id"], "sel_1")
-            self.assertIsNotNone(result.quantized_notes_dict)
-            self.assertEqual(result.quantized_notes_dict["notes"][0]["source_candidate_id"], "sel_1")
+            self.assertEqual(melody_payload["analysis_info"]["candidate_authority"], "note_candidate_set_v2")
+            self.assertEqual(melody_payload["notes"][0]["candidate_id"], "sem_raw_1")
+            self.assertEqual(melody_payload["notes"][0]["source_candidate_ids"], ["sem_raw_1"])
+            self.assertEqual(melody_payload["notes"][0]["source_contour_ids"], ["pc_00001"])
+            self.assertIsNone(selector.last_kwargs)
 
     def test_process_audio_canonicalizes_mp4_before_separation(self) -> None:
         with TemporaryDirectory() as temp_dir:
@@ -584,6 +764,14 @@ class TestAudioAnalysisService(unittest.TestCase):
             self.assertEqual(len(score_ir_builder.last_args), 2)
             self.assertNotIn("analysis_ir", score_ir_builder.last_kwargs)
             self.assertIn("quantized_notes_artifact", score_ir_builder.last_kwargs)
+            self.assertEqual(perception.score_ir_dict["notes"][0]["source"], "quantized_notes")
+            self.assertEqual(perception.score_ir_dict["notes"][0]["source_candidate_ids"], ["sem_raw_1"])
+            self.assertEqual(perception.score_ir_dict["notes"][0]["source_contour_ids"], ["pc_00001"])
+            self.assertEqual(perception.score_ir_dict["notes"][0]["source_f0_frame_range"]["frame_count"], 4)
+            self.assertEqual(
+                perception.score_ir_dict["notes"][0]["source_f0_frame_range"],
+                perception.quantized_notes_dict["notes"][0]["source_f0_frame_range"],
+            )
             self.assertEqual(perception.semantic_audio_dict["source_stems"]["bass"], str(workspace.stem_path("bass")))
             self.assertIsNotNone(perception.f0_track_dict)
             self.assertEqual(perception.f0_track_dict["backend"], "rmvpe")
@@ -592,20 +780,20 @@ class TestAudioAnalysisService(unittest.TestCase):
             self.assertEqual(frame["f0_hz"], 220.0)
             self.assertEqual(frame["midi_float"], 57.0)
             self.assertIsNotNone(perception.note_candidates_dict)
+            self.assertEqual(perception.note_candidates_dict["schema_version"], "note_candidate_set_v2")
             self.assertIn("melody_candidates", perception.note_candidates_dict)
-            self.assertTrue(perception.note_candidates_dict["builder_version"])
             contour_candidate = perception.note_candidates_dict["melody_candidates"]["notes"][0]
-            self.assertTrue(contour_candidate["stable_id"])
+            self.assertEqual(contour_candidate["candidate_id"], "sem_raw_1")
             self.assertEqual(contour_candidate["source_contour_ids"], ["pc_00001"])
             self.assertIsNotNone(perception.pitch_contours_dict)
-            self.assertGreaterEqual(perception.pitch_contours_dict["summary"]["contour_count"], 1)
+            self.assertEqual(perception.pitch_contours_dict["contours"][0]["contour_id"], "pc_00001")
             self.assertIsNotNone(perception.selected_melody_dict)
-            self.assertIn("summary", perception.selected_melody_dict)
-            self.assertEqual(perception.selected_melody_dict["summary"]["input_source"], "melody_candidates.notes")
+            self.assertEqual(perception.selected_melody_dict["schema_version"], "selected_melody_v2")
+            self.assertEqual(perception.selected_melody_dict["analysis_info"]["input_source"], "note_candidate_set_v2.notes")
             self.assertIsNotNone(perception.quantized_notes_dict)
-            self.assertEqual(perception.quantized_notes_dict["quantizer_backend"], "dp_v1")
+            self.assertEqual(perception.quantized_notes_dict["schema_version"], "quantized_note_set_v2")
+            self.assertEqual(perception.quantized_notes_dict["quantizer_backend"], "pitch_pipeline_quantizer")
             self.assertEqual(len(perception.score_ir_dict["notes"]), len(perception.quantized_notes_dict["notes"]))
-            self.assertEqual(perception.score_ir_dict["notes"][0]["source"], "quantized_notes")
             self.assertEqual(perception.score_ir_dict["meta"]["analysis_info"]["lead_note_source"], "quantized_notes")
             self.assertIsNotNone(perception.rhythm_grid_dict)
             self.assertEqual(perception.vocal_activity_dict["segments"][0]["state"], "vocal")
@@ -662,7 +850,7 @@ class TestAudioAnalysisService(unittest.TestCase):
 
             with self.assertRaisesRegex(
                 RuntimeError,
-                "pitch_pipeline_failed:required F0Track is unavailable for note candidate build",
+                "pitch_pipeline_failed:required PitchContourSet is unavailable: missing typed pipeline artifact",
             ):
                 asyncio.run(service._run_perception_stage(source_audio, source_audio, workspace, AudioAnalysisOptions(project_id="empty_pitch_001")))
 
@@ -729,7 +917,7 @@ class TestAudioAnalysisService(unittest.TestCase):
             self.assertEqual(warnings, [])
             self.assertNotEqual(workspace.final_midi_path.read_bytes(), b"raw-midi-bypass")
 
-    def test_score_ir_build_service_uses_quantized_notes_as_primary_input(self) -> None:
+    def test_legacy_quantized_artifact_score_ir_replacement_is_disabled(self) -> None:
         service = AudioAnalysisService(
             audio_processor=_PassthroughAudioProcessor(),
             vocal_separator=None,
@@ -738,58 +926,30 @@ class TestAudioAnalysisService(unittest.TestCase):
             analysis_inferencer=None,
             midi_exporter=None,
         )
-        pitch_result = PitchAnalysisResult(
-            version="test",
-            meta=MetaInfo(
-                bpm=120.0,
-                bpm_confidence=0.9,
-                key="C Major",
-                key_confidence=0.8,
-                rhythm_type="stable",
-                duration_sec=1.0,
-                time_signature="4/4",
-            ),
-            analysis_info={"lead_note_source": "quantized_notes"},
-        )
-        quantized_notes = {
-            "quantizer_backend": "dp_v1",
-            "notes": [
-                {
-                    "id": "qn_00001",
-                    "source_candidate_id": "cand_00001",
-                    "source_candidate_ids": ["cand_00001"],
-                    "source_contour_ids": ["pc_00001"],
-                    "source_f0_frame_range": {"start_frame_index": 0, "end_frame_index": 2},
-                    "pitch": "C4",
-                    "pitch_midi": 60,
-                    "start_time_sec": 0.30,
-                    "end_time_sec": 0.60,
-                    "quantized_start_time_sec": 0.25,
-                    "quantized_end_time_sec": 0.50,
-                    "quantized_duration_sec": 0.25,
-                    "measure_index": 0,
-                    "beat_in_measure": 1.5,
-                    "duration_beats": 0.5,
-                    "confidence": 0.91,
-                }
-            ],
-        }
+        score_ir = _FakeScoreIRBuilder().build()
 
-        score_ir, score_data = service.score_build_service.build(
-            pitch_result_obj=pitch_result,
-            lyrics_segments=[],
-            quantized_notes_dict=quantized_notes,
-        )
-        service._validate_score_ir_uses_quantized_notes(score_ir, quantized_notes_dict=quantized_notes)
+        with self.assertRaisesRegex(RuntimeError, "legacy_score_ir_quantized_artifact_replacement_disabled"):
+            service._replace_lead_notes_from_quantized_artifact(
+                score_ir,
+                quantized_notes_dict=_typed_quantized_notes_payload(),
+                warnings=[],
+            )
 
-        note = score_ir.notes[0]
-        self.assertEqual(note.source, "quantized_notes")
-        self.assertEqual(note.timing_origin, "performance_time_from_quantized_notes")
-        self.assertAlmostEqual(note.start_time, 0.30)
-        self.assertAlmostEqual(note.performance_start_time_sec, 0.30)
-        self.assertEqual(note.source_contour_ids, ["pc_00001"])
-        self.assertEqual(note.source_f0_frame_range["end_frame_index"], 2)
-        self.assertEqual(score_data["measures"][0]["notes"][0]["quantized_note_id"], "qn_00001")
+
+    def test_legacy_score_ir_quantized_annotation_is_disabled(self) -> None:
+        service = AudioAnalysisService(
+            audio_processor=_PassthroughAudioProcessor(),
+            vocal_separator=None,
+            lyrics_recognizer=None,
+            pitch_pipeline=None,
+            analysis_inferencer=None,
+            midi_exporter=None,
+        )
+        with self.assertRaisesRegex(RuntimeError, "legacy_score_ir_quantized_artifact_annotation_disabled"):
+            service._annotate_score_ir_notes(
+                {"notes": []},
+                quantized_notes_dict=_typed_quantized_notes_payload(),
+            )
 
 
 if __name__ == "__main__":

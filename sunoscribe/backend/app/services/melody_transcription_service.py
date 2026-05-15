@@ -4,10 +4,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
-from app.modules.pitch.melody_selection_artifact import RuleBasedMelodySelector
-from app.modules.pitch.note_candidate_builder import NoteCandidateBuilder
-from app.modules.pitch.pitch_contours import PitchContourBuilder
-from app.modules.pitch.quantized_notes_artifact import QuantizedNotesArtifactBuilder, score_ir_note_annotations
 from app.services.workspace import ProjectWorkspace
 
 
@@ -36,19 +32,15 @@ class MelodyTranscriptionService:
         serializer: Callable[[Any], Any],
         pitch_request_builder: Callable[..., Any],
         short_exception: Callable[[Exception], str],
-        pitch_contour_builder: PitchContourBuilder | None = None,
-        note_candidate_builder: NoteCandidateBuilder | None = None,
-        melody_selector: RuleBasedMelodySelector | None = None,
-        quantized_notes_builder: QuantizedNotesArtifactBuilder | None = None,
+        note_candidate_builder: Any | None = None,
+        melody_selector: Any | None = None,
     ) -> None:
         self.pitch_pipeline = pitch_pipeline
         self.serializer = serializer
         self.pitch_request_builder = pitch_request_builder
         self.short_exception = short_exception
-        self.pitch_contour_builder = pitch_contour_builder or PitchContourBuilder()
-        self.note_candidate_builder = note_candidate_builder or NoteCandidateBuilder()
-        self.melody_selector = melody_selector or RuleBasedMelodySelector()
-        self.quantized_notes_builder = quantized_notes_builder or QuantizedNotesArtifactBuilder()
+        self.legacy_note_candidate_builder = note_candidate_builder
+        self.legacy_melody_selector = melody_selector
 
     def transcribe(
         self,
@@ -99,21 +91,18 @@ class MelodyTranscriptionService:
                 else:
                     result.vocal_activity_dict = {"value": raw_vocal_activity}
 
-        result.pitch_contours_dict = self.pitch_contour_builder.build(result.f0_track_dict)
-        result.note_candidates_dict = self._build_note_candidates_payload(
-            f0_track_dict=result.f0_track_dict,
-            pitch_contours_dict=result.pitch_contours_dict,
+        result.pitch_contours_dict = self._authoritative_pitch_contours_payload(
             semantic_audio_dict=result.semantic_audio_dict,
         )
-        result.selected_melody_dict = self.melody_selector.select(
-            note_candidates=result.note_candidates_dict,
-            pitch_contours=result.pitch_contours_dict,
-            vocal_activity=result.vocal_activity_dict,
+        result.note_candidates_dict = self._authoritative_note_candidates_payload(
+            semantic_audio_dict=result.semantic_audio_dict,
+        )
+        result.selected_melody_dict = self._authoritative_selected_melody_payload(
+            semantic_audio_dict=result.semantic_audio_dict,
         )
         rhythm_grid_dict = self._build_rhythm_grid_payload(result.semantic_audio_dict)
-        result.quantized_notes_dict = self.quantized_notes_builder.build(
-            selected_melody=result.selected_melody_dict,
-            rhythm_grid=rhythm_grid_dict,
+        result.quantized_notes_dict = self._authoritative_quantized_notes_payload(
+            semantic_audio_dict=result.semantic_audio_dict,
         )
 
         if hasattr(self.pitch_pipeline, "export_midi"):
@@ -127,6 +116,115 @@ class MelodyTranscriptionService:
             raise RuntimeError(self._build_no_lead_notes_message(result.pitch_result_obj))
 
         return result
+
+
+    @staticmethod
+    def _authoritative_pitch_contours_payload(
+        *,
+        semantic_audio_dict: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        melody = semantic_audio_dict.get("melody_candidates") if isinstance(semantic_audio_dict, dict) else None
+        analysis_info = melody.get("analysis_info") if isinstance(melody, dict) else None
+        payload = analysis_info.get("pitch_contours") if isinstance(analysis_info, dict) else None
+        if isinstance(payload, dict) and isinstance(payload.get("contours"), list):
+            return dict(payload)
+        raise RuntimeError("required PitchContourSet is unavailable: missing typed pipeline artifact")
+
+    @staticmethod
+    def _authoritative_note_candidates_payload(*, semantic_audio_dict: dict[str, Any] | None) -> dict[str, Any]:
+        if not isinstance(semantic_audio_dict, dict):
+            raise RuntimeError("required NoteCandidateSet v2 is unavailable: missing semantic_audio")
+        melody = semantic_audio_dict.get("melody_candidates")
+        analysis_info = melody.get("analysis_info") if isinstance(melody, dict) else None
+        payload = analysis_info.get("note_candidate_set") if isinstance(analysis_info, dict) else None
+        if not isinstance(payload, dict):
+            raise RuntimeError("required NoteCandidateSet v2 is unavailable: missing typed pipeline artifact")
+        if payload.get("schema_version") != "note_candidate_set_v2":
+            raise RuntimeError("required NoteCandidateSet v2 is unavailable: schema mismatch")
+        melody_payload = payload.get("melody_candidates")
+        notes = melody_payload.get("notes") if isinstance(melody_payload, dict) else None
+        if not isinstance(notes, list):
+            raise RuntimeError("required NoteCandidateSet v2 is unavailable: notes missing")
+        payload = dict(payload)
+        payload["source_stems"] = semantic_audio_dict.get("source_stems", {})
+        if "harmony_candidates" not in payload:
+            payload["harmony_candidates"] = semantic_audio_dict.get("harmony_candidates")
+        if "bass_root_candidates" not in payload:
+            payload["bass_root_candidates"] = semantic_audio_dict.get("bass_root_candidates")
+        return payload
+
+    @staticmethod
+    def _authoritative_selected_melody_payload(*, semantic_audio_dict: dict[str, Any] | None) -> dict[str, Any]:
+        if not isinstance(semantic_audio_dict, dict):
+            raise RuntimeError("required MelodySelection is unavailable: missing semantic_audio")
+        melody = semantic_audio_dict.get("melody_candidates")
+        analysis_info = melody.get("analysis_info") if isinstance(melody, dict) else None
+        selected = analysis_info.get("selected_melody") if isinstance(analysis_info, dict) else None
+        if not isinstance(selected, dict):
+            raise RuntimeError("required MelodySelection is unavailable: selected_melody missing")
+        if selected.get("schema_version") != "selected_melody_v2":
+            raise RuntimeError("required MelodySelection is unavailable: schema mismatch")
+        return dict(selected)
+
+    @classmethod
+    def _authoritative_quantized_notes_payload(
+        cls,
+        *,
+        semantic_audio_dict: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        melody = semantic_audio_dict.get("melody_candidates") if isinstance(semantic_audio_dict, dict) else None
+        analysis_info = melody.get("analysis_info") if isinstance(melody, dict) else None
+        payload = analysis_info.get("quantized_notes") if isinstance(analysis_info, dict) else None
+        if not isinstance(payload, dict):
+            raise RuntimeError("required QuantizedNoteSet v2 is unavailable: missing typed pipeline artifact")
+        payload = dict(payload)
+        cls._validate_quantized_payload(payload)
+        return payload
+
+    @staticmethod
+    def _validate_quantized_payload(payload: dict[str, Any]) -> None:
+        notes = payload.get("notes")
+        if payload.get("schema_version") != "quantized_note_set_v2" or not isinstance(notes, list) or not notes:
+            raise RuntimeError("required QuantizedNoteSet v2 is unavailable")
+        failures: list[str] = []
+        for index, note in enumerate(notes, start=1):
+            missing: list[str] = []
+            if not note.get("id") and not note.get("quantized_note_id"):
+                missing.append("id")
+            if not note.get("source_candidate_id"):
+                missing.append("source_candidate_id")
+            if not note.get("source_candidate_ids"):
+                missing.append("source_candidate_ids")
+            if not note.get("source_contour_ids"):
+                missing.append("source_contour_ids")
+            frame_range = note.get("source_f0_frame_range")
+            if not isinstance(frame_range, dict) or frame_range.get("start_frame_index") is None or frame_range.get("end_frame_index") is None:
+                missing.append("source_f0_frame_range")
+            if missing:
+                failures.append(f"note_{index}:{','.join(missing)}")
+        if failures:
+            raise RuntimeError("quantized_notes_lineage_contract_failed:" + ";".join(failures[:20]))
+
+    @staticmethod
+    def _has_authoritative_selected_melody(selected_melody: dict[str, Any] | None) -> bool:
+        if not isinstance(selected_melody, dict):
+            return False
+        notes = selected_melody.get("selected_notes")
+        if not isinstance(notes, list) or not notes:
+            return False
+        for note in notes:
+            if not isinstance(note, dict):
+                return False
+            if not note.get("source_candidate_id"):
+                return False
+            if not note.get("source_candidate_ids"):
+                return False
+            if not note.get("source_contour_ids"):
+                return False
+            frame_range = note.get("source_f0_frame_range")
+            if not isinstance(frame_range, dict) or frame_range.get("start_frame_index") is None:
+                return False
+        return True
 
     @staticmethod
     def _has_authoritative_selected_melody(selected_melody_dict: dict | None) -> bool:
@@ -240,32 +338,10 @@ class MelodyTranscriptionService:
         pitch_contours_dict: dict[str, Any] | None,
         semantic_audio_dict: dict[str, Any] | None,
     ) -> dict[str, Any]:
-        if f0_track_dict is None:
-            raise RuntimeError("required F0Track is unavailable for note candidate build")
-        if pitch_contours_dict is None:
-            raise RuntimeError("required PitchContourSet is unavailable for note candidate build")
-
-        semantic_melody = (
-            semantic_audio_dict.get("melody_candidates")
-            if isinstance(semantic_audio_dict, dict)
-            else None
+        raise RuntimeError(
+            "legacy_note_candidate_rebuild_disabled:"
+            "MelodyTranscriptionService must persist NoteCandidateSet v2 emitted by PitchPipeline"
         )
-        payload = self.note_candidate_builder.build(
-            f0_track=f0_track_dict,
-            pitch_contours=pitch_contours_dict,
-            raw_candidates=semantic_melody,
-        )
-        serialized = self.serializer(payload)
-        if not isinstance(serialized, dict):
-            raise RuntimeError("note candidate builder returned a non-dict payload")
-
-        if isinstance(semantic_audio_dict, dict):
-            if isinstance(semantic_audio_dict.get("harmony_candidates"), dict):
-                serialized["harmony_candidates"] = semantic_audio_dict.get("harmony_candidates")
-            if isinstance(semantic_audio_dict.get("bass_root_candidates"), dict):
-                serialized["bass_root_candidates"] = semantic_audio_dict.get("bass_root_candidates")
-            serialized["source_stems"] = semantic_audio_dict.get("source_stems", {})
-        return serialized
 
     @staticmethod
     def _build_rhythm_grid_payload(semantic_audio_dict: dict | None) -> dict | None:

@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import asyncio
 from dataclasses import asdict, dataclass, field, is_dataclass
@@ -373,10 +373,6 @@ class AudioAnalysisService:
 
         score_ir_serialized = self._serialize(perception_obj=score_ir_obj)
         score_ir_dict = score_ir_serialized if isinstance(score_ir_serialized, dict) else {"value": score_ir_serialized}
-        score_ir_dict = self._annotate_score_ir_notes(
-            score_ir_dict,
-            quantized_notes_dict=quantized_notes_dict,
-        )
         if score_data_dict is not None:
             try:
                 from app.modules.score_ir import ScoreIRSerializer
@@ -445,6 +441,21 @@ class AudioAnalysisService:
         if invalid:
             raise RuntimeError("score_ir missing required QuantizedNoteSet lineage:" + ",".join(invalid[:20]))
 
+    def _replace_lead_notes_from_quantized_artifact(
+        self,
+        score_ir: ScoreIR,
+        *,
+        quantized_notes_dict: dict | None,
+        warnings: list[str],
+    ) -> ScoreIR:
+        _ = score_ir
+        _ = quantized_notes_dict
+        _ = warnings
+        raise RuntimeError(
+            "legacy_score_ir_quantized_artifact_replacement_disabled:"
+            "ScoreIRBuilder must consume QuantizedNoteSet through PitchAnalysisResult.measures"
+        )
+
     def _legacy_replace_lead_notes_from_quantized_artifact_for_old_builder_only(
         self,
         *_args: Any,
@@ -456,45 +467,12 @@ class AudioAnalysisService:
         )
 
     def _annotate_score_ir_notes(self, score_ir_dict: dict, *, quantized_notes_dict: dict | None) -> dict:
-        if not isinstance(score_ir_dict, dict) or not isinstance(quantized_notes_dict, dict):
-            return score_ir_dict
-        try:
-            from app.modules.pitch.quantized_notes_artifact import score_ir_note_annotations
-
-            annotations = score_ir_note_annotations(quantized_notes_dict)
-        except Exception:
-            return score_ir_dict
-        if not annotations:
-            return score_ir_dict
-        annotated = dict(score_ir_dict)
-        notes = []
-        for idx, note in enumerate(score_ir_dict.get("notes") or [], start=1):
-            if not isinstance(note, dict):
-                notes.append(note)
-                continue
-            updated = dict(note)
-            candidates = [
-                str(note.get("source_candidate_id") or ""),
-                str(note.get("id") or ""),
-                f"cand_{idx:05d}",
-            ]
-            annotation = next((annotations.get(candidate) for candidate in candidates if candidate in annotations), None)
-            if annotation:
-                existing_reasons = list(updated.get("reason_codes") or [])
-                annotation_reasons = list(annotation.get("reason_codes") or [])
-                merged_reasons = self._merge_warnings(existing_reasons, annotation_reasons)
-                updated.update(
-                    {
-                        key: value
-                        for key, value in annotation.items()
-                        if value is not None and key not in {"reason_codes", "uncertain"}
-                    }
-                )
-                updated["reason_codes"] = merged_reasons
-                updated["uncertain"] = bool(updated.get("uncertain")) or bool(annotation.get("uncertain")) or bool(merged_reasons)
-            notes.append(updated)
-        annotated["notes"] = notes
-        return annotated
+        _ = score_ir_dict
+        _ = quantized_notes_dict
+        raise RuntimeError(
+            "legacy_score_ir_quantized_artifact_annotation_disabled:"
+            "ScoreIR must carry quantized lineage from ScoreIRBuilder output"
+        )
 
     def _build_pitch_pipeline_request(
         self,

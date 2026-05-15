@@ -110,6 +110,7 @@ class NoteCandidateBuilder:
             "candidate_origin_counts": dict(sorted(candidate_origin_counts.items())),
             "rejection_reason_counts": dict(sorted(rejection_reason_counts.items())),
             "rejected_candidates": rejected_candidates,
+            "config": self._config_metadata(),
         }
 
         melody_analysis = dict(analysis_info)
@@ -140,6 +141,19 @@ class NoteCandidateBuilder:
                 "raw_source": raw_candidates if isinstance(raw_candidates, dict) else {"notes": raw_candidates or []},
                 "analysis_info": melody_analysis,
             },
+        }
+
+    def _config_metadata(self) -> dict[str, Any]:
+        return {
+            "min_confidence": float(self.config.min_confidence),
+            "min_voiced_ratio": float(self.config.min_voiced_ratio),
+            "min_duration_sec": float(self.config.min_duration_sec),
+            "min_stability": float(self.config.min_stability),
+            "max_pitch_range_semitones": float(self.config.max_pitch_range_semitones),
+            "max_raw_overlap_ratio": float(self.config.max_raw_overlap_ratio),
+            "vocal_min_midi": float(self.config.vocal_min_midi),
+            "vocal_max_midi": float(self.config.vocal_max_midi),
+            "frame_match_tolerance_sec": float(self.config.frame_match_tolerance_sec),
         }
 
     def _resolve_pitch_contours(
