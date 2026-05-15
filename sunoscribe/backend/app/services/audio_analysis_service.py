@@ -28,7 +28,7 @@ from app.modules.score_ir import AnalysisHints, ScoreIR, ScoreIRBuilder, ScoreIR
 from app.services.media_ingest_service import MediaIngestService
 from app.services.melody_transcription_service import MelodyTranscriptionService
 from app.services.rhythm_quantization_service import RhythmQuantizationService
-from app.services.score_build_service import ScoreBuildService
+from app.services.score_build_service import ArtifactManifestItem, MachineScoreRevisionState, ScoreBuildService
 from app.services.stem_service import StemService
 from app.services.workspace import ProjectWorkspace
 
@@ -41,6 +41,7 @@ class AudioAnalysisOptions:
     enable_vocal_separation: bool = True
     enable_llm_refine: bool = False
     include_refine_debug: bool = False
+    job_id: str | None = None
 
 
 @dataclass(slots=True)
@@ -66,6 +67,10 @@ class AudioAnalysisResult:
     validator_warnings_after: list[str]
     refine_debug: dict | None
     midi_path: str | None
+    musicxml_path: str | None = None
+    score_revision: dict | None = None
+    artifact_manifest_path: str | None = None
+    artifact_manifest: list[dict] = field(default_factory=list)
     stem_paths: dict[str, str] = field(default_factory=dict)
     f0_track: dict | None = None
     pitch_contours: dict | None = None
@@ -192,15 +197,20 @@ class AudioAnalysisService:
 
         perception = await self._run_perception_stage(source_copy_path, canonical_audio_path, workspace, options)
         alignment = self._empty_alignment_stage()
-        final_midi_path, export_warnings = await self._run_export_stage(perception, alignment, workspace)
-
         persist_warnings = self._persist_artifacts(workspace, perception, alignment)
+        machine_revision, revision_warnings = self._persist_machine_score_revision(workspace, perception, alignment, options)
+        final_midi_path, musicxml_path, export_warnings = await self._run_revision_export_stage(
+            machine_revision,
+            alignment,
+            workspace,
+        )
 
         all_warnings = self._merge_warnings(
             perception.warnings,
             alignment.warnings,
             export_warnings,
             persist_warnings,
+            revision_warnings,
         )
 
         result = AudioAnalysisResult(
@@ -228,6 +238,10 @@ class AudioAnalysisService:
             validator_warnings_after=alignment.validator_warnings_after,
             refine_debug=alignment.refine_debug,
             midi_path=str(final_midi_path) if final_midi_path else None,
+            musicxml_path=str(musicxml_path) if musicxml_path else None,
+            score_revision=machine_revision.to_dict(),
+            artifact_manifest_path=machine_revision.artifact_manifest_path,
+            artifact_manifest=[item.to_dict() for item in machine_revision.artifact_manifest],
             stem_paths={name: str(path) for name, path in perception.stem_paths.items()},
             f0_track=perception.f0_track_dict,
             pitch_contours=perception.pitch_contours_dict,
@@ -731,6 +745,235 @@ class AudioAnalysisService:
 
         warnings.append("midi_not_generated")
         return None, warnings
+
+    async def _run_revision_export_stage(
+        self,
+        revision: MachineScoreRevisionState,
+        alignment: _AlignmentStageResult,
+        workspace: ProjectWorkspace,
+    ) -> tuple[Path | None, Path | None, list[str]]:
+        warnings: list[str] = []
+        export_dir = workspace.revision_exports_dir(revision.revision_id)
+        export_dir.mkdir(parents=True, exist_ok=True)
+
+        midi_path: Path | None = None
+        musicxml_path: Path | None = None
+
+        try:
+            midi_payload = await asyncio.to_thread(self._build_midi_bytes_from_score_revision, revision)
+            if midi_payload is None:
+                raise RuntimeError("required MIDI export was not generated")
+            else:
+                midi_path = export_dir / "score.mid"
+                midi_path.write_bytes(midi_payload)
+                revision.artifact_manifest.append(
+                    self._manifest_item(
+                        artifact_type="midi",
+                        path=midi_path,
+                        role="export",
+                        revision=revision,
+                    )
+                )
+        except Exception as exc:
+            raise RuntimeError(f"score_revision_midi_export_failed:{self._short_exception(exc)}") from exc
+
+        try:
+            musicxml_payload = await asyncio.to_thread(self._build_musicxml_bytes_from_score_revision, revision)
+            if musicxml_payload is None:
+                raise RuntimeError("required MusicXML export was not generated")
+            else:
+                musicxml_path = export_dir / "score.musicxml"
+                musicxml_path.write_bytes(musicxml_payload)
+                revision.artifact_manifest.append(
+                    self._manifest_item(
+                        artifact_type="musicxml",
+                        path=musicxml_path,
+                        role="export",
+                        revision=revision,
+                    )
+                )
+        except Exception as exc:
+            raise RuntimeError(f"score_revision_musicxml_export_failed:{self._short_exception(exc)}") from exc
+
+        self._write_json(Path(revision.artifact_manifest_path), self._revision_manifest_payload(revision))
+        return midi_path, musicxml_path, warnings
+
+    def _build_midi_bytes_from_score_revision(self, revision: MachineScoreRevisionState) -> bytes | None:
+        score_data = self._validated_revision_score_data(revision)
+        measures = score_data.get("measures")
+        if not isinstance(measures, list) or not measures:
+            return None
+        bpm = self._float_from_any(score_data.get("bpm"), score_data.get("meta", {}).get("bpm") if isinstance(score_data.get("meta"), dict) else None, 0.0)
+        if bpm <= 0 or self.midi_exporter is None:
+            return None
+        return self.midi_exporter.export_from_score_data(score_data, float(bpm))
+
+    def _build_musicxml_bytes_from_score_revision(self, revision: MachineScoreRevisionState) -> bytes | None:
+        score_data = self._validated_revision_score_data(revision)
+        return self._build_minimal_musicxml_bytes(score_data)
+
+    def _validated_revision_score_data(self, revision: MachineScoreRevisionState) -> dict[str, Any]:
+        score_data = revision.score_data if isinstance(revision.score_data, dict) else {}
+        if score_data.get("source_of_truth") != "score_ir" or score_data.get("score_ir") != revision.score_ir:
+            raise RuntimeError("selected score revision export data is not derived from score_ir")
+        return score_data
+
+    def _build_minimal_musicxml_bytes(self, score_data: dict[str, Any]) -> bytes | None:
+        measures = score_data.get("measures")
+        if not isinstance(measures, list) or not measures:
+            return None
+        title = str(score_data.get("title") or "SunoScribe Lead Vocal")
+        measure_payloads = []
+        for index, measure in enumerate(measures, start=1):
+            notes = measure.get("notes") if isinstance(measure, dict) else []
+            note_payloads = []
+            for note in notes if isinstance(notes, list) else []:
+                if not isinstance(note, dict):
+                    continue
+                pitch = str(note.get("pitch") or "C4")
+                duration = max(1, int(round(float(note.get("duration_beats") or 1.0) * 480)))
+                step = pitch[0].upper() if pitch else "C"
+                octave = "4"
+                for char in reversed(pitch):
+                    if char.isdigit():
+                        octave = char
+                        break
+                note_payloads.append(
+                    f"<note><pitch><step>{step}</step><octave>{octave}</octave></pitch><duration>{duration}</duration><type>quarter</type></note>"
+                )
+            measure_payloads.append(f"<measure number=\"{index}\">{''.join(note_payloads)}</measure>")
+        xml = (
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>"
+            "<score-partwise version=\"3.1\">"
+            f"<work><work-title>{title}</work-title></work>"
+            "<part-list><score-part id=\"P1\"><part-name>Lead Vocal</part-name></score-part></part-list>"
+            f"<part id=\"P1\">{''.join(measure_payloads)}</part>"
+            "</score-partwise>"
+        )
+        return xml.encode("utf-8")
+
+    def _persist_machine_score_revision(
+        self,
+        workspace: ProjectWorkspace,
+        perception: _PerceptionStageResult,
+        alignment: _AlignmentStageResult,
+        options: AudioAnalysisOptions,
+    ) -> tuple[MachineScoreRevisionState, list[str]]:
+        warnings: list[str] = []
+        try:
+            score_ir = perception.score_ir_dict
+            score_data = self._score_data_for_revision_export(perception)
+            revision = self.score_build_service.create_machine_revision_state(
+                project_id=options.project_id,
+                job_id=options.job_id,
+                project_dir=workspace.project_dir,
+                score_ir=score_ir,
+                score_data=score_data,
+                score_type="lead_vocal",
+            )
+            self._write_json(Path(revision.revision_dir) / "score_ir.json", score_ir)
+            self._write_json(Path(revision.revision_dir) / "score_data.json", score_data)
+            revision.artifact_manifest.extend(self._build_machine_revision_manifest(workspace, perception, alignment, revision))
+            self._write_json(Path(revision.artifact_manifest_path), self._revision_manifest_payload(revision))
+            return revision, warnings
+        except Exception as exc:
+            raise RuntimeError(f"persist_machine_score_revision_failed:{self._short_exception(exc)}") from exc
+
+    def _score_data_for_revision_export(self, perception: _PerceptionStageResult) -> dict[str, Any]:
+        if not isinstance(perception.score_data_dict, dict) or not perception.score_data_dict:
+            raise RuntimeError("machine score revision requires score_data")
+        if not isinstance(perception.score_ir_dict, dict) or not perception.score_ir_dict:
+            raise RuntimeError("machine score revision requires score_ir")
+
+        score_data = dict(perception.score_data_dict)
+        score_data["score_ir"] = perception.score_ir_dict
+        score_data["source_of_truth"] = "score_ir"
+        return score_data
+
+    def _build_machine_revision_manifest(
+        self,
+        workspace: ProjectWorkspace,
+        perception: _PerceptionStageResult,
+        alignment: _AlignmentStageResult,
+        revision: MachineScoreRevisionState,
+    ) -> list[ArtifactManifestItem]:
+        items: list[ArtifactManifestItem] = []
+
+        def add_if_exists(artifact_type: str, path: Path, role: str, required: bool = True) -> None:
+            if path.exists():
+                items.append(
+                    self._manifest_item(
+                        artifact_type=artifact_type,
+                        path=path,
+                        role=role,
+                        revision=revision,
+                        required=required,
+                    )
+                )
+            elif required:
+                raise RuntimeError(f"required artifact is missing: {artifact_type}:{path}")
+
+        add_if_exists("source_media", perception.source_audio_path, "input")
+        if perception.normalized_audio_path is not None:
+            add_if_exists("canonical_audio", perception.normalized_audio_path, "media")
+        if perception.vocals_path is not None:
+            add_if_exists("vocals_stem", perception.vocals_path, "stem")
+        if perception.accompaniment_path is not None:
+            add_if_exists("accompaniment_stem", perception.accompaniment_path, "stem", required=False)
+
+        add_if_exists("f0_track", workspace.f0_track_path, "lead_vocal_mir")
+        add_if_exists("pitch_contours", workspace.pitch_contours_path, "lead_vocal_mir")
+        add_if_exists("note_candidates", workspace.note_candidates_path, "lead_vocal_mir")
+        add_if_exists("selected_melody", workspace.selected_melody_path, "lead_vocal_mir")
+        add_if_exists("rhythm_grid", workspace.rhythm_grid_path, "lead_vocal_mir")
+        add_if_exists("quantized_notes", workspace.quantized_notes_path, "lead_vocal_mir")
+        add_if_exists("score_ir", Path(revision.revision_dir) / "score_ir.json", "score_revision")
+        add_if_exists("score_data", Path(revision.revision_dir) / "score_data.json", "score_revision")
+
+        if workspace.vocal_activity_path.exists():
+            add_if_exists("vocal_activity", workspace.vocal_activity_path, "diagnostic", required=False)
+        if workspace.analysis_ir_path.exists():
+            add_if_exists("analysis_ir", workspace.analysis_ir_path, "diagnostic", required=False)
+        if workspace.semantic_audio_path.exists():
+            add_if_exists("semantic_audio", workspace.semantic_audio_path, "diagnostic", required=False)
+        if alignment.final_draft is not None:
+            add_if_exists("alignment", workspace.final_alignment_path, "lyrics_alignment", required=False)
+        return items
+
+    def _manifest_item(
+        self,
+        *,
+        artifact_type: str,
+        path: Path,
+        role: str,
+        revision: MachineScoreRevisionState,
+        required: bool = True,
+    ) -> ArtifactManifestItem:
+        return ArtifactManifestItem(
+            artifact_type=artifact_type,
+            path=str(path),
+            role=role,
+            score_revision_id=revision.revision_id,
+            required=required,
+            metadata={"project_id": revision.project_id, "job_id": revision.job_id},
+        )
+
+    def _revision_manifest_payload(self, revision: MachineScoreRevisionState) -> dict[str, Any]:
+        return {
+            "version": "artifact_manifest_v1",
+            "project_id": revision.project_id,
+            "job_id": revision.job_id,
+            "score_revision": {
+                "revision_id": revision.revision_id,
+                "revision_number": revision.revision_number,
+                "revision_type": revision.revision_type,
+                "score_type": revision.score_type,
+                "immutable": True,
+                "score_ir_path": str(Path(revision.revision_dir) / "score_ir.json"),
+                "score_data_path": str(Path(revision.revision_dir) / "score_data.json"),
+            },
+            "artifacts": [item.to_dict() for item in revision.artifact_manifest],
+        }
 
     def _persist_artifacts(
         self,

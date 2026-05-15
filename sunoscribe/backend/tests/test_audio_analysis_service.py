@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -456,6 +457,66 @@ class TestAudioAnalysisService(unittest.TestCase):
             self.assertEqual(audio_processor.calls[0][1], str(workspace.canonical_audio_path))
             self.assertEqual(separator.calls[0][0][0], str(workspace.canonical_audio_path))
             self.assertTrue(workspace.canonical_audio_path.exists())
+
+    def test_process_audio_creates_immutable_machine_revision_manifest_and_revision_exports(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source_audio = root / "source.wav"
+            source_audio.write_bytes(b"mix")
+            separator_out = root / "separator"
+            separator_out.mkdir(parents=True, exist_ok=True)
+            stem_files = {
+                "vocals": separator_out / "vocals.wav",
+                "accompaniment": separator_out / "accompaniment.wav",
+                "drums": separator_out / "drums.wav",
+                "bass": separator_out / "bass.wav",
+                "other": separator_out / "other.wav",
+            }
+            for path in stem_files.values():
+                path.write_bytes(b"stem")
+
+            service = AudioAnalysisService(
+                audio_processor=_PassthroughAudioProcessor(),
+                vocal_separator=_FakeSeparator(stem_files),
+                lyrics_recognizer=lambda _path: [],
+                pitch_pipeline=_CapturePitchPipeline(),
+                score_ir_builder=_FakeScoreIRBuilder(),
+                midi_exporter=None,
+                projects_root=root / "projects",
+            )
+
+            first = asyncio.run(
+                service.process_audio(source_audio, AudioAnalysisOptions(project_id="revision_manifest_001", job_id="job-a"))
+            )
+            second = asyncio.run(
+                service.process_audio(source_audio, AudioAnalysisOptions(project_id="revision_manifest_001", job_id="job-b"))
+            )
+
+            self.assertNotEqual(first.score_revision["revision_id"], second.score_revision["revision_id"])
+            self.assertEqual(first.score_revision["revision_number"], 1)
+            self.assertEqual(second.score_revision["revision_number"], 2)
+            self.assertTrue(Path(first.artifact_manifest_path).exists())
+            self.assertTrue(Path(second.artifact_manifest_path).exists())
+            self.assertNotEqual(first.artifact_manifest_path, second.artifact_manifest_path)
+            self.assertIsNotNone(first.midi_path)
+            self.assertIsNotNone(first.musicxml_path)
+            self.assertIn(first.score_revision["revision_id"], first.midi_path)
+            self.assertIn(first.score_revision["revision_id"], first.musicxml_path)
+
+            manifest = json.loads(Path(first.artifact_manifest_path).read_text(encoding="utf-8"))
+            artifact_types = {item["artifact_type"] for item in manifest["artifacts"]}
+            self.assertEqual(manifest["score_revision"]["revision_type"], "machine")
+            self.assertTrue(manifest["score_revision"]["immutable"])
+            self.assertIn("f0_track", artifact_types)
+            self.assertIn("pitch_contours", artifact_types)
+            self.assertIn("note_candidates", artifact_types)
+            self.assertIn("selected_melody", artifact_types)
+            self.assertIn("rhythm_grid", artifact_types)
+            self.assertIn("quantized_notes", artifact_types)
+            self.assertIn("score_ir", artifact_types)
+            self.assertIn("score_data", artifact_types)
+            self.assertIn("midi", artifact_types)
+            self.assertIn("musicxml", artifact_types)
 
     def test_perception_stage_routes_stems_to_pitch_request(self) -> None:
         with TemporaryDirectory() as temp_dir:
