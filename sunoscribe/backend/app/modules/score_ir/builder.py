@@ -60,6 +60,7 @@ class ScoreIRBuilder:
             analysis_hints=analysis_hints,
         )
         analysis_hints.issue_count = len(issue_spots)
+        lineage_warnings = self._production_lineage_warnings(pitch_result=pitch_result, notes=notes)
 
         return ScoreIR(
             meta=meta,
@@ -75,8 +76,36 @@ class ScoreIRBuilder:
             warnings=self._merge_unique_strings(
                 list(pitch_result.warnings or []),
                 list(getattr(analysis_ir, "warnings", []) or []),
+                lineage_warnings,
             ),
         )
+
+    def _production_lineage_warnings(
+        self,
+        *,
+        pitch_result: PitchAnalysisResult,
+        notes: List[ScoreNote],
+    ) -> List[str]:
+        analysis_info = dict(getattr(pitch_result, "analysis_info", {}) or {})
+        warnings: List[str] = []
+        lead_note_source = str(analysis_info.get("lead_note_source") or "")
+        authoritative_selection = bool(analysis_info.get("lead_selection_authoritative"))
+        if lead_note_source == "quantized_notes" or authoritative_selection:
+            missing_source_ids = [note.id for note in notes if not self._safe_optional_str(note.source_candidate_id)]
+            missing_quantized_ids = [note.id for note in notes if note.source == "quantized_notes" and not self._safe_optional_str(note.quantized_note_id)]
+            if missing_source_ids:
+                warnings.append(
+                    "score_ir_lineage_warning:missing_source_candidate_id:"
+                    + ",".join(missing_source_ids[:20])
+                )
+            if missing_quantized_ids:
+                warnings.append(
+                    "score_ir_lineage_warning:missing_quantized_note_id:"
+                    + ",".join(missing_quantized_ids[:20])
+                )
+        if not notes and authoritative_selection:
+            warnings.append("score_ir_lineage_warning:authoritative_selection_empty")
+        return warnings
 
     def _build_notes_from_measures(
         self,

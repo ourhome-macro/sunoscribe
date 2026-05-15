@@ -13,6 +13,7 @@ from .contour_candidate_bridge import ContourToCandidateBridge, ContourToCandida
 from .detector import PitchDetector
 from .downbeat_tracker import DownbeatTracker
 from .exceptions import DownbeatTrackingError
+from .f0_extractor import RMVPEF0Extractor
 from .key_analyzer import KeyAnalysisResult, KeyAnalyzer
 from .melody_selector import MelodySelector
 from .melody_source_arbitrator import MelodySourceArbitrator
@@ -54,6 +55,7 @@ class PitchPipeline:
     def __init__(self, config: PitchDetectionConfig | None = None) -> None:
         self.config = config or PitchDetectionConfig()
         self.detector = PitchDetector(self.config)
+        self.f0_extractor = RMVPEF0Extractor(config=self.config, detector=self.detector)
         self.beat_tracker = BeatTracker(self.config)
         self.downbeat_tracker = DownbeatTracker(self.config)
         self.key_analyzer = KeyAnalyzer(self.config)
@@ -253,11 +255,14 @@ class PitchPipeline:
         try:
             detected = self._detect_with_backend(normalized_path, backend=backend)
         except Exception as exc:
-            prefix = f"{role}_optional_detection_failed" if optional else f"{role}_detection_failed"
-            warnings.append(f"{prefix}:{str(exc)[:200]}")
-            cache[cache_key] = []
-            artifact_cache[cache_key] = None
-            return []
+            reason = str(exc).strip() or exc.__class__.__name__
+            context = f"role={role};backend={backend_key};path={normalized_path};reason={reason[:200]}"
+            if optional:
+                warnings.append(f"{role}_optional_detection_failed:{context}")
+                cache[cache_key] = []
+                artifact_cache[cache_key] = None
+                return []
+            raise RuntimeError(f"{role}_detection_failed:{context}") from exc
 
         for backend_warning in getattr(self.detector, "backend_warnings", []) or []:
             warning_text = f"{role}_{backend_warning}"
@@ -361,6 +366,33 @@ class PitchPipeline:
             vocal_activity=vocal_activity,
             analysis_info=dict(raw_track.get("analysis_info") or {}),
         )
+
+    def _extract_lead_f0_track(
+        self,
+        *,
+        lead_audio_path: str,
+        source_stem: str | None,
+        fallback_raw_artifacts: dict[str, object] | None,
+        warnings: list[str],
+    ) -> F0Track | None:
+        if self.f0_extractor is not None:
+            try:
+                return self.f0_extractor.extract(str(lead_audio_path), source_stem=source_stem)
+            except FileNotFoundError:
+                raise
+            except Exception as exc:
+                fallback_track = self._build_f0_track(raw_artifacts=fallback_raw_artifacts, source_stem=source_stem)
+                if fallback_track is not None:
+                    warnings.append(f"f0_extractor_failed_using_detector_artifact:{str(exc)[:200]}")
+                    fallback_track.analysis_info = dict(fallback_track.analysis_info or {})
+                    fallback_track.analysis_info["authoritative_source"] = "detector_last_detection_artifact"
+                    fallback_track.analysis_info["f0_extractor_error"] = str(exc)[:200]
+                    return fallback_track
+                raise RuntimeError(f"required_f0_extraction_failed:{str(exc)[:200]}") from exc
+        fallback_track = self._build_f0_track(raw_artifacts=fallback_raw_artifacts, source_stem=source_stem)
+        if fallback_track is not None:
+            warnings.append("f0_extractor_unavailable_using_detector_artifact")
+        return fallback_track
 
     def _candidate_set_analysis_info(self, *, notes: list[Note], selected_notes: list[Note] | None) -> dict[str, object]:
         return {
@@ -731,7 +763,20 @@ class PitchPipeline:
             },
         )
 
-        lead_f0_track = self._build_f0_track(
+        lead_source_stem = self._infer_source_stem(lead_audio_path, path_stem_index, fallback="lead")
+        lead_f0_track = self._extract_lead_f0_track(
+            lead_audio_path=str(lead_audio_path),
+            source_stem=lead_source_stem,
+            fallback_raw_artifacts=detector_artifact_cache.get(f"{self.detector.backend_name}:{str(lead_audio_path)}"),
+            warnings=warnings,
+        )
+        if lead_f0_track is None:
+            raise RuntimeError("required_f0_extraction_failed:f0_track_unavailable")
+        lead_f0_track.analysis_info = dict(lead_f0_track.analysis_info or {})
+        lead_f0_track.analysis_info.setdefault("stage", "F0Track")
+        lead_f0_track.analysis_info.setdefault("required_stage", True)
+        lead_f0_track.analysis_info.setdefault("authoritative", True)
+        legacy_detector_f0_track = self._build_f0_track(
             raw_artifacts=detector_artifact_cache.get(f"{self.detector.backend_name}:{str(lead_audio_path)}"),
             source_stem=self._infer_source_stem(lead_audio_path, path_stem_index, fallback="lead"),
         )
@@ -742,7 +787,6 @@ class PitchPipeline:
             vocal_activity=lead_f0_track.vocal_activity if lead_f0_track is not None else None,
         )
         detected_notes = contour_bridge_result.notes
-        lead_source_stem = self._infer_source_stem(lead_audio_path, path_stem_index, fallback="lead")
         support_source_stem = self._infer_source_stem(support_audio_path, path_stem_index, fallback="mix")
         arrangement_decision = self.melody_arbitrator.decide(
             rmvpe_candidate=MelodySourceCandidate(
@@ -751,7 +795,7 @@ class PitchPipeline:
                 source_stem=lead_source_stem,
                 input_audio_path=str(lead_audio_path),
                 notes=detected_notes,
-                f0_track=lead_f0_track,
+                f0_track=legacy_detector_f0_track or lead_f0_track,
                 analysis_info={"role": "lead_vocal"},
             ),
             basic_pitch_candidate=MelodySourceCandidate(

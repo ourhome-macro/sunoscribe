@@ -126,6 +126,18 @@ class RuleBasedMelodySelector:
         inherited_reason_code_counts = dict(sorted(inherited_reason_counts.items()))
         return {
             "version": "selected_melody_v1",
+            "schema_version": "selected_melody_v2",
+            "lineage_contract": {
+                "stage": "MelodySelection",
+                "input_stage": "NoteCandidateSet",
+                "required_selected_fields": [
+                    "candidate_id",
+                    "source_candidate_id",
+                    "source_candidate_ids",
+                    "source_contour_ids",
+                    "source_f0_frame_range",
+                ],
+            },
             "selected_notes": selected,
             "rejected_candidates": rejected,
             "summary": {
@@ -219,6 +231,7 @@ class RuleBasedMelodySelector:
             "stability": _safe_float(note.get("stability")),
             "source_contour_ids": [str(item) for item in source_contours] if isinstance(source_contours, list) else [],
             "source_candidate_ids": [str(item) for item in source_candidate_ids] if isinstance(source_candidate_ids, list) else [],
+            "source_f0_frame_range": dict(note.get("source_f0_frame_range") or {}),
             "reason_codes": _unique([str(item) for item in note.get("reason_codes") or []]),
         }
         if note.get("source_candidate_id") is not None and not normalized["source_candidate_ids"]:
@@ -533,15 +546,21 @@ class RuleBasedMelodySelector:
 
     @staticmethod
     def _selected(candidate: dict[str, Any]) -> dict[str, Any]:
+        candidate_id = str(candidate["candidate_id"])
+        source_candidate_ids = list(candidate.get("source_candidate_ids") or [])
+        if candidate_id not in source_candidate_ids:
+            source_candidate_ids = [candidate_id] + source_candidate_ids
         selected = {
-            "candidate_id": candidate["candidate_id"],
+            "candidate_id": candidate_id,
+            "source_candidate_id": candidate_id,
             "start_time_sec": round(float(candidate["start_time_sec"]), 6),
             "end_time_sec": round(float(candidate["end_time_sec"]), 6),
             "duration_sec": round(float(candidate["duration_sec"]), 6),
             "pitch_center_midi": round(float(candidate["pitch_center_midi"]), 6) if candidate.get("pitch_center_midi") is not None else None,
             "confidence": round(float(candidate["confidence"]), 6),
             "source_contour_ids": list(candidate.get("source_contour_ids") or []),
-            "source_candidate_ids": list(candidate.get("source_candidate_ids") or []),
+            "source_candidate_ids": _unique(source_candidate_ids),
+            "source_f0_frame_range": dict(candidate.get("source_f0_frame_range") or {}),
             "reason_codes": list(candidate.get("reason_codes") or []),
         }
         if isinstance(candidate.get("bridge_evidence"), dict):
@@ -560,15 +579,24 @@ class RuleBasedMelodySelector:
 
     @staticmethod
     def _selected_from_postprocessed(candidate: dict[str, Any]) -> dict[str, Any]:
+        candidate_id = str(candidate["candidate_id"])
+        source_candidate_ids = list(candidate.get("source_candidate_ids") or [])
+        source_candidate_id = str(candidate.get("source_candidate_id") or candidate_id)
+        if source_candidate_id not in source_candidate_ids:
+            source_candidate_ids = [source_candidate_id] + source_candidate_ids
+        if candidate_id not in source_candidate_ids:
+            source_candidate_ids = [candidate_id] + source_candidate_ids
         selected = {
-            "candidate_id": candidate["candidate_id"],
+            "candidate_id": candidate_id,
+            "source_candidate_id": source_candidate_id,
             "start_time_sec": round(float(candidate["start_time_sec"]), 6),
             "end_time_sec": round(float(candidate["end_time_sec"]), 6),
             "duration_sec": round(max(0.0, float(candidate["end_time_sec"]) - float(candidate["start_time_sec"])), 6),
             "pitch_center_midi": round(float(candidate["pitch_center_midi"]), 6) if candidate.get("pitch_center_midi") is not None else None,
             "confidence": round(float(candidate["confidence"]), 6),
             "source_contour_ids": list(candidate.get("source_contour_ids") or []),
-            "source_candidate_ids": list(candidate.get("source_candidate_ids") or []),
+            "source_candidate_ids": _unique(source_candidate_ids),
+            "source_f0_frame_range": dict(candidate.get("source_f0_frame_range") or {}),
             "reason_codes": list(candidate.get("reason_codes") or []),
         }
         if isinstance(candidate.get("bridge_evidence"), dict):
@@ -659,6 +687,8 @@ def selected_notes_to_pitch_notes(selected_melody: dict[str, Any] | None) -> lis
                 "source_candidate_id": item.get("candidate_id"),
                 "source_candidate_ids": item.get("source_candidate_ids") or [],
                 "source_contours": item.get("source_contour_ids") or [],
+                "source_contour_ids": item.get("source_contour_ids") or [],
+                "source_f0_frame_range": item.get("source_f0_frame_range") or {},
                 "reason_codes": item.get("reason_codes") or [],
             }
         )

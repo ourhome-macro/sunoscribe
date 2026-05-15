@@ -7,7 +7,7 @@ from app.modules.pitch.config import PitchDetectionConfig
 from app.modules.pitch.detector import PitchDetector
 from app.modules.pitch.pipeline import PitchPipeline
 from app.modules.pitch.reason_codes import CONTOUR_TO_CANDIDATE_BRIDGE, DP_VITERBI_SEGMENTATION
-from app.modules.pitch.types import ArrangementDecision, ArrangementSegmentDecision, Note, PitchPipelineRequest
+from app.modules.pitch.types import ArrangementDecision, ArrangementSegmentDecision, F0Frame, F0Track, Note, PitchPipelineRequest
 
 
 class TestPitchPipeline(unittest.TestCase):
@@ -15,6 +15,20 @@ class TestPitchPipeline(unittest.TestCase):
     def _frequencies_from_midi(midi_values):
         values = np.asarray(midi_values, dtype=float)
         return 440.0 * (2.0 ** ((values - 69.0) / 12.0))
+
+    @staticmethod
+    def _authoritative_f0_track(source_stem: str = "lead", input_audio_path: str = "dummy.wav") -> F0Track:
+        return F0Track(
+            source_stem=source_stem,
+            input_audio_path=input_audio_path,
+            backend="rmvpe",
+            frames=[
+                F0Frame(time_sec=0.1, frequency_hz=261.63, confidence=0.9, voiced=True, pitch_midi=60.0),
+                F0Frame(time_sec=0.3, frequency_hz=261.63, confidence=0.9, voiced=True, pitch_midi=60.0),
+                F0Frame(time_sec=0.5, frequency_hz=261.63, confidence=0.9, voiced=True, pitch_midi=60.0),
+            ],
+            analysis_info={"extractor": "test_extractor", "authoritative": True},
+        )
 
     def test_frames_to_notes_keeps_moderate_vibrato_phrase(self):
         detector = PitchDetector(PitchDetectionConfig())
@@ -156,6 +170,127 @@ class TestPitchPipeline(unittest.TestCase):
         self.assertEqual(second[0].candidate_id, "raw_1")
         self.assertEqual(second[0].segmentation_evidence["backend"], "rmvpe")
 
+    def test_required_melody_detection_exception_bubbles_with_context(self):
+        pipeline = PitchPipeline()
+
+        with patch.object(
+            pipeline,
+            "_detect_with_backend",
+            side_effect=RuntimeError("rmvpe model missing"),
+        ):
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "melody_detection_failed:role=melody;backend=rmvpe;path=dummy.wav;reason=rmvpe model missing",
+            ):
+                pipeline.run("dummy.wav")
+
+    def test_optional_basic_pitch_support_failure_is_warning_and_non_fatal(self):
+        pipeline = PitchPipeline()
+
+        lead_notes = [Note(pitch="C4", start_time=0.1, end_time=0.6, confidence=0.91)]
+        request = PitchPipelineRequest(
+            lead_audio_path="vocals.wav",
+            source_audio_path="mix.wav",
+        )
+
+        class _BeatResult:
+            bpm = 120.0
+            beat_times = [0.0, 0.5, 1.0]
+            confidence = 0.93
+
+        class _KeyResult:
+            key = "C Major"
+            confidence = 0.89
+            method = "librosa"
+
+        class _DownbeatResult:
+            downbeat_times = [0.0]
+            method = "librosa"
+            confidence = 0.8
+            beats_per_bar = 4
+
+        def _detect(audio_path, *, backend=None):
+            if str(audio_path) == "mix.wav" and str(backend) == "basic-pitch":
+                raise RuntimeError("basic pitch support unavailable")
+            return list(lead_notes)
+
+        with patch.object(pipeline, "_detect_with_backend", side_effect=_detect), patch.object(
+            pipeline.f0_extractor,
+            "extract",
+            return_value=self._authoritative_f0_track(input_audio_path="vocals.wav"),
+        ), patch.object(
+            pipeline.beat_tracker, "track", return_value=_BeatResult()
+        ), patch.object(pipeline.key_analyzer, "analyze", return_value=_KeyResult()), patch.object(
+            pipeline.downbeat_tracker, "track", return_value=_DownbeatResult()
+        ), patch(
+            "app.modules.pitch.pipeline.get_audio_duration", return_value=2.0
+        ):
+            result = pipeline.run(request)
+
+        self.assertEqual(len(result.lead_notes), 1)
+        self.assertTrue(
+            any(
+                "basic_pitch_support_optional_detection_failed:role=basic_pitch_support;backend=basic-pitch;path=mix.wav;reason=basic pitch support unavailable"
+                in warning
+                for warning in result.warnings
+            )
+        )
+
+    def test_pipeline_uses_authoritative_f0_extractor_for_f0_track(self):
+        pipeline = PitchPipeline()
+
+        raw_notes = [Note(pitch="C4", start_time=0.1, end_time=0.6, confidence=0.91)]
+        authoritative_f0 = F0Track(
+            source_stem="lead",
+            input_audio_path="dummy.wav",
+            backend="rmvpe",
+            frames=[
+                F0Frame(time_sec=0.1, frequency_hz=261.63, confidence=0.9, voiced=True, pitch_midi=60.0),
+                F0Frame(time_sec=0.2, frequency_hz=261.63, confidence=0.9, voiced=True, pitch_midi=60.0),
+                F0Frame(time_sec=0.3, frequency_hz=261.63, confidence=0.9, voiced=True, pitch_midi=60.0),
+                F0Frame(time_sec=0.4, frequency_hz=261.63, confidence=0.9, voiced=True, pitch_midi=60.0),
+            ],
+            analysis_info={"extractor": "test_extractor", "authoritative": True},
+        )
+
+        class _BeatResult:
+            bpm = 120.0
+            beat_times = [0.0, 0.5, 1.0]
+            confidence = 0.93
+
+        class _KeyResult:
+            key = "C Major"
+            confidence = 0.89
+            method = "librosa"
+
+        class _DownbeatResult:
+            downbeat_times = [0.0]
+            method = "librosa"
+            confidence = 0.8
+            beats_per_bar = 4
+
+        with patch.object(pipeline, "_detect_with_backend", return_value=raw_notes), patch.object(
+            pipeline.f0_extractor,
+            "extract",
+            return_value=authoritative_f0,
+        ) as mocked_extract, patch.object(
+            pipeline.beat_tracker,
+            "track",
+            return_value=_BeatResult(),
+        ), patch.object(pipeline.key_analyzer, "analyze", return_value=_KeyResult()), patch.object(
+            pipeline.downbeat_tracker,
+            "track",
+            return_value=_DownbeatResult(),
+        ), patch(
+            "app.modules.pitch.pipeline.get_audio_duration", return_value=2.0
+        ):
+            result = pipeline.run("dummy.wav")
+
+        mocked_extract.assert_called_once_with("dummy.wav", source_stem="lead")
+        self.assertIs(result.f0_track, authoritative_f0)
+        self.assertEqual(result.semantic_audio.f0_track.analysis_info["extractor"], "test_extractor")
+        self.assertTrue(result.analysis_info["f0_track_available"])
+
     def test_run_with_mocks(self):
         pipeline = PitchPipeline()
 
@@ -202,6 +337,10 @@ class TestPitchPipeline(unittest.TestCase):
             return mock_notes
 
         with patch.object(pipeline.detector, "detect", side_effect=_detect), patch.object(
+            pipeline.f0_extractor,
+            "extract",
+            side_effect=RuntimeError("test extractor disabled"),
+        ), patch.object(
             pipeline.beat_tracker, "track", return_value=_BeatResult()
         ), patch.object(pipeline.key_analyzer, "analyze", return_value=_KeyResult()), patch.object(
             pipeline.downbeat_tracker, "track", return_value=_DownbeatResult()
@@ -304,6 +443,10 @@ class TestPitchPipeline(unittest.TestCase):
             return mock_notes
 
         with patch.object(pipeline.detector, "detect", side_effect=_detect), patch.object(
+            pipeline.f0_extractor,
+            "extract",
+            side_effect=RuntimeError("test extractor disabled"),
+        ), patch.object(
             pipeline.beat_tracker, "track", return_value=_BeatResult()
         ), patch.object(pipeline.key_analyzer, "analyze", return_value=_KeyResult()), patch.object(
             pipeline.downbeat_tracker, "track", return_value=_DownbeatResult()
@@ -347,6 +490,10 @@ class TestPitchPipeline(unittest.TestCase):
             beats_per_bar = 3
 
         with patch.object(pipeline.detector, "detect", return_value=mock_notes), patch.object(
+            pipeline.f0_extractor,
+            "extract",
+            return_value=self._authoritative_f0_track(),
+        ), patch.object(
             pipeline.beat_tracker, "track", return_value=_BeatResult()
         ), patch.object(pipeline.key_analyzer, "analyze", return_value=_KeyResult()), patch.object(
             pipeline.downbeat_tracker, "track", return_value=_DownbeatResult()
@@ -388,6 +535,10 @@ class TestPitchPipeline(unittest.TestCase):
             beats_per_bar = 4
 
         with patch.object(pipeline.detector, "detect", return_value=mock_notes), patch.object(
+            pipeline.f0_extractor,
+            "extract",
+            return_value=self._authoritative_f0_track(),
+        ), patch.object(
             pipeline.beat_tracker, "track", return_value=_BeatResult()
         ), patch.object(
             pipeline.key_analyzer, "analyze", side_effect=RuntimeError("key backend crashed")
@@ -429,6 +580,10 @@ class TestPitchPipeline(unittest.TestCase):
             beats_per_bar = 4
 
         with patch.object(pipeline.detector, "detect", return_value=mock_notes), patch.object(
+            pipeline.f0_extractor,
+            "extract",
+            return_value=self._authoritative_f0_track(),
+        ), patch.object(
             pipeline.beat_tracker, "track", return_value=_BeatResult()
         ), patch.object(pipeline.key_analyzer, "analyze", return_value=_KeyResult()), patch.object(
             pipeline.downbeat_tracker, "track", return_value=_DownbeatResult()
@@ -506,7 +661,11 @@ class TestPitchPipeline(unittest.TestCase):
             pipeline.downbeat_tracker,
             "track",
             return_value=_DownbeatResult(),
-        ) as mocked_downbeat, patch(
+        ) as mocked_downbeat, patch.object(
+            pipeline.f0_extractor,
+            "extract",
+            return_value=self._authoritative_f0_track(source_stem="vocals", input_audio_path="vocals.wav"),
+        ), patch(
             "app.modules.pitch.pipeline.get_audio_duration",
             return_value=3.0,
         ):
@@ -559,6 +718,10 @@ class TestPitchPipeline(unittest.TestCase):
         )
 
         with patch.object(pipeline.detector, "detect", return_value=mock_notes), patch.object(
+            pipeline.f0_extractor,
+            "extract",
+            return_value=self._authoritative_f0_track(source_stem="vocals", input_audio_path="vocals.wav"),
+        ), patch.object(
             pipeline.beat_tracker, "track", return_value=_BeatResult()
         ), patch.object(pipeline.key_analyzer, "analyze", return_value=_KeyResult()), patch.object(
             pipeline.downbeat_tracker, "track", return_value=_DownbeatResult()

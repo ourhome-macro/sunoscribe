@@ -1,5 +1,6 @@
 from .config import PitchDetectionConfig
 from .downbeat_tracker import DownbeatTracker, DownbeatTrackingResult
+from .f0_extractor import RMVPEF0Extractor
 from .melody_selector import MelodySelector, MelodySelectionResult
 from .melody_source_arbitrator import MelodySourceArbitrator
 from .midi_exporter import MidiExporter
@@ -28,6 +29,7 @@ __all__ = [
     "PitchDetectionConfig",
     "DownbeatTracker",
     "DownbeatTrackingResult",
+    "RMVPEF0Extractor",
     "MelodySelector",
     "MelodySelectionResult",
     "MelodySourceArbitrator",

@@ -88,6 +88,9 @@ class _RawNote:
     source_note: dict[str, Any]
     index: int
     source_candidate_id: str
+    source_candidate_ids: tuple[str, ...]
+    source_contour_ids: tuple[str, ...]
+    source_f0_frame_range: dict[str, Any]
     start_time_sec: float
     end_time_sec: float
     duration_sec: float
@@ -178,6 +181,17 @@ class QuantizedNotesArtifactBuilder:
         }
         return {
             "version": "quantized_notes_v1",
+            "schema_version": "quantized_note_set_v2",
+            "lineage_contract": {
+                "stage": "QuantizedNoteSet",
+                "input_stage": "MelodySelection",
+                "required_note_fields": [
+                    "source_candidate_id",
+                    "source_candidate_ids",
+                    "source_contour_ids",
+                    "source_f0_frame_range",
+                ],
+            },
             "quantizer_backend": actual_backend,
             "requested_quantizer_backend": requested_backend,
             "fallback_used": fallback_used,
@@ -271,6 +285,9 @@ class QuantizedNotesArtifactBuilder:
         return {
             "id": f"qn_{index:05d}",
             "source_candidate_id": str(note.get("source_candidate_id") or note.get("id") or f"cand_{index:05d}"),
+            "source_candidate_ids": _lineage_ids(note=note, source_candidate_id=str(note.get("source_candidate_id") or note.get("id") or f"cand_{index:05d}")),
+            "source_contour_ids": [str(item) for item in note.get("source_contour_ids") or [] if item is not None],
+            "source_f0_frame_range": dict(note.get("source_f0_frame_range") or {}),
             "pitch_midi": pitch_midi,
             "pitch_midi_float": round(float(pitch_float), 6) if pitch_float is not None else None,
             "pitch": midi_to_note(pitch_midi),
@@ -307,6 +324,14 @@ class QuantizedNotesArtifactBuilder:
             source_note=note,
             index=index,
             source_candidate_id=str(note.get("source_candidate_id") or note.get("id") or f"cand_{index:05d}"),
+            source_candidate_ids=tuple(
+                _lineage_ids(
+                    note=note,
+                    source_candidate_id=str(note.get("source_candidate_id") or note.get("id") or f"cand_{index:05d}"),
+                )
+            ),
+            source_contour_ids=tuple(str(item) for item in note.get("source_contour_ids") or [] if item is not None),
+            source_f0_frame_range=dict(note.get("source_f0_frame_range") or {}),
             start_time_sec=start_time,
             end_time_sec=end_time,
             duration_sec=max(0.0, end_time - start_time),
@@ -446,6 +471,9 @@ class QuantizedNotesArtifactBuilder:
         return {
             "id": f"qn_{raw_note.index:05d}",
             "source_candidate_id": raw_note.source_candidate_id,
+            "source_candidate_ids": list(raw_note.source_candidate_ids),
+            "source_contour_ids": list(raw_note.source_contour_ids),
+            "source_f0_frame_range": dict(raw_note.source_f0_frame_range),
             "pitch_midi": raw_note.pitch_midi,
             "pitch_midi_float": round(float(raw_note.pitch_midi_float), 6) if raw_note.pitch_midi_float is not None else None,
             "pitch": midi_to_note(raw_note.pitch_midi),
@@ -680,6 +708,16 @@ def _safe_ratio(numerator: int | float, denominator: int | float) -> float | Non
     if denominator_float == 0.0:
         return None
     return float(numerator) / denominator_float
+
+
+def _lineage_ids(*, note: dict[str, Any], source_candidate_id: str) -> list[str]:
+    ids = [str(item) for item in note.get("source_candidate_ids") or [] if item is not None]
+    if source_candidate_id:
+        ids = [source_candidate_id] + ids
+    note_id = str(note.get("id") or "")
+    if note_id:
+        ids.append(note_id)
+    return _unique(ids)
 
 
 def _unique(values: list[str]) -> list[str]:

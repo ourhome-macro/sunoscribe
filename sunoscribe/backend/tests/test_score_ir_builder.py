@@ -207,6 +207,49 @@ class TestScoreIRBuilder(unittest.TestCase):
         self.assertEqual(score_data["instrumental_melody_notes"][0]["measure_num"], 2)
         self.assertEqual(score_data["instrumental_melody_notes"][0]["source"], "instrumental_hook")
 
+    def test_production_lineage_warning_for_missing_source_candidate_id(self):
+        builder = ScoreIRBuilder()
+        pitch_result = PitchAnalysisResult(
+            version="1.4",
+            meta=MetaInfo(
+                bpm=120.0,
+                bpm_confidence=0.9,
+                key="C Major",
+                key_confidence=0.8,
+                duration_sec=1.0,
+                time_signature="4/4",
+            ),
+            measures=[
+                {
+                    "measure_num": 1,
+                    "start_time": 0.0,
+                    "end_time": 1.0,
+                    "is_anacrusis": False,
+                    "notes": [
+                        {
+                            "pitch": "C4",
+                            "start_time": 0.0,
+                            "end_time": 0.5,
+                            "duration_beats": 1.0,
+                            "note_type": "quarter",
+                            "beat_position": 1.0,
+                            "confidence": 0.9,
+                        }
+                    ],
+                }
+            ],
+            analysis_info={"lead_note_source": "quantized_notes"},
+        )
+
+        score_ir = builder.build(pitch_result)
+
+        self.assertTrue(
+            any(
+                warning.startswith("score_ir_lineage_warning:missing_source_candidate_id")
+                for warning in score_ir.warnings
+            )
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

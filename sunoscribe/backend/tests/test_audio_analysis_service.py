@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from app.modules.pitch.types import F0Frame, F0Track, MetaInfo, PitchAnalysisResult, PitchPipelineRequest, RhythmGrid, SemanticAudioResult, VocalActivitySegment
+from app.modules.pitch.types import F0Frame, F0Track, MetaInfo, Note, NoteCandidateSet, PitchAnalysisResult, PitchPipelineRequest, RhythmGrid, SemanticAudioResult, VocalActivitySegment
 from app.modules.score_ir import ScoreIR, ScoreIRSerializer, ScoreMeasure, ScoreMeta, ScoreNote
 from app.modules.pitch import MidiExporter
 from app.services.audio_analysis_service import AudioAnalysisOptions, AudioAnalysisService
@@ -132,9 +132,99 @@ class _EmptyPitchPipeline:
                 duration_sec=3.0,
                 time_signature="4/4",
             ),
+            analysis_info={
+                "detected_note_count": 0,
+                "melody_note_count": 0,
+            },
             measures=[],
             lead_notes=[],
             raw_notes=[],
+            warnings=["No melody candidates detected from lead audio."],
+        )
+
+
+class _SemanticCandidatePitchPipeline:
+    def __init__(self) -> None:
+        self.last_request = None
+
+    def run(self, request):
+        self.last_request = request
+        return PitchAnalysisResult(
+            version="test",
+            meta=MetaInfo(
+                bpm=120.0,
+                bpm_confidence=0.9,
+                key="C Major",
+                key_confidence=0.8,
+                rhythm_type="stable",
+                duration_sec=3.0,
+                time_signature="4/4",
+            ),
+            measures=[
+                {
+                    "measure_num": 1,
+                    "start_time": 0.0,
+                    "end_time": 1.0,
+                    "notes": [
+                        {
+                            "pitch": "A3",
+                            "start_time": 0.0,
+                            "end_time": 0.5,
+                            "duration_beats": 1.0,
+                            "note_type": "quarter",
+                            "confidence": 0.9,
+                        }
+                    ],
+                }
+            ],
+            lead_notes=[],
+            raw_notes=[],
+            f0_track=F0Track(
+                source_stem="vocals",
+                input_audio_path=str(request.lead_audio_path),
+                backend="rmvpe",
+                frames=[
+                    F0Frame(time_sec=0.10, frequency_hz=220.0, confidence=0.92, voiced=True, pitch_midi=57.0),
+                    F0Frame(time_sec=0.18, frequency_hz=220.0, confidence=0.92, voiced=True, pitch_midi=57.0),
+                    F0Frame(time_sec=0.26, frequency_hz=220.0, confidence=0.92, voiced=True, pitch_midi=57.0),
+                    F0Frame(time_sec=0.34, frequency_hz=220.0, confidence=0.92, voiced=True, pitch_midi=57.0),
+                ],
+            ),
+            semantic_audio=SemanticAudioResult(
+                source_stems=dict(request.source_stems),
+                melody_candidates=NoteCandidateSet(
+                    role="melody_candidates",
+                    source_stem="vocals",
+                    input_audio_path=str(request.lead_audio_path),
+                    notes=[
+                        Note(
+                            pitch="A3",
+                            start_time=0.10,
+                            end_time=0.34,
+                            confidence=0.88,
+                            candidate_id="sem_raw_1",
+                        )
+                    ],
+                    selected_notes=[
+                        Note(
+                            pitch="A3",
+                            start_time=0.10,
+                            end_time=0.34,
+                            confidence=0.93,
+                            candidate_id="sem_selected_1",
+                        )
+                    ],
+                    analysis_info={"backend": "semantic_detector_v1"},
+                ),
+                rhythm_grid=RhythmGrid(
+                    source_stem="drums",
+                    input_audio_path="drums.wav",
+                    bpm=120.0,
+                    beat_times=[0.0, 0.5, 1.0, 1.5],
+                    beats_per_bar=4,
+                    beat_unit=4,
+                ),
+            ),
         )
 
 
@@ -282,6 +372,56 @@ class TestAudioAnalysisService(unittest.TestCase):
             self.assertEqual(result.selected_melody_dict["selected_notes"][0]["candidate_id"], "sel_1")
             self.assertEqual(result.vocal_activity_dict["segments"][0]["source_stem"], "vocals")
 
+    def test_melody_transcription_builds_note_candidates_with_raw_source_trace(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            workspace = ProjectWorkspace(project_id="melody_builder_trace", projects_root=root / "projects")
+            workspace.ensure_structure()
+            source_audio = root / "source.wav"
+            source_audio.write_bytes(b"audio")
+            selector = _CaptureMelodySelector()
+            service = MelodyTranscriptionService(
+                pitch_pipeline=_SemanticCandidatePitchPipeline(),
+                serializer=AudioAnalysisService(
+                    audio_processor=_PassthroughAudioProcessor(),
+                    vocal_separator=None,
+                    lyrics_recognizer=None,
+                    pitch_pipeline=None,
+                    analysis_inferencer=None,
+                    midi_exporter=None,
+                )._serialize,
+                pitch_request_builder=lambda **kwargs: PitchPipelineRequest(
+                    lead_audio_path=str(kwargs["vocals_path"] or kwargs["fallback_audio_path"]),
+                    source_audio_path=str(kwargs["source_audio_path"]),
+                    rhythm_audio_path=str(kwargs["accompaniment_path"]) if kwargs.get("accompaniment_path") else None,
+                    source_stems={name: str(path) for name, path in kwargs.get("stem_paths", {}).items()},
+                ),
+                short_exception=lambda exc: str(exc),
+                melody_selector=selector,
+            )
+
+            result = service.transcribe(
+                source_audio_path=source_audio,
+                canonical_audio_path=source_audio,
+                vocals_path=source_audio,
+                accompaniment_path=None,
+                stem_paths={"vocals": source_audio},
+                workspace=workspace,
+            )
+
+            self.assertIsNotNone(result.note_candidates_dict)
+            self.assertTrue(result.note_candidates_dict["builder_version"])
+            melody_payload = result.note_candidates_dict["melody_candidates"]
+            self.assertEqual(melody_payload["selected_notes"], [])
+            self.assertEqual(melody_payload["raw_source"]["selected_notes"][0]["candidate_id"], "sem_selected_1")
+            self.assertEqual(melody_payload["raw_source"]["notes"][0]["candidate_id"], "sem_raw_1")
+            built_note = melody_payload["notes"][0]
+            self.assertTrue(built_note["stable_id"])
+            self.assertEqual(built_note["source_candidate_ids"][0], "sem_raw_1")
+            self.assertEqual(built_note["source_contour_ids"], ["pc_00001"])
+            self.assertIsNotNone(selector.last_kwargs)
+            self.assertEqual(selector.last_kwargs["note_candidates"]["melody_candidates"]["selected_notes"], [])
+
     def test_process_audio_canonicalizes_mp4_before_separation(self) -> None:
         with TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -383,10 +523,15 @@ class TestAudioAnalysisService(unittest.TestCase):
             self.assertEqual(frame["midi_float"], 57.0)
             self.assertIsNotNone(perception.note_candidates_dict)
             self.assertIn("melody_candidates", perception.note_candidates_dict)
+            self.assertTrue(perception.note_candidates_dict["builder_version"])
+            contour_candidate = perception.note_candidates_dict["melody_candidates"]["notes"][0]
+            self.assertTrue(contour_candidate["stable_id"])
+            self.assertEqual(contour_candidate["source_contour_ids"], ["pc_00001"])
             self.assertIsNotNone(perception.pitch_contours_dict)
             self.assertGreaterEqual(perception.pitch_contours_dict["summary"]["contour_count"], 1)
             self.assertIsNotNone(perception.selected_melody_dict)
             self.assertIn("summary", perception.selected_melody_dict)
+            self.assertEqual(perception.selected_melody_dict["summary"]["input_source"], "melody_candidates.notes")
             self.assertIsNotNone(perception.quantized_notes_dict)
             self.assertEqual(perception.quantized_notes_dict["quantizer_backend"], "dp_v1")
             self.assertEqual(len(perception.score_ir_dict["notes"]), len(perception.quantized_notes_dict["notes"]))
@@ -445,7 +590,10 @@ class TestAudioAnalysisService(unittest.TestCase):
                 projects_root=root / "projects",
             )
 
-            with self.assertRaisesRegex(RuntimeError, "no lead-vocal notes"):
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "pitch_pipeline_failed:required F0Track is unavailable for note candidate build",
+            ):
                 asyncio.run(service._run_perception_stage(source_audio, source_audio, workspace, AudioAnalysisOptions(project_id="empty_pitch_001")))
 
     def test_perception_stage_uses_canonical_audio_for_required_stages(self) -> None:
