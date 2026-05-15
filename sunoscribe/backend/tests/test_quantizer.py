@@ -148,6 +148,99 @@ class TestNoteQuantizer(unittest.TestCase):
         self.assertEqual(quantized[0].pitch, "C4")
         self.assertAlmostEqual(quantized[0].end_time, 0.7, places=3)
 
+    def test_merge_preserves_combined_lineage(self):
+        cfg = PitchDetectionConfig(
+            quantize_merge_same_pitch_enabled=True,
+            quantize_merge_same_pitch_gap_sec=0.08,
+            quantize_merge_min_confidence=0.45,
+            quantize_precision=0.125,
+        )
+        quantizer = NoteQuantizer(cfg)
+
+        notes = [
+            Note(
+                pitch="A4",
+                start_time=0.0,
+                end_time=0.4,
+                confidence=0.9,
+                candidate_id="cand_a",
+                source_candidate_id="cand_a",
+                source_candidate_ids=["cand_a"],
+                source_contour_ids=["pc_a"],
+                segmentation_evidence={
+                    "source_f0_frame_range": {"start_frame_index": 0, "end_frame_index": 4, "frame_count": 5}
+                },
+            ),
+            Note(
+                pitch="A4",
+                start_time=0.44,
+                end_time=0.9,
+                confidence=0.88,
+                candidate_id="cand_b",
+                source_candidate_id="cand_b",
+                source_candidate_ids=["cand_b"],
+                source_contour_ids=["pc_b"],
+                segmentation_evidence={
+                    "source_f0_frame_range": {"start_frame_index": 5, "end_frame_index": 9, "frame_count": 5}
+                },
+            ),
+        ]
+        quantized = quantizer.quantize(notes, bpm=120.0, beat_times=[0.0, 0.5, 1.0])
+
+        self.assertEqual(len(quantized), 1)
+        self.assertEqual(quantized[0].source_candidate_id, "cand_a")
+        self.assertEqual(quantized[0].source_candidate_ids, ["cand_a", "cand_b"])
+        self.assertEqual(quantized[0].source_contour_ids, ["pc_a", "pc_b"])
+        frame_range = quantized[0].segmentation_evidence["source_f0_frame_range"]
+        self.assertEqual(frame_range["start_frame_index"], 0)
+        self.assertEqual(frame_range["end_frame_index"], 9)
+        self.assertEqual(frame_range["frame_count"], 10)
+
+    def test_overlap_trim_preserves_lineage(self):
+        cfg = PitchDetectionConfig(
+            quantize_overlap_resolution_enabled=True,
+            quantize_overlap_min_gap_sec=0.01,
+            quantize_merge_same_pitch_enabled=False,
+        )
+        quantizer = NoteQuantizer(cfg)
+
+        notes = [
+            Note(
+                pitch="C4",
+                start_time=0.0,
+                end_time=0.6,
+                confidence=0.95,
+                candidate_id="cand_c",
+                source_candidate_id="cand_c",
+                source_candidate_ids=["cand_c"],
+                source_contour_ids=["pc_c"],
+                segmentation_evidence={
+                    "source_f0_frame_range": {"start_frame_index": 0, "end_frame_index": 6, "frame_count": 7}
+                },
+            ),
+            Note(
+                pitch="E4",
+                start_time=0.4,
+                end_time=0.9,
+                confidence=0.6,
+                candidate_id="cand_e",
+                source_candidate_id="cand_e",
+                source_candidate_ids=["cand_e"],
+                source_contour_ids=["pc_e"],
+                segmentation_evidence={
+                    "source_f0_frame_range": {"start_frame_index": 4, "end_frame_index": 9, "frame_count": 6}
+                },
+            ),
+        ]
+        quantized = quantizer.quantize(notes, bpm=120.0, beat_times=[0.0, 0.5, 1.0])
+
+        self.assertEqual(len(quantized), 2)
+        self.assertLessEqual(quantized[0].end_time, quantized[1].start_time)
+        self.assertEqual(quantized[0].source_candidate_ids, ["cand_c"])
+        self.assertEqual(quantized[0].source_contour_ids, ["pc_c"])
+        self.assertEqual(quantized[1].source_candidate_ids, ["cand_e"])
+        self.assertEqual(quantized[1].source_contour_ids, ["pc_e"])
+
 
 if __name__ == "__main__":
     unittest.main()

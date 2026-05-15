@@ -38,6 +38,9 @@ class ScoreNote:
     tie_candidate: bool
     source: str
     source_candidate_id: Optional[str] = None
+    source_candidate_ids: List[str] = field(default_factory=list)
+    source_contour_ids: List[str] = field(default_factory=list)
+    source_f0_frame_range: Dict[str, Any] = field(default_factory=dict)
     quantized_note_id: Optional[str] = None
     timing_origin: Optional[str] = None
     performance_start_time_sec: Optional[float] = None

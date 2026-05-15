@@ -22,8 +22,7 @@ from app.modules.alignment import (
     StubAlignmentLLMClient,
 )
 from app.modules.analysis_ir import AnalysisIR
-from app.modules.pitch.note_utils import midi_to_note
-from app.modules.score_ir import AnalysisHints, ScoreIR, ScoreIRBuilder, ScoreIRSerializer, ScoreMeasure, ScoreMeta, ScoreNote
+from app.modules.score_ir import AnalysisHints, ScoreIR, ScoreIRBuilder, ScoreIRSerializer, ScoreMeta
 
 from app.services.media_ingest_service import MediaIngestService
 from app.services.melody_transcription_service import MelodyTranscriptionService
@@ -344,12 +343,6 @@ class AudioAnalysisService:
 
         if score_ir_obj is None:
             raise RuntimeError("required score_ir build returned no score_ir")
-        score_ir_obj = self._replace_lead_notes_from_quantized_artifact(
-            score_ir_obj,
-            quantized_notes_dict=quantized_notes_dict,
-            warnings=warnings,
-        )
-
         if score_data_dict is None:
             try:
                 score_data_dict = ScoreIRSerializer.to_score_data(score_ir_obj)
@@ -360,19 +353,6 @@ class AudioAnalysisService:
 
         score_ir_serialized = self._serialize(perception_obj=score_ir_obj)
         score_ir_dict = score_ir_serialized if isinstance(score_ir_serialized, dict) else {"value": score_ir_serialized}
-        score_ir_dict = self._annotate_score_ir_notes(
-            score_ir_dict,
-            quantized_notes_dict=quantized_notes_dict,
-        )
-        if score_data_dict is not None:
-            try:
-                from app.modules.score_ir import ScoreIRSerializer
-
-                score_data_dict = ScoreIRSerializer.to_score_data_dict(score_ir_dict)
-            except Exception as exc:
-                message = f"score_data_trace_annotation_failed:{self._short_exception(exc)}"
-                warnings.append(message)
-                raise RuntimeError(message) from exc
 
         return _PerceptionStageResult(
             source_audio_path=source_audio_path,
@@ -408,166 +388,16 @@ class AudioAnalysisService:
         quantized_notes_dict: dict | None,
         warnings: list[str],
     ) -> ScoreIR:
-        if not isinstance(quantized_notes_dict, dict):
-            return score_ir
-        raw_notes = quantized_notes_dict.get("notes")
-        if not isinstance(raw_notes, list) or not raw_notes:
-            return score_ir
-
-        converted_notes: list[ScoreNote] = []
-        measure_note_ids: dict[int, list[str]] = {}
-        for index, raw_note in enumerate(raw_notes, start=1):
-            if not isinstance(raw_note, dict):
-                continue
-            score_note = self._score_note_from_quantized_artifact(raw_note, index)
-            if score_note is None:
-                continue
-            converted_notes.append(score_note)
-            if score_note.measure_num is not None:
-                measure_note_ids.setdefault(int(score_note.measure_num), []).append(score_note.id)
-        if not converted_notes:
-            warnings.append("score_ir_quantized_notes_empty_after_conversion")
-            return score_ir
-
-        score_ir.notes = converted_notes
-        score_ir.measures = self._measures_from_quantized_score_notes(converted_notes, measure_note_ids)
-        score_ir.warnings = self._merge_warnings(
-            list(score_ir.warnings or []),
-            ["score_ir_lead_notes_replaced_from_quantized_notes"],
+        raise RuntimeError(
+            "legacy_score_ir_quantized_artifact_replacement_disabled:"
+            "ScoreIRBuilder must consume QuantizedNoteSet through PitchAnalysisResult.measures"
         )
-        score_ir.meta.total_measures = len(score_ir.measures)
-        score_ir.meta.duration_sec = max(
-            float(score_ir.meta.duration_sec or 0.0),
-            max(float(note.end_time) for note in converted_notes),
-        )
-        score_ir.meta.analysis_info = dict(score_ir.meta.analysis_info or {})
-        score_ir.meta.analysis_info["lead_note_source"] = "quantized_notes"
-        score_ir.meta.analysis_info["timing_origin"] = "performance_time_from_quantized_notes"
-        score_ir.meta.analysis_info["notation_timing_origin"] = "quantized_grid_from_quantized_notes"
-        score_ir.meta.analysis_info["quantizer_backend"] = quantized_notes_dict.get("quantizer_backend")
-        score_ir.meta.analysis_info["quantized_note_count"] = len(raw_notes)
-        score_ir.meta.analysis_info["score_ir_lead_note_count"] = len(converted_notes)
-        score_ir.analysis_hints.quantize_mode = str(quantized_notes_dict.get("quantizer_backend") or "") or None
-        return score_ir
-
-    def _score_note_from_quantized_artifact(self, raw_note: dict[str, Any], index: int) -> ScoreNote | None:
-        start_time = self._float_from_any(raw_note.get("start_time_sec"), raw_note.get("quantized_start_time_sec"), 0.0)
-        end_time = self._float_from_any(raw_note.get("end_time_sec"), raw_note.get("quantized_end_time_sec"), start_time)
-        if end_time <= start_time:
-            return None
-        quantized_start_time = self._optional_float_from_any(raw_note.get("quantized_start_time_sec"))
-        quantized_end_time = self._optional_float_from_any(raw_note.get("quantized_end_time_sec"))
-        quantized_duration = self._optional_float_from_any(raw_note.get("quantized_duration_sec"))
-        if quantized_duration is None and quantized_start_time is not None and quantized_end_time is not None:
-            quantized_duration = max(0.0, quantized_end_time - quantized_start_time)
-        pitch_midi = self._optional_int_from_any(raw_note.get("pitch_midi"))
-        pitch = str(raw_note.get("pitch") or "")
-        if not pitch and pitch_midi is not None:
-            pitch = midi_to_note(pitch_midi)
-        if not pitch:
-            return None
-        measure_index = self._optional_int_from_any(raw_note.get("measure_index"))
-        measure_num = self._optional_int_from_any(raw_note.get("measure_num"))
-        if measure_num is None and measure_index is not None:
-            measure_num = measure_index + 1
-        if measure_num is None:
-            measure_num = 1
-        reason_codes = list(raw_note.get("reason_codes") or [])
-        note_id = f"n{index:06d}"
-        return ScoreNote(
-            id=note_id,
-            pitch=pitch,
-            pitch_midi=pitch_midi,
-            start_time=start_time,
-            end_time=end_time,
-            duration_sec=max(0.0, end_time - start_time),
-            duration_beats=self._optional_float_from_any(raw_note.get("duration_beats")),
-            note_type=self._note_type_from_duration_beats(raw_note.get("duration_beats")),
-            measure_num=measure_num,
-            beat_position=self._optional_float_from_any(raw_note.get("beat_in_measure")),
-            confidence=self._float_from_any(raw_note.get("confidence"), 0.0),
-            lyric=None,
-            is_raw=False,
-            is_candidate_ornament=False,
-            tie_candidate=False,
-            source="quantized_notes",
-            source_candidate_id=str(raw_note.get("source_candidate_id") or ""),
-            quantized_note_id=str(raw_note.get("id") or ""),
-            timing_origin="performance_time_from_quantized_notes",
-            performance_start_time_sec=start_time,
-            performance_end_time_sec=end_time,
-            quantized_start_time_sec=quantized_start_time,
-            quantized_end_time_sec=quantized_end_time,
-            quantized_duration_sec=quantized_duration,
-            uncertain=bool(raw_note.get("uncertain")) or bool(reason_codes),
-            reason_codes=reason_codes,
-        )
-
-    def _measures_from_quantized_score_notes(
-        self,
-        notes: list[ScoreNote],
-        measure_note_ids: dict[int, list[str]],
-    ) -> list[ScoreMeasure]:
-        measure_nums = sorted(measure_note_ids) or [1]
-        measures: list[ScoreMeasure] = []
-        for measure_num in measure_nums:
-            measure_notes = [note for note in notes if note.measure_num == measure_num]
-            if not measure_notes:
-                continue
-            start_time = min(float(note.start_time) for note in measure_notes)
-            end_time = max(float(note.end_time) for note in measure_notes)
-            measures.append(
-                ScoreMeasure(
-                    measure_num=measure_num,
-                    start_time=start_time,
-                    end_time=end_time,
-                    duration_sec=max(0.0, end_time - start_time),
-                    is_anacrusis=False,
-                    note_ids=list(measure_note_ids.get(measure_num) or []),
-                )
-            )
-        return measures
 
     def _annotate_score_ir_notes(self, score_ir_dict: dict, *, quantized_notes_dict: dict | None) -> dict:
-        if not isinstance(score_ir_dict, dict) or not isinstance(quantized_notes_dict, dict):
-            return score_ir_dict
-        try:
-            from app.modules.pitch.quantized_notes_artifact import score_ir_note_annotations
-
-            annotations = score_ir_note_annotations(quantized_notes_dict)
-        except Exception:
-            return score_ir_dict
-        if not annotations:
-            return score_ir_dict
-        annotated = dict(score_ir_dict)
-        notes = []
-        for idx, note in enumerate(score_ir_dict.get("notes") or [], start=1):
-            if not isinstance(note, dict):
-                notes.append(note)
-                continue
-            updated = dict(note)
-            candidates = [
-                str(note.get("source_candidate_id") or ""),
-                str(note.get("id") or ""),
-                f"cand_{idx:05d}",
-            ]
-            annotation = next((annotations.get(candidate) for candidate in candidates if candidate in annotations), None)
-            if annotation:
-                existing_reasons = list(updated.get("reason_codes") or [])
-                annotation_reasons = list(annotation.get("reason_codes") or [])
-                merged_reasons = self._merge_warnings(existing_reasons, annotation_reasons)
-                updated.update(
-                    {
-                        key: value
-                        for key, value in annotation.items()
-                        if value is not None and key not in {"reason_codes", "uncertain"}
-                    }
-                )
-                updated["reason_codes"] = merged_reasons
-                updated["uncertain"] = bool(updated.get("uncertain")) or bool(annotation.get("uncertain")) or bool(merged_reasons)
-            notes.append(updated)
-        annotated["notes"] = notes
-        return annotated
+        raise RuntimeError(
+            "legacy_score_ir_quantized_artifact_annotation_disabled:"
+            "ScoreIR must carry quantized lineage from ScoreIRBuilder output"
+        )
 
     def _build_pitch_pipeline_request(
         self,

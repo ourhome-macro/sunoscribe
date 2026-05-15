@@ -8,7 +8,7 @@ class PitchDetectionConfig:
 
     # Base settings
     sample_rate: int = 22050
-    confidence_threshold: float = 0.5
+    confidence_threshold: float = 0.45
     pitch_backend: str = "rmvpe"  # "rmvpe" / "crepe" / "basic-pitch"
     pitch_backend_fallbacks: tuple[str, ...] = ()
     pitch_profile: str = "production"
@@ -56,10 +56,10 @@ class PitchDetectionConfig:
     quantize_jitter_tolerance_beats: float = 0.05
     adaptive_dotted_tolerance_beats: float = 0.12
     adaptive_triplet_tolerance_beats: float = 0.08
-    quantize_noise_confidence_floor: float = 0.35
+    quantize_noise_confidence_floor: float = 0.30
     quantize_merge_same_pitch_enabled: bool = True
     quantize_merge_same_pitch_gap_sec: float = 0.06
-    quantize_merge_min_confidence: float = 0.5
+    quantize_merge_min_confidence: float = 0.45
     quantize_merge_near_pitch_enabled: bool = False
     quantize_merge_near_pitch_max_semitone: int = 1
     quantize_overlap_resolution_enabled: bool = True
@@ -73,10 +73,10 @@ class PitchDetectionConfig:
     melody_selector_enabled: bool = True
     melody_pitch_min_midi: int = 48
     melody_pitch_max_midi: int = 84
-    melody_min_confidence: float = 0.52
+    melody_min_confidence: float = 0.45
     melody_min_duration_sec: float = 0.12
     melody_short_note_sec: float = 0.18
-    melody_short_note_min_confidence: float = 0.62
+    melody_short_note_min_confidence: float = 0.58
     melody_low_octave_rescue_enabled: bool = True
     melody_low_octave_rescue_context_gap_sec: float = 4.0
     melody_low_octave_rescue_context_tolerance_semitones: int = 4
@@ -86,10 +86,21 @@ class PitchDetectionConfig:
     melody_bridge_note_retention_enabled: bool = False
     melody_bridge_note_gap_threshold_sec: float = 0.5
     melody_bridge_note_small_gap_sec: float = 0.05
+    contour_bridge_min_confidence: float = 0.66
+    contour_bridge_min_voiced_ratio: float = 0.86
+    contour_bridge_min_duration_sec: float = 0.16
+    contour_bridge_max_duration_sec: float = 2.5
+    contour_bridge_min_stability: float = 0.35
+    contour_bridge_min_gap_sec: float = 0.18
     melody_conflict_window_sec: float = 0.10
     melody_large_jump_semitones: int = 12
     melody_isolated_note_max_duration_sec: float = 0.25
-    melody_isolated_note_min_confidence: float = 0.62
+    melody_isolated_note_min_confidence: float = 0.58
+    note_candidate_min_confidence: float = 0.50
+    note_candidate_min_voiced_ratio: float = 0.68
+    note_candidate_min_stability: float = 0.55
+    melody_selection_min_voiced_ratio: float = 0.45
+    melody_selection_min_stability: float = 0.30
 
     # Source arbitration settings
     melody_arbitrator_enabled: bool = True

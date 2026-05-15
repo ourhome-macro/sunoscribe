@@ -35,13 +35,17 @@ class ScoreIRBuilder:
     ) -> ScoreIR:
         normalized_lyrics = lyrics_segments or []
 
-        notes, measure_note_ids = self._build_notes_from_measures(pitch_result)
-        if not notes:
+        self._validate_required_quantized_artifact(pitch_result)
+        notes, measure_note_ids = self._build_notes_from_quantized_primary(pitch_result)
+        if not notes and not self._requires_quantized_primary(pitch_result):
+            notes, measure_note_ids = self._build_notes_from_measures(pitch_result)
+        if not notes and not self._requires_quantized_primary(pitch_result):
             notes = self._build_notes_from_analysis_lead(pitch_result, analysis_ir)
-        if not notes:
+        if not notes and not self._requires_quantized_primary(pitch_result):
             notes = self._build_notes_from_raw(pitch_result)
         if notes:
             measure_note_ids = self._build_measure_note_ids_from_notes(pitch_result, notes, measure_note_ids)
+        self._validate_production_lineage(pitch_result=pitch_result, notes=notes)
 
         measures = self._build_measures(pitch_result, measure_note_ids)
         instrumental_melody_notes = self._build_instrumental_melody_notes(pitch_result, measures)
@@ -60,7 +64,7 @@ class ScoreIRBuilder:
             analysis_hints=analysis_hints,
         )
         analysis_hints.issue_count = len(issue_spots)
-        lineage_warnings = self._production_lineage_warnings(pitch_result=pitch_result, notes=notes)
+        lineage_warnings: List[str] = []
 
         return ScoreIR(
             meta=meta,
@@ -80,32 +84,240 @@ class ScoreIRBuilder:
             ),
         )
 
-    def _production_lineage_warnings(
+    def _requires_quantized_primary(self, pitch_result: PitchAnalysisResult) -> bool:
+        analysis_info = dict(getattr(pitch_result, "analysis_info", {}) or {})
+        return bool(
+            analysis_info.get("lead_selection_authoritative")
+            or str(analysis_info.get("lead_note_source") or "") == "quantized_notes"
+            or str(analysis_info.get("lead_candidate_authority") or "") == "note_candidate_set_v2"
+        )
+
+    def _validate_required_quantized_artifact(self, pitch_result: PitchAnalysisResult) -> None:
+        if not self._requires_quantized_primary(pitch_result):
+            return
+        payload = self._quantized_note_set_payload_from_pitch_result(pitch_result)
+        if not isinstance(payload, dict):
+            raise RuntimeError("score_ir_quantized_primary_contract_failed:missing_quantized_note_set_v2")
+        if payload.get("schema_version") != "quantized_note_set_v2":
+            raise RuntimeError("score_ir_quantized_primary_contract_failed:invalid_quantized_note_set_schema")
+        payload_notes = payload.get("notes")
+        if not isinstance(payload_notes, list) or not payload_notes:
+            raise RuntimeError("score_ir_quantized_primary_contract_failed:empty_quantized_note_set_v2")
+
+        payload_note_ids: set[str] = set()
+        duplicate_ids: set[str] = set()
+        invalid_items: list[str] = []
+        for index, note in enumerate(payload_notes, start=1):
+            if not isinstance(note, dict):
+                invalid_items.append(f"note_{index}:not_dict")
+                continue
+            note_id = str(note.get("quantized_note_id") or note.get("id") or "").strip()
+            if not note_id:
+                invalid_items.append(f"note_{index}:missing_id")
+                continue
+            if note_id in payload_note_ids:
+                duplicate_ids.add(note_id)
+            payload_note_ids.add(note_id)
+
+        if invalid_items:
+            raise RuntimeError(
+                "score_ir_quantized_primary_contract_failed:invalid_quantized_note_set_notes:"
+                + ";".join(invalid_items[:20])
+            )
+        if duplicate_ids:
+            raise RuntimeError(
+                "score_ir_quantized_primary_contract_failed:duplicate_quantized_note_ids:"
+                + ",".join(sorted(duplicate_ids)[:20])
+            )
+
+        raw_measure_ids = self._raw_measure_quantized_note_ids(pitch_result)
+        if raw_measure_ids:
+            missing_from_payload = sorted(note_id for note_id in raw_measure_ids if note_id not in payload_note_ids)
+            if missing_from_payload:
+                raise RuntimeError(
+                    "score_ir_quantized_primary_contract_failed:measure_note_not_in_quantized_note_set:"
+                    + ",".join(missing_from_payload[:20])
+                )
+
+    @staticmethod
+    def _quantized_note_set_payload_from_pitch_result(pitch_result: PitchAnalysisResult) -> dict | None:
+        semantic_audio = getattr(pitch_result, "semantic_audio", None)
+        melody_candidates = getattr(semantic_audio, "melody_candidates", None)
+        analysis_info = getattr(melody_candidates, "analysis_info", None)
+        if not isinstance(analysis_info, dict):
+            return None
+        payload = analysis_info.get("quantized_notes")
+        return payload if isinstance(payload, dict) else None
+
+    @staticmethod
+    def _raw_measure_quantized_note_ids(pitch_result: PitchAnalysisResult) -> set[str]:
+        note_ids: set[str] = set()
+        for measure in getattr(pitch_result, "measures", None) or []:
+            if not isinstance(measure, dict):
+                continue
+            raw_notes = measure.get("notes")
+            if not isinstance(raw_notes, list):
+                continue
+            for note in raw_notes:
+                if not isinstance(note, dict):
+                    continue
+                note_id = str(note.get("quantized_note_id") or note.get("id") or "").strip()
+                if note_id:
+                    note_ids.add(note_id)
+        return note_ids
+
+    def _build_notes_from_quantized_primary(
+        self,
+        pitch_result: PitchAnalysisResult,
+    ) -> Tuple[List[ScoreNote], List[List[str]]]:
+        payload = self._quantized_note_set_payload_from_pitch_result(pitch_result)
+        payload_notes = payload.get("notes") if isinstance(payload, dict) else None
+        if not isinstance(payload_notes, list) or not payload_notes:
+            return [], []
+
+        notes: List[ScoreNote] = []
+        measure_note_ids = self._empty_measure_note_ids(pitch_result)
+        note_index = 1
+        for raw_note in payload_notes:
+            if not isinstance(raw_note, dict):
+                continue
+            measure_num = self._safe_optional_int(raw_note.get("measure_num"))
+            score_note = self._score_note_from_quantized_measure_note(raw_note, note_index, measure_num)
+            notes.append(score_note)
+            self._append_measure_note_id(measure_note_ids, pitch_result, measure_num, score_note.id)
+            note_index += 1
+        return notes, measure_note_ids
+
+    def _empty_measure_note_ids(self, pitch_result: PitchAnalysisResult) -> List[List[str]]:
+        return [[] for _measure in getattr(pitch_result, "measures", None) or []]
+
+    def _append_measure_note_id(
+        self,
+        measure_note_ids: List[List[str]],
+        pitch_result: PitchAnalysisResult,
+        measure_num: int | None,
+        score_note_id: str,
+    ) -> None:
+        if measure_num is None:
+            return
+        for index, measure in enumerate(getattr(pitch_result, "measures", None) or []):
+            if not isinstance(measure, dict):
+                continue
+            if self._safe_int(measure.get("measure_num"), index + 1) == measure_num:
+                while len(measure_note_ids) <= index:
+                    measure_note_ids.append([])
+                measure_note_ids[index].append(score_note_id)
+                return
+
+    def _quantized_measure_note_items(
+        self,
+        pitch_result: PitchAnalysisResult,
+        *,
+        include_unverified: bool = False,
+    ) -> List[Tuple[dict, list[dict]]]:
+        result: List[Tuple[dict, list[dict]]] = []
+        for measure in getattr(pitch_result, "measures", None) or []:
+            if not isinstance(measure, dict):
+                continue
+            raw_notes = measure.get("notes")
+            if not isinstance(raw_notes, list):
+                raw_notes = []
+            if include_unverified:
+                quantized_notes = [note for note in raw_notes if isinstance(note, dict)]
+            else:
+                quantized_notes = [
+                    note
+                    for note in raw_notes
+                    if isinstance(note, dict)
+                    and (
+                        note.get("source_candidate_id") is not None
+                        or note.get("source_candidate_ids")
+                        or note.get("source_contour_ids")
+                        or note.get("source_f0_frame_range")
+                    )
+                ]
+            result.append((measure, quantized_notes))
+        return result
+
+    def _score_note_from_quantized_measure_note(self, raw_note: dict[str, Any], note_index: int, measure_num: int | None) -> ScoreNote:
+        start_time = self._safe_float(raw_note.get("start_time"), 0.0)
+        end_time = self._safe_float(raw_note.get("end_time"), start_time)
+        if end_time < start_time:
+            end_time = start_time
+        duration_beats = self._safe_optional_float(raw_note.get("duration_beats"))
+        confidence = self._safe_float(raw_note.get("confidence"), 0.0)
+        note_id = f"n{note_index:06d}"
+        source_candidate_id = self._safe_optional_str(raw_note.get("source_candidate_id"))
+        source_candidate_ids = self._unique_str_list(raw_note.get("source_candidate_ids"))
+        if source_candidate_id and source_candidate_id not in source_candidate_ids:
+            source_candidate_ids = [source_candidate_id] + source_candidate_ids
+        source_f0_frame_range = dict(raw_note.get("source_f0_frame_range") or {})
+        return ScoreNote(
+            id=note_id,
+            pitch=str(raw_note.get("pitch", "")),
+            pitch_midi=self._to_midi(raw_note.get("pitch")),
+            start_time=start_time,
+            end_time=end_time,
+            duration_sec=max(0.0, end_time - start_time),
+            duration_beats=duration_beats,
+            note_type=self._safe_optional_str(raw_note.get("note_type")),
+            measure_num=measure_num,
+            beat_position=self._safe_optional_float(raw_note.get("beat_position")),
+            confidence=confidence,
+            lyric=self._safe_optional_str(raw_note.get("lyric")),
+            is_raw=False,
+            is_candidate_ornament=self._is_candidate_ornament(duration_beats, confidence),
+            tie_candidate=self._is_tie_candidate(duration_beats, self._parse_beats_per_measure(None)),
+            source="quantized_notes",
+            source_candidate_id=source_candidate_id,
+            source_candidate_ids=source_candidate_ids,
+            source_contour_ids=self._unique_str_list(raw_note.get("source_contour_ids")),
+            source_f0_frame_range=source_f0_frame_range,
+            quantized_note_id=self._safe_optional_str(raw_note.get("quantized_note_id")) or self._safe_optional_str(raw_note.get("id")),
+            timing_origin="performance_time_from_quantized_notes",
+            performance_start_time_sec=start_time,
+            performance_end_time_sec=end_time,
+            quantized_start_time_sec=self._safe_optional_float(raw_note.get("quantized_start_time_sec")) or start_time,
+            quantized_end_time_sec=self._safe_optional_float(raw_note.get("quantized_end_time_sec")) or end_time,
+            quantized_duration_sec=self._safe_optional_float(raw_note.get("quantized_duration_sec")),
+            reason_codes=list(raw_note.get("reason_codes") or []),
+            uncertain=bool(raw_note.get("reason_codes")),
+        )
+
+    def _validate_production_lineage(
         self,
         *,
         pitch_result: PitchAnalysisResult,
         notes: List[ScoreNote],
-    ) -> List[str]:
-        analysis_info = dict(getattr(pitch_result, "analysis_info", {}) or {})
-        warnings: List[str] = []
-        lead_note_source = str(analysis_info.get("lead_note_source") or "")
-        authoritative_selection = bool(analysis_info.get("lead_selection_authoritative"))
-        if lead_note_source == "quantized_notes" or authoritative_selection:
-            missing_source_ids = [note.id for note in notes if not self._safe_optional_str(note.source_candidate_id)]
-            missing_quantized_ids = [note.id for note in notes if note.source == "quantized_notes" and not self._safe_optional_str(note.quantized_note_id)]
-            if missing_source_ids:
-                warnings.append(
-                    "score_ir_lineage_warning:missing_source_candidate_id:"
-                    + ",".join(missing_source_ids[:20])
-                )
-            if missing_quantized_ids:
-                warnings.append(
-                    "score_ir_lineage_warning:missing_quantized_note_id:"
-                    + ",".join(missing_quantized_ids[:20])
-                )
-        if not notes and authoritative_selection:
-            warnings.append("score_ir_lineage_warning:authoritative_selection_empty")
-        return warnings
+    ) -> None:
+        if not self._requires_quantized_primary(pitch_result):
+            return
+        if not notes:
+            raise RuntimeError("score_ir_lineage_contract_failed:quantized_primary_empty")
+        failures: list[str] = []
+        for note in notes:
+            missing: list[str] = []
+            if note.source != "quantized_notes":
+                missing.append("source=quantized_notes")
+            if not self._safe_optional_str(note.quantized_note_id):
+                missing.append("quantized_note_id")
+            if not self._safe_optional_str(note.source_candidate_id):
+                missing.append("source_candidate_id")
+            if not list(getattr(note, "source_candidate_ids", []) or []):
+                missing.append("source_candidate_ids")
+            if not list(getattr(note, "source_contour_ids", []) or []):
+                missing.append("source_contour_ids")
+            frame_range = dict(getattr(note, "source_f0_frame_range", {}) or {})
+            if (
+                frame_range.get("start_frame_index") is None
+                or frame_range.get("end_frame_index") is None
+                or int(frame_range.get("frame_count") or 0) <= 0
+            ):
+                missing.append("source_f0_frame_range")
+            if missing:
+                failures.append(f"{note.id}:{','.join(missing)}")
+        if failures:
+            raise RuntimeError("score_ir_lineage_contract_failed:" + ";".join(failures[:20]))
 
     def _build_notes_from_measures(
         self,
@@ -210,6 +422,11 @@ class ScoreIRBuilder:
                     is_candidate_ornament=self._is_candidate_ornament(None, confidence),
                     tie_candidate=False,
                     source=fallback_source,
+                    source_candidate_id=self._safe_optional_str(getattr(raw_note, "source_candidate_id", None))
+                    or self._safe_optional_str(getattr(raw_note, "candidate_id", None)),
+                    source_candidate_ids=list(getattr(raw_note, "source_candidate_ids", []) or []),
+                    source_contour_ids=list(getattr(raw_note, "source_contour_ids", []) or []),
+                    source_f0_frame_range=dict((getattr(raw_note, "segmentation_evidence", {}) or {}).get("source_f0_frame_range") or {}),
                 )
             )
 
@@ -331,7 +548,11 @@ class ScoreIRBuilder:
                     tie_candidate=False,
                     source=source,
                     source_candidate_id=self._safe_optional_str(getattr(note, "source_candidate_id", None))
+                    or self._safe_optional_str(getattr(note, "candidate_id", None))
                     or self._safe_optional_str(getattr(note, "id", None)),
+                    source_candidate_ids=list(getattr(note, "source_candidate_ids", []) or []),
+                    source_contour_ids=list(getattr(note, "source_contour_ids", []) or []),
+                    source_f0_frame_range=dict((getattr(note, "segmentation_evidence", {}) or {}).get("source_f0_frame_range") or {}),
                     quantized_note_id=self._safe_optional_str(getattr(note, "quantized_note_id", None)),
                     uncertain=bool(getattr(note, "uncertain", False)),
                     reason_codes=list(getattr(note, "reason_codes", []) or []),
@@ -740,6 +961,16 @@ class ScoreIRBuilder:
                 if start_time >= measure_end:
                     return measure_num
         return None
+
+    def _unique_str_list(self, value: Any) -> List[str]:
+        if not isinstance(value, list):
+            return []
+        result: List[str] = []
+        for item in value:
+            text = self._safe_optional_str(item)
+            if text and text not in result:
+                result.append(text)
+        return result
 
     def _merge_unique_strings(self, *chunks: List[str]) -> List[str]:
         merged: List[str] = []

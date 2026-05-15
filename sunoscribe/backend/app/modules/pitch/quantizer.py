@@ -51,6 +51,7 @@ class NoteQuantizer:
                     lyric=None,
                     source=getattr(note, "source", None),
                     reason_codes=list(getattr(note, "reason_codes", []) or []),
+                    **self._lineage_kwargs(note),
                 )
             )
 
@@ -92,16 +93,7 @@ class NoteQuantizer:
                 )
 
                 if can_merge:
-                    merged[-1] = Note(
-                        pitch=prev.pitch,
-                        start_time=float(prev.start_time),
-                        end_time=max(float(prev.end_time), float(note.end_time)),
-                        confidence=max(float(prev.confidence), float(note.confidence)),
-                        reason_codes=_unique_reason_codes(
-                            list(getattr(prev, "reason_codes", []) or [])
-                            + list(getattr(note, "reason_codes", []) or [])
-                        ),
-                    )
+                    merged[-1] = self._merge_notes(prev, note)
                     continue
 
                 merged.append(note)
@@ -110,6 +102,142 @@ class NoteQuantizer:
             merged = self._resolve_overlaps(merged)
 
         return merged
+
+    def _merge_notes(self, prev: Note, note: Note) -> Note:
+        lineage = self._merged_lineage_kwargs(prev, note)
+        return Note(
+            pitch=prev.pitch,
+            start_time=float(prev.start_time),
+            end_time=max(float(prev.end_time), float(note.end_time)),
+            confidence=max(float(prev.confidence), float(note.confidence)),
+            reason_codes=_unique_reason_codes(
+                list(getattr(prev, "reason_codes", []) or [])
+                + list(getattr(note, "reason_codes", []) or [])
+            ),
+            candidate_origin="quantizer.merge_same_pitch",
+            **lineage,
+        )
+
+    def _trim_note_end(self, note: Note, end_time: float) -> Note:
+        return Note(
+            pitch=note.pitch,
+            start_time=float(note.start_time),
+            end_time=float(end_time),
+            confidence=float(note.confidence),
+            reason_codes=list(getattr(note, "reason_codes", []) or []),
+            candidate_origin=getattr(note, "candidate_origin", None),
+            **self._lineage_kwargs(note),
+        )
+
+    def _trim_note_start(self, note: Note, start_time: float) -> Note:
+        return Note(
+            pitch=note.pitch,
+            start_time=float(start_time),
+            end_time=float(note.end_time),
+            confidence=float(note.confidence),
+            reason_codes=list(getattr(note, "reason_codes", []) or []),
+            candidate_origin=getattr(note, "candidate_origin", None),
+            **self._lineage_kwargs(note),
+        )
+
+    @classmethod
+    def _lineage_kwargs(cls, note: Note) -> dict:
+        source_candidate_id = getattr(note, "source_candidate_id", None) or getattr(note, "candidate_id", None)
+        source_candidate_ids = cls._source_candidate_ids(note)
+        if source_candidate_id and str(source_candidate_id) not in source_candidate_ids:
+            source_candidate_ids = [str(source_candidate_id)] + source_candidate_ids
+        return {
+            "candidate_id": getattr(note, "candidate_id", None),
+            "source_candidate_id": str(source_candidate_id) if source_candidate_id else None,
+            "source_candidate_ids": source_candidate_ids,
+            "source_contour_ids": cls._unique_strings(getattr(note, "source_contour_ids", []) or []),
+            "contour_bridge_evidence": dict(getattr(note, "contour_bridge_evidence", {}) or {}),
+            "contour_bridge_guard_reason_codes": cls._unique_strings(
+                getattr(note, "contour_bridge_guard_reason_codes", []) or []
+            ),
+            "segmentation_evidence": dict(getattr(note, "segmentation_evidence", {}) or {}),
+        }
+
+    @classmethod
+    def _merged_lineage_kwargs(cls, prev: Note, note: Note) -> dict:
+        prev_lineage = cls._lineage_kwargs(prev)
+        note_lineage = cls._lineage_kwargs(note)
+        source_candidate_ids = cls._unique_strings(
+            list(prev_lineage.get("source_candidate_ids") or [])
+            + list(note_lineage.get("source_candidate_ids") or [])
+        )
+        source_contour_ids = cls._unique_strings(
+            list(prev_lineage.get("source_contour_ids") or [])
+            + list(note_lineage.get("source_contour_ids") or [])
+        )
+        segmentation_evidence = dict(prev_lineage.get("segmentation_evidence") or {})
+        note_segmentation = dict(note_lineage.get("segmentation_evidence") or {})
+        prev_frame_range = segmentation_evidence.get("source_f0_frame_range")
+        note_frame_range = note_segmentation.get("source_f0_frame_range")
+        merged_frame_range = cls._merge_frame_ranges(prev_frame_range, note_frame_range)
+        original_frame_ranges = [
+            dict(frame_range)
+            for frame_range in (prev_frame_range, note_frame_range)
+            if isinstance(frame_range, dict)
+        ]
+        if merged_frame_range:
+            segmentation_evidence["source_f0_frame_range"] = merged_frame_range
+            segmentation_evidence["merged_source_f0_frame_ranges"] = original_frame_ranges
+        contour_bridge_evidence = dict(prev_lineage.get("contour_bridge_evidence") or {})
+        note_bridge_evidence = dict(note_lineage.get("contour_bridge_evidence") or {})
+        if note_bridge_evidence:
+            contour_bridge_evidence["merged_sources"] = [contour_bridge_evidence, note_bridge_evidence]
+        return {
+            "candidate_id": getattr(prev, "candidate_id", None) or getattr(note, "candidate_id", None),
+            "source_candidate_id": (source_candidate_ids[0] if source_candidate_ids else None),
+            "source_candidate_ids": source_candidate_ids,
+            "source_contour_ids": source_contour_ids,
+            "contour_bridge_evidence": contour_bridge_evidence,
+            "contour_bridge_guard_reason_codes": cls._unique_strings(
+                list(prev_lineage.get("contour_bridge_guard_reason_codes") or [])
+                + list(note_lineage.get("contour_bridge_guard_reason_codes") or [])
+            ),
+            "segmentation_evidence": segmentation_evidence,
+        }
+
+    @classmethod
+    def _source_candidate_ids(cls, note: Note) -> list[str]:
+        values = []
+        for attr in ("source_candidate_id", "candidate_id"):
+            value = getattr(note, attr, None)
+            if value:
+                values.append(value)
+        values.extend(getattr(note, "source_candidate_ids", []) or [])
+        return cls._unique_strings(values)
+
+    @staticmethod
+    def _merge_frame_ranges(left: object, right: object) -> dict:
+        if not isinstance(left, dict):
+            return dict(right) if isinstance(right, dict) else {}
+        if not isinstance(right, dict):
+            return dict(left)
+        start_values = [value for value in (left.get("start_frame_index"), right.get("start_frame_index")) if value is not None]
+        end_values = [value for value in (left.get("end_frame_index"), right.get("end_frame_index")) if value is not None]
+        if not start_values or not end_values:
+            return dict(left)
+        start = int(min(start_values))
+        end = int(max(end_values))
+        result = dict(left)
+        result["start_frame_index"] = start
+        result["end_frame_index"] = end
+        result["frame_count"] = max(1, end - start + 1)
+        return result
+
+    @staticmethod
+    def _unique_strings(values: object) -> list[str]:
+        seen: set[str] = set()
+        result: list[str] = []
+        for value in values or []:
+            text = str(value or "").strip()
+            if text and text not in seen:
+                seen.add(text)
+                result.append(text)
+        return result
 
     @staticmethod
     def _is_mergeable_pitch(
@@ -142,22 +270,10 @@ class NoteQuantizer:
                 # 优先保留高置信度音符的完整时长，截断另一条以消除重叠。
                 if note.confidence > prev.confidence:
                     new_prev_end = max(float(prev.start_time), float(note.start_time) - min_gap)
-                    resolved[-1] = Note(
-                        pitch=prev.pitch,
-                        start_time=float(prev.start_time),
-                        end_time=new_prev_end,
-                        confidence=float(prev.confidence),
-                        reason_codes=list(getattr(prev, "reason_codes", []) or []),
-                    )
+                    resolved[-1] = self._trim_note_end(prev, new_prev_end)
                 else:
                     adjusted_start = min(float(note.end_time), float(prev.end_time) + min_gap)
-                    note = Note(
-                        pitch=note.pitch,
-                        start_time=adjusted_start,
-                        end_time=float(note.end_time),
-                        confidence=float(note.confidence),
-                        reason_codes=list(getattr(note, "reason_codes", []) or []),
-                    )
+                    note = self._trim_note_start(note, adjusted_start)
 
             if note.end_time > note.start_time:
                 resolved.append(note)

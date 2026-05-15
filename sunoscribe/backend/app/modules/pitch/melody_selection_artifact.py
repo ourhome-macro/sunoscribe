@@ -163,6 +163,13 @@ class RuleBasedMelodySelector:
                 "inherited_reason_code_counts": inherited_reason_code_counts,
             },
             "config": {
+                "min_confidence": self.config.min_confidence,
+                "min_duration_sec": self.config.min_duration_sec,
+                "min_voiced_ratio": self.config.min_voiced_ratio,
+                "min_stability": self.config.min_stability,
+                "vocal_min_midi": self.config.vocal_min_midi,
+                "vocal_max_midi": self.config.vocal_max_midi,
+                "overlap_window_sec": self.config.overlap_window_sec,
                 "phrase_postprocess_enabled": self.config.phrase_postprocess_enabled,
                 "postprocess_profile": self._postprocess_profile(),
                 "phrase_max_gap_sec": self.config.phrase_max_gap_sec,
