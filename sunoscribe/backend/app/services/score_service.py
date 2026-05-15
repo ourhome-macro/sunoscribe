@@ -62,6 +62,7 @@ def generate_or_regenerate_score(
     project_id: str,
     score_type: ScoreType,
     key: str,
+    task_id: str | None = None,
 ) -> Score:
     project_uuid = _parse_uuid(project_id, "project_id")
     project_stmt = select(Project).where(Project.id == project_uuid, Project.user_id == user.id)
@@ -88,6 +89,7 @@ def generate_or_regenerate_score(
         score_type=score_type,
         key=key,
         analysis_result=analysis_result,
+        task_id=task_id,
     )
 
     lyrics_stmt = select(Lyrics).where(Lyrics.project_id == project.id)

@@ -35,6 +35,7 @@ class Settings(BaseSettings):
     minio_base_path: str = "uploads"
     task_worker_count: int = 1
     task_stale_after_minutes: int = 120
+    task_timeout_seconds: int = 1800
     canonical_audio_sample_rate: int = 44100
     canonical_audio_channels: int = 2
     pitch_backend: str = "rmvpe"
@@ -140,6 +141,14 @@ class Settings(BaseSettings):
         normalized = int(value)
         if normalized < 1:
             raise ValueError("task_stale_after_minutes must be at least 1")
+        return normalized
+
+    @field_validator("task_timeout_seconds")
+    @classmethod
+    def _validate_task_timeout_seconds(cls, value: int) -> int:
+        normalized = int(value)
+        if normalized < 1:
+            raise ValueError("task_timeout_seconds must be at least 1")
         return normalized
 
     @model_validator(mode="after")
