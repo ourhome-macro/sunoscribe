@@ -16,6 +16,7 @@ from app.models.project import Project
 from app.models.task import Task
 from app.models.user import User
 from app.services.score_service import generate_or_regenerate_score
+from app.services.task_manifest_service import TaskManifestService
 
 
 logger = logging.getLogger(__name__)
@@ -28,6 +29,7 @@ class TaskOrchestrator:
         self._threads: list[threading.Thread] = []
         self._running = False
         self._lock = threading.Lock()
+        self._manifest_service = TaskManifestService()
 
     def start(self) -> None:
         with self._lock:
@@ -69,7 +71,7 @@ class TaskOrchestrator:
             now = datetime.now(timezone.utc)
             stale_before = now - timedelta(minutes=settings.task_stale_after_minutes)
 
-            recovering = (
+            stale_running = (
                 db.execute(
                     select(Task)
                     .where(
@@ -81,17 +83,28 @@ class TaskOrchestrator:
                 .scalars()
                 .all()
             )
-            for task in recovering:
-                task.status = TaskStatus.QUEUED.value
-                task.progress = min(95, max(0, int(task.progress)))
-                task.error_message = None
-                task.started_at = None
-                task.finished_at = None
-                task.queued_at = now
+            for task in stale_running:
+                task.status = TaskStatus.FAILED.value
+                task.progress = min(99, max(0, int(task.progress)))
+                task.error_message = "task_timeout_exceeded"
+                task.finished_at = now
                 db.add(task)
 
-            if recovering:
+                project = db.get(Project, task.project_id)
+                if project is not None:
+                    project.status = ProjectStatus.FAILED.value
+                    project.progress = min(99, max(0, int(project.progress)))
+                    db.add(project)
+
+            if stale_running:
                 db.commit()
+                for task in stale_running:
+                    cleanup = self._manifest_service.cleanup_runtime(
+                        project_id=str(task.project_id),
+                        task_id=str(task.id),
+                        reason="task_timeout_exceeded",
+                    )
+                    self._manifest_service.write_manifest(task=task, cleanup=cleanup)
 
             pending_ids = db.execute(
                 select(Task.id).where(Task.status.in_([TaskStatus.QUEUED.value, TaskStatus.RETRYING.value]))
@@ -131,6 +144,15 @@ class TaskOrchestrator:
                 task = db.get(Task, task_uuid)
                 if task is None:
                     return
+                if task.status == TaskStatus.CANCELLED.value:
+                    cleanup = self._manifest_service.cleanup_runtime(
+                        project_id=str(task.project_id),
+                        task_id=str(task.id),
+                        reason="cancelled",
+                    )
+                    self._manifest_service.write_manifest(task=task, cleanup=cleanup)
+                    db.commit()
+                    return
                 task.status = TaskStatus.FAILED.value
                 task.progress = min(99, max(0, int(task.progress)))
                 task.error_message = str(exc)[:1000]
@@ -144,11 +166,26 @@ class TaskOrchestrator:
                     db.add(project)
 
                 db.commit()
+                cleanup = self._manifest_service.cleanup_runtime(
+                    project_id=str(task.project_id),
+                    task_id=str(task.id),
+                    reason="failed",
+                )
+                self._manifest_service.write_manifest(task=task, cleanup=cleanup)
             return
 
         with SessionLocal() as db:
             task = db.get(Task, task_uuid)
             if task is None:
+                return
+            if task.status == TaskStatus.CANCELLED.value:
+                cleanup = self._manifest_service.cleanup_runtime(
+                    project_id=str(task.project_id),
+                    task_id=str(task.id),
+                    reason="cancelled",
+                )
+                self._manifest_service.write_manifest(task=task, outputs=result_payload, cleanup=cleanup)
+                db.commit()
                 return
             task.status = TaskStatus.SUCCEEDED.value
             task.progress = 100
@@ -164,6 +201,12 @@ class TaskOrchestrator:
                 db.add(project)
 
             db.commit()
+            cleanup = self._manifest_service.cleanup_runtime(
+                project_id=str(task.project_id),
+                task_id=str(task.id),
+                reason="succeeded",
+            )
+            self._manifest_service.write_manifest(task=task, outputs=result_payload, cleanup=cleanup)
 
     def _execute_task(self, task_uuid: uuid.UUID) -> dict[str, Any]:
         with SessionLocal() as db:
@@ -171,7 +214,10 @@ class TaskOrchestrator:
             if task is None:
                 raise RuntimeError("task not found")
 
-            if task.task_type != TaskType.SCORE_GENERATION.value:
+            if task.status == TaskStatus.CANCELLED.value:
+                raise RuntimeError("task cancelled before execution")
+
+            if task.task_type not in {TaskType.TRANSCRIPTION.value, TaskType.SCORE_GENERATION.value}:
                 raise RuntimeError(f"unsupported task_type: {task.task_type}")
 
             project = db.get(Project, task.project_id)
@@ -182,8 +228,11 @@ class TaskOrchestrator:
                 raise RuntimeError("user not found")
 
             payload = task.input_payload if isinstance(task.input_payload, dict) else {}
+            transcription_target = str(payload.get("transcription_target") or "lead_vocal")
             raw_score_type = str(payload.get("score_type") or ScoreType.JIANPU.value)
             raw_key = str(payload.get("key") or "C Major")
+            if transcription_target != "lead_vocal":
+                raise RuntimeError(f"unsupported transcription_target: {transcription_target}")
 
             try:
                 score_type = ScoreType(raw_score_type)
@@ -200,6 +249,7 @@ class TaskOrchestrator:
                 project_id=str(project.id),
                 score_type=score_type,
                 key=raw_key,
+                task_id=str(task.id),
             )
 
             task.progress = 90
@@ -207,10 +257,14 @@ class TaskOrchestrator:
             db.commit()
 
             return {
+                "task_id": str(task.id),
                 "score_id": str(score.id),
                 "project_id": str(project.id),
+                "transcription_target": transcription_target,
                 "score_type": score.score_type,
                 "key": score.key,
+                "status": TaskStatus.SUCCEEDED.value,
+                "revision_id": str(score.current_revision_id) if score.current_revision_id else None,
                 "current_revision_id": str(score.current_revision_id) if score.current_revision_id else None,
             }
 
@@ -245,6 +299,7 @@ class TaskOrchestrator:
 
             db.add(task)
             db.commit()
+            self._manifest_service.write_manifest(task=task)
             return True
 
     @staticmethod

@@ -19,6 +19,7 @@ class ProjectStatus(str, Enum):
 
 
 class TaskType(str, Enum):
+    TRANSCRIPTION = "transcription"
     SCORE_GENERATION = "score_generation"
 
 
@@ -27,6 +28,7 @@ class TaskStatus(str, Enum):
     RUNNING = "running"
     SUCCEEDED = "succeeded"
     FAILED = "failed"
+    CANCELLED = "cancelled"
     RETRYING = "retrying"
 
 

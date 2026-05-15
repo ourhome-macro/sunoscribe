@@ -75,6 +75,22 @@ class ProjectWorkspace:
         return self.project_dir / "logs"
 
     @property
+    def jobs_dir(self) -> Path:
+        return self.project_dir / "jobs"
+
+    def job_dir(self, task_id: str) -> Path:
+        normalized_task_id = str(task_id).strip()
+        if not normalized_task_id:
+            raise ValueError("task_id cannot be empty")
+        return self.jobs_dir / normalized_task_id
+
+    def job_manifest_path(self, task_id: str) -> Path:
+        return self.job_dir(task_id) / "manifest.json"
+
+    def job_runtime_dir(self, task_id: str) -> Path:
+        return self.job_dir(task_id) / "runtime"
+
+    @property
     def canonical_audio_path(self) -> Path:
         return self.preprocess_dir / "source.wav"
 
@@ -216,6 +232,7 @@ class ProjectWorkspace:
             self.alignment_dir,
             self.exports_dir,
             self.logs_dir,
+            self.jobs_dir,
         ):
             folder.mkdir(parents=True, exist_ok=True)
 
