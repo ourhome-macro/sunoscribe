@@ -87,6 +87,8 @@ class RuleBasedMelodySelector:
         candidates, input_source = self._candidate_items(note_candidates, pitch_contours)
         if not candidates:
             return None
+        if _is_note_candidate_set_v2(note_candidates):
+            self._validate_v2_candidate_input(candidates, input_source=input_source)
 
         selected: list[dict[str, Any]] = []
         rejected: list[dict[str, Any]] = []
@@ -197,14 +199,34 @@ class RuleBasedMelodySelector:
         )
         if raw_notes:
             return [self._normalize_candidate(note, index) for index, note in enumerate(raw_notes, start=1)], input_source
+        if _is_note_candidate_set_v2(note_candidates):
+            return [], "note_candidate_set_v2.notes_empty"
         contours = pitch_contours.get("contours") if isinstance(pitch_contours, dict) else None
         if isinstance(contours, list):
-            return [self._candidate_from_contour(contour, index) for index, contour in enumerate(contours, start=1) if isinstance(contour, dict)], "pitch_contours.contours"
+            return [self._candidate_from_contour(contour, index) for index, contour in enumerate(contours, start=1) if isinstance(contour, dict)], "pitch_contours.contours_legacy"
         return [], "none"
 
     def _raw_candidate_items(self, note_candidates: dict[str, Any] | None) -> list[dict[str, Any]]:
         raw_notes = _extract_raw_candidate_notes(note_candidates)
         return [self._normalize_candidate(note, index) for index, note in enumerate(raw_notes, start=1)]
+
+    @staticmethod
+    def _validate_v2_candidate_input(candidates: list[dict[str, Any]], *, input_source: str) -> None:
+        if input_source != "melody_candidates.notes":
+            raise RuntimeError(f"melody_selection_requires_note_candidate_set_v2_notes:input_source={input_source}")
+        violations: list[str] = []
+        for index, candidate in enumerate(candidates, start=1):
+            candidate_id = str(candidate.get("candidate_id") or f"#{index}")
+            if not candidate.get("source_candidate_id") and not candidate.get("candidate_id"):
+                violations.append(f"missing_source_candidate_id:{candidate_id}")
+            if not candidate.get("source_candidate_ids"):
+                violations.append(f"missing_source_candidate_ids:{candidate_id}")
+            if not candidate.get("source_contour_ids"):
+                violations.append(f"missing_source_contour_ids:{candidate_id}")
+            if not candidate.get("source_f0_frame_range"):
+                violations.append(f"missing_source_f0_frame_range:{candidate_id}")
+        if violations:
+            raise RuntimeError("melody_selection_lineage_contract_failed:" + ";".join(violations))
 
     def _normalize_candidate(self, note: dict[str, Any], index: int) -> dict[str, Any]:
         start = _safe_float(_first(note, "start_time_sec", "start_time", "onset_sec")) or 0.0
@@ -704,6 +726,12 @@ def _extract_candidate_notes(
         return [], "none"
     melody = note_candidates.get("melody_candidates")
     containers = [("melody_candidates", melody), ("note_candidates", note_candidates)]
+    if _is_note_candidate_set_v2(note_candidates):
+        if isinstance(melody, dict):
+            notes = melody.get("notes") if isinstance(melody.get("notes"), list) else None
+            if notes:
+                return [note for note in notes if isinstance(note, dict)], "melody_candidates.notes"
+        return [], "melody_candidates.notes_empty"
     if prefer_preselected_notes:
         bridge_notes = _bridge_raw_candidate_notes(containers)
         for source, container in containers:
@@ -779,6 +807,15 @@ def _extract_raw_candidate_notes(note_candidates: dict[str, Any] | None) -> list
         if notes:
             return [note for note in notes if isinstance(note, dict)]
     return []
+
+
+def _is_note_candidate_set_v2(note_candidates: dict[str, Any] | None) -> bool:
+    if not isinstance(note_candidates, dict):
+        return False
+    if str(note_candidates.get("schema_version") or "") == "note_candidate_set_v2":
+        return True
+    melody = note_candidates.get("melody_candidates")
+    return isinstance(melody, dict) and str(melody.get("schema_version") or "") == "note_candidate_set_v2"
 
 
 def _pitch_center(note: dict[str, Any]) -> float | None:

@@ -37,10 +37,8 @@ class TestScoreIRBuilder(unittest.TestCase):
             ],
         )
 
-        score_ir = builder.build(pitch_result)
-
-        self.assertEqual(score_ir.notes, [])
-        self.assertEqual(score_ir.measures[0].note_ids, [])
+        with self.assertRaisesRegex(RuntimeError, "score_ir_lineage_contract_failed:authoritative_selection_empty"):
+            builder.build(pitch_result)
 
     def test_build_uses_analysis_ir_for_lead_chords_bass_and_sections(self):
         builder = ScoreIRBuilder()
@@ -207,7 +205,82 @@ class TestScoreIRBuilder(unittest.TestCase):
         self.assertEqual(score_data["instrumental_melody_notes"][0]["measure_num"], 2)
         self.assertEqual(score_data["instrumental_melody_notes"][0]["source"], "instrumental_hook")
 
-    def test_production_lineage_warning_for_missing_source_candidate_id(self):
+
+    def test_build_uses_quantized_note_set_as_authoritative_lead_source(self):
+        builder = ScoreIRBuilder()
+        pitch_result = PitchAnalysisResult(
+            version="1.4",
+            meta=MetaInfo(
+                bpm=120.0,
+                bpm_confidence=0.9,
+                key="C Major",
+                key_confidence=0.8,
+                duration_sec=1.0,
+                time_signature="4/4",
+            ),
+            measures=[
+                {
+                    "measure_num": 1,
+                    "start_time": 0.0,
+                    "end_time": 1.0,
+                    "is_anacrusis": False,
+                    "notes": [
+                        {
+                            "pitch": "G5",
+                            "start_time": 0.0,
+                            "end_time": 0.5,
+                            "duration_beats": 1.0,
+                            "note_type": "quarter",
+                            "beat_position": 1.0,
+                            "confidence": 0.9,
+                        }
+                    ],
+                }
+            ],
+            analysis_info={"lead_note_source": "quantized_notes"},
+        )
+        quantized_note_set = {
+            "schema_version": "quantized_note_set_v2",
+            "quantizer_backend": "dp_v1",
+            "notes": [
+                {
+                    "id": "qn_00001",
+                    "source_candidate_id": "cand_00001",
+                    "source_candidate_ids": ["cand_00001"],
+                    "source_contour_ids": ["pc_00001"],
+                    "source_f0_frame_range": {"start_frame_index": 0, "end_frame_index": 3},
+                    "pitch": "C4",
+                    "pitch_midi": 60,
+                    "start_time_sec": 0.30,
+                    "end_time_sec": 0.60,
+                    "quantized_start_time_sec": 0.25,
+                    "quantized_end_time_sec": 0.50,
+                    "quantized_duration_sec": 0.25,
+                    "measure_index": 0,
+                    "beat_in_measure": 1.5,
+                    "duration_beats": 0.5,
+                    "confidence": 0.91,
+                }
+            ],
+        }
+
+        score_ir = builder.build(pitch_result, quantized_notes_artifact=quantized_note_set)
+        score_data = ScoreIRSerializer.to_score_data(score_ir)
+
+        self.assertEqual(len(score_ir.notes), 1)
+        note = score_ir.notes[0]
+        self.assertEqual(note.source, "quantized_notes")
+        self.assertEqual(note.pitch, "C4")
+        self.assertEqual(note.quantized_note_id, "qn_00001")
+        self.assertEqual(note.source_candidate_id, "cand_00001")
+        self.assertEqual(note.source_candidate_ids, ["cand_00001"])
+        self.assertEqual(note.source_contour_ids, ["pc_00001"])
+        self.assertEqual(note.source_f0_frame_range["start_frame_index"], 0)
+        self.assertEqual(score_ir.measures[0].note_ids, ["n000001"])
+        self.assertEqual(score_data["measures"][0]["notes"][0]["source_contour_ids"], ["pc_00001"])
+        self.assertEqual(score_ir.warnings, [])
+
+    def test_production_lineage_hard_fails_for_missing_source_candidate_id(self):
         builder = ScoreIRBuilder()
         pitch_result = PitchAnalysisResult(
             version="1.4",
@@ -241,14 +314,8 @@ class TestScoreIRBuilder(unittest.TestCase):
             analysis_info={"lead_note_source": "quantized_notes"},
         )
 
-        score_ir = builder.build(pitch_result)
-
-        self.assertTrue(
-            any(
-                warning.startswith("score_ir_lineage_warning:missing_source_candidate_id")
-                for warning in score_ir.warnings
-            )
-        )
+        with self.assertRaisesRegex(RuntimeError, "score_ir_lineage_contract_failed:missing_source_candidate_id"):
+            builder.build(pitch_result)
 
 
 if __name__ == "__main__":

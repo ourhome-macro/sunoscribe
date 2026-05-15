@@ -123,10 +123,29 @@ class MelodyTranscriptionService:
             except Exception as exc:
                 result.warnings.append(f"raw_midi_export_failed:{self.short_exception(exc)}")
 
-        if not self._has_lead_notes(result.pitch_result_obj):
+        if not self._has_authoritative_selected_melody(result.selected_melody_dict):
             raise RuntimeError(self._build_no_lead_notes_message(result.pitch_result_obj))
 
         return result
+
+    @staticmethod
+    def _has_authoritative_selected_melody(selected_melody_dict: dict | None) -> bool:
+        if not isinstance(selected_melody_dict, dict):
+            return False
+        selected_notes = selected_melody_dict.get("selected_notes")
+        if not isinstance(selected_notes, list) or not selected_notes:
+            return False
+        for note in selected_notes:
+            if not isinstance(note, dict):
+                continue
+            if (
+                note.get("source_candidate_id")
+                and note.get("source_candidate_ids")
+                and note.get("source_contour_ids")
+                and note.get("source_f0_frame_range")
+            ):
+                return True
+        return False
 
     @staticmethod
     def _has_lead_notes(pitch_result_obj: Any | None) -> bool:

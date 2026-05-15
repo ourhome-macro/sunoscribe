@@ -30,6 +30,86 @@ from app.modules.pitch.reason_codes import (
 
 
 class TestRuleBasedMelodySelector(unittest.TestCase):
+    def test_note_candidate_set_v2_ignores_preselected_notes_and_contour_fallback(self) -> None:
+        selector = RuleBasedMelodySelector(MelodySelectionConfig(phrase_postprocess_enabled=False))
+        result = selector.select(
+            note_candidates={
+                "schema_version": "note_candidate_set_v2",
+                "melody_candidates": {
+                    "schema_version": "note_candidate_set_v2",
+                    "notes": [
+                        {
+                            "candidate_id": "auth",
+                            "source_candidate_id": "auth",
+                            "source_candidate_ids": ["auth"],
+                            "source_contour_ids": ["pc_auth"],
+                            "source_f0_frame_range": {"start_frame_index": 1, "end_frame_index": 3},
+                            "start_time_sec": 0.0,
+                            "end_time_sec": 0.4,
+                            "pitch_center_midi": 60.0,
+                            "confidence": 0.91,
+                            "voiced_ratio": 1.0,
+                            "stability": 0.98,
+                        }
+                    ],
+                    "selected_notes": [
+                        {
+                            "candidate_id": "legacy_selected_should_not_win",
+                            "start_time_sec": 1.0,
+                            "end_time_sec": 1.4,
+                            "pitch_center_midi": 62.0,
+                            "confidence": 0.99,
+                            "source_candidate_ids": ["legacy_selected_should_not_win"],
+                            "source_contour_ids": ["pc_legacy"],
+                            "source_f0_frame_range": {"start_frame_index": 10, "end_frame_index": 14},
+                        }
+                    ],
+                },
+            },
+            pitch_contours={
+                "contours": [
+                    {
+                        "id": "pc_fallback_should_not_win",
+                        "start_time_sec": 2.0,
+                        "end_time_sec": 2.4,
+                        "pitch_center_midi": 64.0,
+                        "mean_confidence": 0.99,
+                        "voiced_ratio": 1.0,
+                        "stability": 1.0,
+                        "source_f0_frame_range": {"start_frame_index": 20, "end_frame_index": 24},
+                    }
+                ]
+            },
+        )
+
+        self.assertEqual([note["candidate_id"] for note in result["selected_notes"]], ["auth"])
+        self.assertEqual(result["summary"]["input_source"], "melody_candidates.notes")
+        self.assertEqual(result["selected_notes"][0]["source_candidate_ids"], ["auth"])
+        self.assertEqual(result["selected_notes"][0]["source_contour_ids"], ["pc_auth"])
+
+    def test_note_candidate_set_v2_hard_fails_missing_lineage(self) -> None:
+        with self.assertRaisesRegex(RuntimeError, "melody_selection_lineage_contract_failed:.*missing_source_contour_ids"):
+            RuleBasedMelodySelector(MelodySelectionConfig(phrase_postprocess_enabled=False)).select(
+                note_candidates={
+                    "schema_version": "note_candidate_set_v2",
+                    "melody_candidates": {
+                        "schema_version": "note_candidate_set_v2",
+                        "notes": [
+                            {
+                                "candidate_id": "broken",
+                                "source_candidate_id": "broken",
+                                "source_candidate_ids": ["broken"],
+                                "source_f0_frame_range": {"start_frame_index": 1, "end_frame_index": 2},
+                                "start_time_sec": 0.0,
+                                "end_time_sec": 0.4,
+                                "pitch_center_midi": 60.0,
+                                "confidence": 0.91,
+                            }
+                        ],
+                    },
+                }
+            )
+
     def test_preselected_notes_are_preferred_by_default_and_marked(self) -> None:
         result = RuleBasedMelodySelector(MelodySelectionConfig(phrase_postprocess_enabled=False)).select(
             note_candidates={

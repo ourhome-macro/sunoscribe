@@ -6,7 +6,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 from app.modules.pitch.types import F0Frame, F0Track, MetaInfo, Note, NoteCandidateSet, PitchAnalysisResult, PitchPipelineRequest, RhythmGrid, SemanticAudioResult, VocalActivitySegment
-from app.modules.score_ir import ScoreIR, ScoreIRSerializer, ScoreMeasure, ScoreMeta, ScoreNote
+from app.modules.score_ir import ScoreIR, ScoreIRBuilder, ScoreIRSerializer, ScoreMeasure, ScoreMeta, ScoreNote
 from app.modules.pitch import MidiExporter
 from app.services.audio_analysis_service import AudioAnalysisOptions, AudioAnalysisService
 from app.services.melody_transcription_service import MelodyTranscriptionService
@@ -239,12 +239,14 @@ class _CaptureMelodySelector:
             "selected_notes": [
                 {
                     "candidate_id": "sel_1",
+                    "source_candidate_id": "sel_1",
                     "start_time_sec": 0.1,
                     "end_time_sec": 0.3,
                     "pitch_center_midi": 57,
                     "confidence": 0.9,
                     "source_contour_ids": ["pc_00001"],
-                    "source_candidate_ids": [],
+                    "source_candidate_ids": ["sel_1"],
+                    "source_f0_frame_range": {"start_frame_index": 0, "end_frame_index": 2},
                     "reason_codes": [],
                 }
             ],
@@ -255,10 +257,13 @@ class _FakeScoreIRBuilder:
     def __init__(self) -> None:
         self.last_args = None
         self.last_kwargs = None
+        self._delegate = ScoreIRBuilder()
 
-    def build(self, *_args, **_kwargs):
-        self.last_args = _args
-        self.last_kwargs = _kwargs
+    def build(self, *args, **kwargs):
+        self.last_args = args
+        self.last_kwargs = kwargs
+        if args:
+            return self._delegate.build(*args, **kwargs)
         return ScoreIR(
             meta=ScoreMeta(
                 source_version="test",
@@ -421,6 +426,9 @@ class TestAudioAnalysisService(unittest.TestCase):
             self.assertEqual(built_note["source_contour_ids"], ["pc_00001"])
             self.assertIsNotNone(selector.last_kwargs)
             self.assertEqual(selector.last_kwargs["note_candidates"]["melody_candidates"]["selected_notes"], [])
+            self.assertEqual(result.selected_melody_dict["selected_notes"][0]["source_candidate_id"], "sel_1")
+            self.assertIsNotNone(result.quantized_notes_dict)
+            self.assertEqual(result.quantized_notes_dict["notes"][0]["source_candidate_id"], "sel_1")
 
     def test_process_audio_canonicalizes_mp4_before_separation(self) -> None:
         with TemporaryDirectory() as temp_dir:
@@ -514,6 +522,7 @@ class TestAudioAnalysisService(unittest.TestCase):
             self.assertIsNotNone(score_ir_builder.last_args)
             self.assertEqual(len(score_ir_builder.last_args), 2)
             self.assertNotIn("analysis_ir", score_ir_builder.last_kwargs)
+            self.assertIn("quantized_notes_artifact", score_ir_builder.last_kwargs)
             self.assertEqual(perception.semantic_audio_dict["source_stems"]["bass"], str(workspace.stem_path("bass")))
             self.assertIsNotNone(perception.f0_track_dict)
             self.assertEqual(perception.f0_track_dict["backend"], "rmvpe")
@@ -659,7 +668,7 @@ class TestAudioAnalysisService(unittest.TestCase):
             self.assertEqual(warnings, [])
             self.assertNotEqual(workspace.final_midi_path.read_bytes(), b"raw-midi-bypass")
 
-    def test_score_ir_from_quantized_notes_preserves_performance_time_for_midi(self) -> None:
+    def test_score_ir_build_service_uses_quantized_notes_as_primary_input(self) -> None:
         service = AudioAnalysisService(
             audio_processor=_PassthroughAudioProcessor(),
             vocal_separator=None,
@@ -668,45 +677,58 @@ class TestAudioAnalysisService(unittest.TestCase):
             analysis_inferencer=None,
             midi_exporter=None,
         )
-        score_ir = _FakeScoreIRBuilder().build()
-        warnings: list[str] = []
-
-        updated = service._replace_lead_notes_from_quantized_artifact(
-            score_ir,
-            quantized_notes_dict={
-                "quantizer_backend": "dp_v1",
-                "notes": [
-                    {
-                        "id": "qn_00001",
-                        "source_candidate_id": "cand_00001",
-                        "pitch": "C4",
-                        "pitch_midi": 60,
-                        "start_time_sec": 0.30,
-                        "end_time_sec": 0.60,
-                        "quantized_start_time_sec": 0.25,
-                        "quantized_end_time_sec": 0.50,
-                        "quantized_duration_sec": 0.25,
-                        "measure_index": 0,
-                        "beat_in_measure": 1.5,
-                        "duration_beats": 0.5,
-                        "confidence": 0.91,
-                    }
-                ],
-            },
-            warnings=warnings,
+        pitch_result = PitchAnalysisResult(
+            version="test",
+            meta=MetaInfo(
+                bpm=120.0,
+                bpm_confidence=0.9,
+                key="C Major",
+                key_confidence=0.8,
+                rhythm_type="stable",
+                duration_sec=1.0,
+                time_signature="4/4",
+            ),
+            analysis_info={"lead_note_source": "quantized_notes"},
         )
+        quantized_notes = {
+            "quantizer_backend": "dp_v1",
+            "notes": [
+                {
+                    "id": "qn_00001",
+                    "source_candidate_id": "cand_00001",
+                    "source_candidate_ids": ["cand_00001"],
+                    "source_contour_ids": ["pc_00001"],
+                    "source_f0_frame_range": {"start_frame_index": 0, "end_frame_index": 2},
+                    "pitch": "C4",
+                    "pitch_midi": 60,
+                    "start_time_sec": 0.30,
+                    "end_time_sec": 0.60,
+                    "quantized_start_time_sec": 0.25,
+                    "quantized_end_time_sec": 0.50,
+                    "quantized_duration_sec": 0.25,
+                    "measure_index": 0,
+                    "beat_in_measure": 1.5,
+                    "duration_beats": 0.5,
+                    "confidence": 0.91,
+                }
+            ],
+        }
 
-        note = updated.notes[0]
+        score_ir, score_data = service.score_build_service.build(
+            pitch_result_obj=pitch_result,
+            lyrics_segments=[],
+            quantized_notes_dict=quantized_notes,
+        )
+        service._validate_score_ir_uses_quantized_notes(score_ir, quantized_notes_dict=quantized_notes)
+
+        note = score_ir.notes[0]
         self.assertEqual(note.source, "quantized_notes")
         self.assertEqual(note.timing_origin, "performance_time_from_quantized_notes")
         self.assertAlmostEqual(note.start_time, 0.30)
-        self.assertAlmostEqual(note.end_time, 0.60)
         self.assertAlmostEqual(note.performance_start_time_sec, 0.30)
-        self.assertAlmostEqual(note.performance_end_time_sec, 0.60)
-        self.assertAlmostEqual(note.quantized_start_time_sec, 0.25)
-        self.assertAlmostEqual(note.quantized_end_time_sec, 0.50)
-        self.assertEqual(updated.meta.analysis_info["lead_note_source"], "quantized_notes")
-        self.assertEqual(updated.meta.analysis_info["timing_origin"], "performance_time_from_quantized_notes")
+        self.assertEqual(note.source_contour_ids, ["pc_00001"])
+        self.assertEqual(note.source_f0_frame_range["end_frame_index"], 2)
+        self.assertEqual(score_data["measures"][0]["notes"][0]["quantized_note_id"], "qn_00001")
 
 
 if __name__ == "__main__":

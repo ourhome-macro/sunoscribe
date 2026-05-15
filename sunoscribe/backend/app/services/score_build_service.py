@@ -12,7 +12,7 @@ class ScoreBuildService:
         self,
         *,
         score_ir_builder: ScoreIRBuilder | None,
-        invoke_builder: Callable[[Any, list[dict], Any | None], ScoreIR],
+        invoke_builder: Callable[..., ScoreIR],
     ) -> None:
         self.score_ir_builder = score_ir_builder
         self.invoke_builder = invoke_builder
@@ -23,8 +23,14 @@ class ScoreBuildService:
         pitch_result_obj: Any,
         lyrics_segments: list[dict],
         analysis_ir_obj: Any | None = None,
+        quantized_notes_dict: dict | None = None,
     ) -> tuple[ScoreIR, dict | None]:
         if self.score_ir_builder is None:
             raise RuntimeError("score_ir_builder is not configured")
-        score_ir_obj = self.invoke_builder(pitch_result_obj, lyrics_segments, analysis_ir_obj)
+        score_ir_obj = self.invoke_builder(
+            pitch_result_obj,
+            lyrics_segments,
+            analysis_ir_obj,
+            quantized_notes_dict=quantized_notes_dict,
+        )
         return score_ir_obj, ScoreIRSerializer.to_score_data(score_ir_obj)

@@ -15,8 +15,10 @@ from .downbeat_tracker import DownbeatTracker
 from .exceptions import DownbeatTrackingError
 from .f0_extractor import RMVPEF0Extractor
 from .key_analyzer import KeyAnalysisResult, KeyAnalyzer
-from .melody_selector import MelodySelector
+from .melody_selection_artifact import RuleBasedMelodySelector
+from .melody_selector import MelodySelectionResult, MelodySelector
 from .melody_source_arbitrator import MelodySourceArbitrator
+from .note_candidate_builder import NoteCandidateBuilder
 from .pitch_contours import PitchContourBuilder
 from .midi_exporter import MidiExporter
 from .quantizer import NoteQuantizer
@@ -60,8 +62,10 @@ class PitchPipeline:
         self.downbeat_tracker = DownbeatTracker(self.config)
         self.key_analyzer = KeyAnalyzer(self.config)
         self.melody_selector = MelodySelector(self.config)
+        self.typed_melody_selector = RuleBasedMelodySelector()
         self.melody_arbitrator = MelodySourceArbitrator(self.config)
         self.pitch_contour_builder = PitchContourBuilder()
+        self.note_candidate_builder = NoteCandidateBuilder()
         self.contour_candidate_bridge = ContourToCandidateBridge(self._contour_bridge_config())
         self.quantizer = NoteQuantizer(self.config)
         self.rhythm_analyzer = RhythmAnalyzer()
@@ -166,6 +170,12 @@ class PitchPipeline:
                         "beat_position": round(float(beat_position), 3),
                         "lyric": note.lyric,
                         "confidence": note.confidence,
+                        "candidate_id": getattr(note, "candidate_id", None),
+                        "source_candidate_id": getattr(note, "source_candidate_id", None)
+                        or getattr(note, "candidate_id", None),
+                        "source_candidate_ids": list(getattr(note, "source_candidate_ids", []) or []),
+                        "source_contour_ids": list(getattr(note, "source_contour_ids", []) or []),
+                        "source_f0_frame_range": dict(getattr(note, "source_f0_frame_range", {}) or {}),
                         "reason_codes": list(getattr(note, "reason_codes", []) or []),
                     }
                 )
@@ -403,6 +413,181 @@ class PitchPipeline:
                 for note in notes or []
                 if getattr(note, "candidate_origin", None) == CONTOUR_TO_CANDIDATE_BRIDGE
             ),
+        }
+
+    def _build_note_candidate_payload(
+        self,
+        *,
+        f0_track: F0Track,
+        pitch_contours_payload: dict[str, object] | None,
+        raw_notes: list[Note],
+    ) -> dict[str, object]:
+        payload = self.note_candidate_builder.build(
+            f0_track=self._f0_track_payload(f0_track),
+            pitch_contours=pitch_contours_payload,
+            raw_candidates={
+                "melody_candidates": {
+                    "role": "melody_candidates",
+                    "notes": [self._note_payload(note) for note in raw_notes],
+                    "selected_notes": [],
+                }
+            },
+        )
+        if not isinstance(payload, dict):
+            raise RuntimeError("note_candidate_builder returned non-dict payload")
+        if payload.get("schema_version") != "note_candidate_set_v2":
+            raise RuntimeError("note_candidate_builder returned non-v2 payload")
+        return payload
+
+    def _select_authoritative_melody(
+        self,
+        *,
+        note_candidate_payload: dict[str, object],
+        pitch_contours_payload: dict[str, object] | None,
+        lead_f0_track: F0Track,
+    ) -> tuple[MelodySelectionResult, dict[str, object]]:
+        selected_melody = self.typed_melody_selector.select(
+            note_candidates=note_candidate_payload,
+            pitch_contours=pitch_contours_payload,
+            vocal_activity={"segments": [self._vocal_activity_payload(segment) for segment in lead_f0_track.vocal_activity]},
+        )
+        if not isinstance(selected_melody, dict):
+            return MelodySelectionResult(
+                notes=[],
+                detected_count=self._candidate_payload_note_count(note_candidate_payload),
+                kept_count=0,
+            ), {}
+
+        lead_notes = [
+            self._note_from_selected_melody_item(item)
+            for item in selected_melody.get("selected_notes") or []
+            if isinstance(item, dict)
+        ]
+        summary = selected_melody.get("summary") if isinstance(selected_melody.get("summary"), dict) else {}
+        rejection_counts = summary.get("rejection_reason_counts") if isinstance(summary.get("rejection_reason_counts"), dict) else {}
+        postprocess = selected_melody.get("postprocess") if isinstance(selected_melody.get("postprocess"), dict) else {}
+        return (
+            MelodySelectionResult(
+                notes=lead_notes,
+                detected_count=int(summary.get("input_candidate_count") or self._candidate_payload_note_count(note_candidate_payload)),
+                kept_count=len(lead_notes),
+                removed_pitch_range=int(rejection_counts.get("outside_vocal_range") or 0),
+                removed_low_confidence=int(rejection_counts.get("low_confidence") or 0),
+                removed_short=int(rejection_counts.get("too_short") or 0),
+                removed_conflict=int(rejection_counts.get("overlaps_stronger_candidate") or 0),
+                merged_count=0,
+                postprocess_action_counts=dict(postprocess.get("action_counts") or {}),
+                postprocess_reason_code_counts=dict(postprocess.get("reason_code_counts") or {}),
+                postprocess_actions=list(postprocess.get("actions") or []),
+            ),
+            selected_melody,
+        )
+
+    @staticmethod
+    def _candidate_payload_note_count(note_candidate_payload: dict[str, object]) -> int:
+        melody = note_candidate_payload.get("melody_candidates")
+        notes = melody.get("notes") if isinstance(melody, dict) else None
+        return len(notes) if isinstance(notes, list) else 0
+
+    def _note_candidate_set_from_payload(
+        self,
+        payload: dict[str, object],
+        *,
+        selected_notes: list[Note],
+        fallback_audio_path: str | None,
+        fallback_source_stem: str | None,
+    ) -> NoteCandidateSet:
+        melody = payload.get("melody_candidates") if isinstance(payload, dict) else None
+        notes = [
+            self._note_from_candidate_payload(item)
+            for item in (melody.get("notes") if isinstance(melody, dict) else [])
+            if isinstance(item, dict)
+        ]
+        analysis_info = dict(payload.get("analysis_info") if isinstance(payload.get("analysis_info"), dict) else {})
+        if isinstance(melody, dict) and isinstance(melody.get("analysis_info"), dict):
+            analysis_info.update(dict(melody.get("analysis_info") or {}))
+        analysis_info["candidate_count"] = len(notes)
+        analysis_info["selected_count"] = len(selected_notes or [])
+        analysis_info["contour_bridge_candidate_count"] = sum(
+            1
+            for note in notes
+            if getattr(note, "candidate_origin", None) == CONTOUR_TO_CANDIDATE_BRIDGE
+            or CONTOUR_TO_CANDIDATE_BRIDGE in list(getattr(note, "reason_codes", []) or [])
+        )
+        analysis_info["candidate_authority"] = "note_candidate_set_v2"
+        return NoteCandidateSet(
+            role="melody_candidates",
+            source_stem=str(melody.get("source_stem")) if isinstance(melody, dict) and melody.get("source_stem") is not None else fallback_source_stem,
+            input_audio_path=str(melody.get("input_audio_path")) if isinstance(melody, dict) and melody.get("input_audio_path") is not None else (str(fallback_audio_path) if fallback_audio_path else None),
+            notes=notes,
+            selected_notes=list(selected_notes or []),
+            analysis_info=analysis_info,
+        )
+
+    @staticmethod
+    def _note_from_candidate_payload(item: dict[str, object]) -> Note:
+        return PitchPipeline._note_from_selected_melody_item(item)
+
+    @staticmethod
+    def _note_payload(note: Note) -> dict[str, object]:
+        payload: dict[str, object] = {
+            "candidate_id": note.candidate_id,
+            "source_candidate_id": note.source_candidate_id,
+            "source_candidate_ids": list(note.source_candidate_ids or []),
+            "source_contour_ids": list(note.source_contour_ids or []),
+            "source_f0_frame_range": dict(note.source_f0_frame_range or {}),
+            "candidate_origin": note.candidate_origin,
+            "pitch": note.pitch,
+            "start_time": float(note.start_time),
+            "end_time": float(note.end_time),
+            "confidence": float(note.confidence),
+            "reason_codes": list(note.reason_codes or []),
+            "contour_bridge_evidence": dict(note.contour_bridge_evidence or {}),
+            "contour_bridge_guard_reason_codes": list(note.contour_bridge_guard_reason_codes or []),
+            "segmentation_evidence": dict(note.segmentation_evidence or {}),
+        }
+        return {key: value for key, value in payload.items() if value is not None}
+
+    @staticmethod
+    def _note_from_selected_melody_item(item: dict[str, object]) -> Note:
+        from .note_utils import midi_to_note
+
+        pitch = item.get("pitch")
+        if not pitch:
+            pitch_midi = item.get("pitch_center_midi") or item.get("pitch_midi")
+            pitch = midi_to_note(int(round(float(pitch_midi)))) if pitch_midi is not None else "C4"
+        return Note(
+            pitch=str(pitch),
+            start_time=float(item.get("start_time_sec") or item.get("start_time") or 0.0),
+            end_time=float(item.get("end_time_sec") or item.get("end_time") or 0.0),
+            confidence=float(item.get("confidence") or 0.0),
+            reason_codes=[str(value) for value in item.get("reason_codes") or []],
+            candidate_id=str(item.get("candidate_id")) if item.get("candidate_id") is not None else None,
+            source_candidate_id=str(item.get("source_candidate_id")) if item.get("source_candidate_id") is not None else None,
+            source_candidate_ids=[str(value) for value in item.get("source_candidate_ids") or []],
+            source_contour_ids=[str(value) for value in item.get("source_contour_ids") or []],
+            source_f0_frame_range=dict(item.get("source_f0_frame_range") or {}),
+            candidate_origin=str(item.get("candidate_origin")) if item.get("candidate_origin") is not None else None,
+            contour_bridge_evidence=dict(item.get("contour_bridge_evidence") or item.get("bridge_evidence") or {}),
+            contour_bridge_guard_reason_codes=[
+                str(value)
+                for value in item.get("contour_bridge_guard_reason_codes")
+                or item.get("bridge_guard_reason_codes")
+                or []
+            ],
+            segmentation_evidence=dict(item.get("segmentation_evidence") or {}),
+        )
+
+    @staticmethod
+    def _vocal_activity_payload(segment: VocalActivitySegment) -> dict[str, object]:
+        return {
+            "start_time": float(segment.start_time),
+            "end_time": float(segment.end_time),
+            "state": str(segment.state),
+            "voiced_ratio": float(segment.voiced_ratio),
+            "mean_confidence": float(segment.mean_confidence),
+            "source_stem": segment.source_stem,
+            "analysis_info": dict(segment.analysis_info or {}),
         }
 
     def _build_pitch_contours_payload(self, f0_track: F0Track | None) -> dict[str, object] | None:
@@ -812,14 +997,23 @@ class PitchPipeline:
             if warning not in warnings:
                 warnings.append(warning)
 
-        melody_selection = self.melody_selector.select(arrangement_decision.selected_lead_notes)
+        note_candidate_payload = self._build_note_candidate_payload(
+            f0_track=lead_f0_track,
+            pitch_contours_payload=pitch_contours_payload,
+            raw_notes=arrangement_decision.selected_lead_notes,
+        )
+        melody_selection, selected_melody_payload = self._select_authoritative_melody(
+            note_candidate_payload=note_candidate_payload,
+            pitch_contours_payload=pitch_contours_payload,
+            lead_f0_track=lead_f0_track,
+        )
         lead_notes = melody_selection.notes
         if melody_selection.detected_count > 0 and melody_selection.kept_count == 0:
-            warnings.append("Melody selector removed all detected notes.")
+            warnings.append("Melody selector removed all NoteCandidateSet v2 candidates.")
         elif melody_selection.detected_count > 0 and melody_selection.kept_count <= max(
             2, int(round(melody_selection.detected_count * 0.25))
         ):
-            warnings.append("Melody selector removed most detected notes; melody may be unstable.")
+            warnings.append("Melody selector removed most NoteCandidateSet v2 candidates; melody may be unstable.")
 
         quantized_notes = self.quantizer.quantize(lead_notes, beat_result.bpm, beat_result.beat_times)
         self._recompute_quantized_positions(quantized_notes, boundaries, effective_beats_per_bar)
@@ -862,12 +1056,11 @@ class PitchPipeline:
         semantic_audio = SemanticAudioResult(
             source_stems=dict(request.source_stems),
             f0_track=lead_f0_track,
-            melody_candidates=self._build_candidate_set(
-                role="melody_candidates",
-                audio_path=lead_audio_path,
-                source_stem=lead_source_stem,
-                notes=detected_notes,
+            melody_candidates=self._note_candidate_set_from_payload(
+                note_candidate_payload,
                 selected_notes=lead_notes,
+                fallback_audio_path=lead_audio_path,
+                fallback_source_stem=lead_source_stem,
             ),
             harmony_candidates=self._build_candidate_set(
                 role="harmony_candidates",
@@ -886,6 +1079,12 @@ class PitchPipeline:
         )
         semantic_audio.melody_candidates.analysis_info["arrangement_decision"] = arrangement_summary
         semantic_audio.melody_candidates.analysis_info["contour_to_candidate_bridge"] = contour_bridge_result.summary
+        semantic_audio.melody_candidates.analysis_info["selected_melody"] = selected_melody_payload
+        semantic_audio.melody_candidates.analysis_info["selection_input_source"] = (
+            selected_melody_payload.get("summary", {}).get("input_source")
+            if isinstance(selected_melody_payload, dict)
+            else None
+        )
         semantic_audio.harmony_candidates.analysis_info["arrangement_decision"] = arrangement_summary
         semantic_audio.harmony_candidates.analysis_info["selected_support_count"] = len(
             arrangement_decision.selected_support_notes

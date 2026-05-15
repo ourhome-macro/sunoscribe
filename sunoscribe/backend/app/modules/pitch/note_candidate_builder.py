@@ -337,10 +337,6 @@ class NoteCandidateBuilder:
                     if _safe_float(frame.get("confidence")) is not None
                 ]
                 confidence = (sum(confidence_values) / len(confidence_values)) if confidence_values else 0.0
-            source_candidate_ids = _unique_str_list(raw_note.get("source_candidate_ids"))
-            source_candidate_id = _as_optional_str(raw_note.get("source_candidate_id")) or _as_optional_str(raw_note.get("candidate_id"))
-            if source_candidate_id:
-                source_candidate_ids = _unique_str_list(source_candidate_ids + [source_candidate_id])
             candidate_origin = _as_optional_str(raw_note.get("candidate_origin")) or "raw_detector_candidate"
             candidate_id = self._stable_candidate_id(
                 origin="raw",
@@ -350,6 +346,15 @@ class NoteCandidateBuilder:
                 pitch_center_midi=pitch_center_midi,
                 source_f0_frame_range=source_frame_range,
             )
+            source_candidate_ids = _unique_str_list(raw_note.get("source_candidate_ids"))
+            source_candidate_id = (
+                _as_optional_str(raw_note.get("source_candidate_id"))
+                or _as_optional_str(raw_note.get("candidate_id"))
+                or candidate_id
+            )
+            source_candidate_ids = _unique_str_list(source_candidate_ids + [source_candidate_id, candidate_id])
+            if not contour_ids:
+                continue
             normalized.append(
                 {
                     "candidate_id": candidate_id,
@@ -433,8 +438,8 @@ class NoteCandidateBuilder:
         return {
             "candidate_id": candidate_id,
             "stable_id": candidate_id,
-            "source_candidate_id": None,
-            "source_candidate_ids": [],
+            "source_candidate_id": candidate_id,
+            "source_candidate_ids": [candidate_id],
             "source_contour_ids": [str(contour["id"])],
             "source_f0_frame_range": source_frame_range,
             "candidate_origin": "note_candidate_builder.contour_seed",

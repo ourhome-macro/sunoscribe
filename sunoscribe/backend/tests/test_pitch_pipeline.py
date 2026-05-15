@@ -325,7 +325,12 @@ class TestPitchPipeline(unittest.TestCase):
                     "backend": "rmvpe",
                     "frames": [
                         {"time_sec": 0.1, "frequency_hz": 261.63, "confidence": 0.9, "voiced": True, "pitch_midi": 60.0},
+                        {"time_sec": 0.3, "frequency_hz": 261.63, "confidence": 0.9, "voiced": True, "pitch_midi": 60.0},
+                        {"time_sec": 0.5, "frequency_hz": 261.63, "confidence": 0.9, "voiced": True, "pitch_midi": 60.0},
+                        {"time_sec": 0.62, "frequency_hz": 0.0, "confidence": 0.0, "voiced": False, "pitch_midi": None},
                         {"time_sec": 0.7, "frequency_hz": 329.63, "confidence": 0.88, "voiced": True, "pitch_midi": 64.0},
+                        {"time_sec": 0.9, "frequency_hz": 329.63, "confidence": 0.88, "voiced": True, "pitch_midi": 64.0},
+                        {"time_sec": 1.1, "frequency_hz": 329.63, "confidence": 0.88, "voiced": True, "pitch_midi": 64.0},
                     ],
                     "vocal_activity": [
                         {"start_time": 0.0, "end_time": 1.2, "state": "vocal", "voiced_ratio": 1.0, "mean_confidence": 0.89}
@@ -359,7 +364,9 @@ class TestPitchPipeline(unittest.TestCase):
         self.assertEqual(len(result.lead_notes), 2)
         self.assertGreaterEqual(len(result.measures), 1)
         self.assertEqual(result.raw_notes[0].pitch, "C4")
+        self.assertEqual(result.semantic_audio.melody_candidates.analysis_info["candidate_authority"], "note_candidate_set_v2")
         self.assertEqual(result.semantic_audio.melody_candidates.analysis_info["candidate_count"], 2)
+        self.assertTrue(result.lead_notes[0].source_contour_ids)
         self.assertEqual(result.analysis_info["quantize_mode"], "adaptive")
         self.assertEqual(result.analysis_info["measure_segmentation"], "enabled")
         self.assertIn("has_accompaniment", result.analysis_info)
@@ -371,8 +378,63 @@ class TestPitchPipeline(unittest.TestCase):
         self.assertEqual(result.analysis_info["key_backend"], "librosa")
         self.assertIsNotNone(result.f0_track)
         self.assertEqual(result.f0_track.backend, "rmvpe")
-        self.assertEqual(len(result.f0_track.frames), 2)
+        self.assertEqual(len(result.f0_track.frames), 7)
         self.assertEqual(len(result.semantic_audio.f0_track.vocal_activity), 1)
+
+    def test_pipeline_builds_authoritative_candidates_from_f0_when_raw_detector_notes_empty(self):
+        pipeline = PitchPipeline()
+
+        class _BeatResult:
+            bpm = 120.0
+            beat_times = [0.0, 0.5, 1.0]
+            confidence = 0.93
+
+        class _KeyResult:
+            key = "C Major"
+            confidence = 0.89
+            method = "librosa"
+
+        class _DownbeatResult:
+            downbeat_times = [0.0]
+            method = "librosa"
+            confidence = 0.8
+            beats_per_bar = 4
+
+        f0_track = F0Track(
+            source_stem="vocals",
+            input_audio_path="vocals.wav",
+            backend="rmvpe",
+            frames=[
+                F0Frame(time_sec=0.00, frequency_hz=261.63, confidence=0.94, voiced=True, pitch_midi=60.0),
+                F0Frame(time_sec=0.05, frequency_hz=261.63, confidence=0.94, voiced=True, pitch_midi=60.0),
+                F0Frame(time_sec=0.10, frequency_hz=261.63, confidence=0.94, voiced=True, pitch_midi=60.0),
+                F0Frame(time_sec=0.15, frequency_hz=261.63, confidence=0.94, voiced=True, pitch_midi=60.0),
+            ],
+            analysis_info={"extractor": "test_extractor", "authoritative": True},
+        )
+
+        with patch.object(pipeline.detector, "detect", return_value=[]), patch.object(
+            pipeline.f0_extractor,
+            "extract",
+            return_value=f0_track,
+        ), patch.object(
+            pipeline.beat_tracker, "track", return_value=_BeatResult()
+        ), patch.object(pipeline.key_analyzer, "analyze", return_value=_KeyResult()), patch.object(
+            pipeline.downbeat_tracker, "track", return_value=_DownbeatResult()
+        ), patch(
+            "app.modules.pitch.pipeline.get_audio_duration", return_value=1.0
+        ):
+            result = pipeline.run("vocals.wav")
+
+        self.assertEqual(result.raw_notes, [])
+        self.assertEqual(len(result.semantic_audio.melody_candidates.notes), 1)
+        candidate = result.semantic_audio.melody_candidates.notes[0]
+        self.assertEqual(candidate.source_contour_ids, ["pc_00001"])
+        self.assertTrue(candidate.source_f0_frame_range)
+        self.assertEqual(result.semantic_audio.melody_candidates.analysis_info["candidate_authority"], "note_candidate_set_v2")
+        self.assertEqual(result.semantic_audio.melody_candidates.analysis_info["raw_candidates_empty"], True)
+        self.assertEqual(result.analysis_info["lead_selection_authoritative"], True)
+        self.assertEqual(result.lead_notes[0].source_candidate_id, candidate.candidate_id)
 
     def test_contour_to_candidate_bridge_runs_before_melody_selector_and_raw_artifact(self):
         pipeline = PitchPipeline()
@@ -597,7 +659,9 @@ class TestPitchPipeline(unittest.TestCase):
         self.assertEqual(result.analysis_info["melody_notes_removed"], 2)
         self.assertEqual(len(result.raw_notes), 3)
         self.assertEqual(len(result.lead_notes), 1)
-        self.assertEqual(result.lead_notes[0].pitch, "D4")
+        self.assertEqual(result.lead_notes[0].pitch, "C4")
+        self.assertEqual(result.lead_notes[0].source_contour_ids, ["pc_00001"])
+        self.assertEqual(result.semantic_audio.melody_candidates.analysis_info["candidate_authority"], "note_candidate_set_v2")
         self.assertEqual(result.semantic_audio.melody_candidates.analysis_info["candidate_count"], 3)
         self.assertEqual(result.semantic_audio.melody_candidates.analysis_info["selected_count"], 1)
 

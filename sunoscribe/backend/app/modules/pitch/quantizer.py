@@ -51,6 +51,18 @@ class NoteQuantizer:
                     lyric=None,
                     source=getattr(note, "source", None),
                     reason_codes=list(getattr(note, "reason_codes", []) or []),
+                    candidate_id=getattr(note, "candidate_id", None),
+                    source_candidate_id=getattr(note, "source_candidate_id", None)
+                    or getattr(note, "candidate_id", None),
+                    source_candidate_ids=list(getattr(note, "source_candidate_ids", []) or []),
+                    source_contour_ids=list(getattr(note, "source_contour_ids", []) or []),
+                    source_f0_frame_range=dict(getattr(note, "source_f0_frame_range", {}) or {}),
+                    candidate_origin=getattr(note, "candidate_origin", None),
+                    contour_bridge_evidence=dict(getattr(note, "contour_bridge_evidence", {}) or {}),
+                    contour_bridge_guard_reason_codes=list(
+                        getattr(note, "contour_bridge_guard_reason_codes", []) or []
+                    ),
+                    segmentation_evidence=dict(getattr(note, "segmentation_evidence", {}) or {}),
                 )
             )
 
@@ -92,16 +104,7 @@ class NoteQuantizer:
                 )
 
                 if can_merge:
-                    merged[-1] = Note(
-                        pitch=prev.pitch,
-                        start_time=float(prev.start_time),
-                        end_time=max(float(prev.end_time), float(note.end_time)),
-                        confidence=max(float(prev.confidence), float(note.confidence)),
-                        reason_codes=_unique_reason_codes(
-                            list(getattr(prev, "reason_codes", []) or [])
-                            + list(getattr(note, "reason_codes", []) or [])
-                        ),
-                    )
+                    merged[-1] = self._merged_note(prev, note)
                     continue
 
                 merged.append(note)
@@ -110,6 +113,56 @@ class NoteQuantizer:
             merged = self._resolve_overlaps(merged)
 
         return merged
+
+    def _merged_note(self, left: Note, right: Note) -> Note:
+        return Note(
+            pitch=left.pitch,
+            start_time=float(left.start_time),
+            end_time=max(float(left.end_time), float(right.end_time)),
+            confidence=max(float(left.confidence), float(right.confidence)),
+            reason_codes=_unique_reason_codes(
+                list(getattr(left, "reason_codes", []) or [])
+                + list(getattr(right, "reason_codes", []) or [])
+            ),
+            candidate_id=getattr(left, "candidate_id", None) or getattr(right, "candidate_id", None),
+            source_candidate_id=getattr(left, "source_candidate_id", None)
+            or getattr(left, "candidate_id", None)
+            or getattr(right, "source_candidate_id", None)
+            or getattr(right, "candidate_id", None),
+            source_candidate_ids=_merged_source_candidate_ids(left, right),
+            source_contour_ids=_unique_strings(
+                list(getattr(left, "source_contour_ids", []) or [])
+                + list(getattr(right, "source_contour_ids", []) or [])
+            ),
+            source_f0_frame_range=_merged_f0_frame_range(left, right),
+            candidate_origin=_merged_origin(left, right),
+            contour_bridge_evidence=_merged_mapping_field(left, right, "contour_bridge_evidence"),
+            contour_bridge_guard_reason_codes=_unique_strings(
+                list(getattr(left, "contour_bridge_guard_reason_codes", []) or [])
+                + list(getattr(right, "contour_bridge_guard_reason_codes", []) or [])
+            ),
+            segmentation_evidence=_merged_mapping_field(left, right, "segmentation_evidence"),
+        )
+
+    def _trimmed_note(self, note: Note, *, start_time: float, end_time: float) -> Note:
+        return Note(
+            pitch=note.pitch,
+            start_time=float(start_time),
+            end_time=float(end_time),
+            confidence=float(note.confidence),
+            reason_codes=list(getattr(note, "reason_codes", []) or []),
+            candidate_id=getattr(note, "candidate_id", None),
+            source_candidate_id=getattr(note, "source_candidate_id", None),
+            source_candidate_ids=list(getattr(note, "source_candidate_ids", []) or []),
+            source_contour_ids=list(getattr(note, "source_contour_ids", []) or []),
+            source_f0_frame_range=dict(getattr(note, "source_f0_frame_range", {}) or {}),
+            candidate_origin=getattr(note, "candidate_origin", None),
+            contour_bridge_evidence=dict(getattr(note, "contour_bridge_evidence", {}) or {}),
+            contour_bridge_guard_reason_codes=list(
+                getattr(note, "contour_bridge_guard_reason_codes", []) or []
+            ),
+            segmentation_evidence=dict(getattr(note, "segmentation_evidence", {}) or {}),
+        )
 
     @staticmethod
     def _is_mergeable_pitch(
@@ -142,22 +195,10 @@ class NoteQuantizer:
                 # 优先保留高置信度音符的完整时长，截断另一条以消除重叠。
                 if note.confidence > prev.confidence:
                     new_prev_end = max(float(prev.start_time), float(note.start_time) - min_gap)
-                    resolved[-1] = Note(
-                        pitch=prev.pitch,
-                        start_time=float(prev.start_time),
-                        end_time=new_prev_end,
-                        confidence=float(prev.confidence),
-                        reason_codes=list(getattr(prev, "reason_codes", []) or []),
-                    )
+                    resolved[-1] = self._trimmed_note(prev, start_time=float(prev.start_time), end_time=new_prev_end)
                 else:
                     adjusted_start = min(float(note.end_time), float(prev.end_time) + min_gap)
-                    note = Note(
-                        pitch=note.pitch,
-                        start_time=adjusted_start,
-                        end_time=float(note.end_time),
-                        confidence=float(note.confidence),
-                        reason_codes=list(getattr(note, "reason_codes", []) or []),
-                    )
+                    note = self._trimmed_note(note, start_time=adjusted_start, end_time=float(note.end_time))
 
             if note.end_time > note.start_time:
                 resolved.append(note)
@@ -220,3 +261,90 @@ def _unique_reason_codes(values: list[str]) -> list[str]:
             seen.add(text)
             result.append(text)
     return result
+
+
+def _merged_source_candidate_ids(left: Note, right: Note) -> list[str]:
+    values = [
+        getattr(left, "source_candidate_id", None),
+        getattr(left, "candidate_id", None),
+        *list(getattr(left, "source_candidate_ids", []) or []),
+        getattr(right, "source_candidate_id", None),
+        getattr(right, "candidate_id", None),
+        *list(getattr(right, "source_candidate_ids", []) or []),
+    ]
+    return _unique_strings(values)
+
+
+def _merged_f0_frame_range(left: Note, right: Note) -> dict[str, object]:
+    ranges = [
+        dict(getattr(left, "source_f0_frame_range", {}) or {}),
+        dict(getattr(right, "source_f0_frame_range", {}) or {}),
+    ]
+    present = [item for item in ranges if item]
+    if not present:
+        return {}
+    merged: dict[str, object] = {}
+    numeric_min_fields = ("start_frame_index", "start_time_sec", "start_time")
+    numeric_max_fields = ("end_frame_index", "end_time_sec", "end_time")
+    for field in numeric_min_fields:
+        values = [_safe_number(item.get(field)) for item in present]
+        values = [value for value in values if value is not None]
+        if values:
+            merged[field] = int(min(values)) if field.endswith("index") else min(values)
+    for field in numeric_max_fields:
+        values = [_safe_number(item.get(field)) for item in present]
+        values = [value for value in values if value is not None]
+        if values:
+            merged[field] = int(max(values)) if field.endswith("index") else max(values)
+    for item in present:
+        for key, value in item.items():
+            if key not in merged and value is not None:
+                merged[key] = value
+    return merged
+
+
+def _merged_origin(left: Note, right: Note) -> str | None:
+    origins = _unique_strings([getattr(left, "candidate_origin", None), getattr(right, "candidate_origin", None)])
+    if not origins:
+        return None
+    return origins[0] if len(origins) == 1 else "+".join(origins)
+
+
+def _merged_mapping_field(left: Note, right: Note, field_name: str) -> dict[str, object]:
+    left_value = dict(getattr(left, field_name, {}) or {})
+    right_value = dict(getattr(right, field_name, {}) or {})
+    if not left_value:
+        return right_value
+    if not right_value:
+        return left_value
+    merged = dict(left_value)
+    for key, value in right_value.items():
+        if key not in merged:
+            merged[key] = value
+        elif merged[key] != value:
+            merged[f"right_{key}"] = value
+    return merged
+
+
+def _unique_strings(values: list[object]) -> list[str]:
+    seen: set[str] = set()
+    result: list[str] = []
+    for value in values:
+        text = str(value or "").strip()
+        if text and text not in seen:
+            seen.add(text)
+            result.append(text)
+    return result
+
+
+def _safe_number(value: object) -> float | None:
+    try:
+        if value is None:
+            return None
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    if number != number or abs(number) == float("inf"):
+        return None
+    return number
+
