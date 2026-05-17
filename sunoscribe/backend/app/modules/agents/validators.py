@@ -385,14 +385,25 @@ class RvcSpecValidator:
             errors.append("voice_model_id is required")
 
         artifact_by_id = {artifact.id: artifact for artifact in context.artifacts}
-        artifact_expectations = (
-            ("vocal_stem_artifact_id", job_spec.vocal_stem_artifact_id, "vocals_stem"),
-            ("accompaniment_artifact_id", job_spec.accompaniment_artifact_id, "accompaniment_stem"),
-            ("corrected_f0_artifact_id", job_spec.corrected_f0_artifact_id, "corrected_f0_track"),
-        )
-        for field_name, artifact_id, expected_type in artifact_expectations:
+        artifact_expectations = [
+            ("vocal_stem_artifact_id", job_spec.vocal_stem_artifact_id, "vocals_stem", True),
+            (
+                "accompaniment_artifact_id",
+                job_spec.accompaniment_artifact_id,
+                "accompaniment_stem",
+                job_spec.mode == "score_guided",
+            ),
+            (
+                "corrected_f0_artifact_id",
+                job_spec.corrected_f0_artifact_id,
+                "corrected_f0_track",
+                job_spec.mode == "score_guided",
+            ),
+        ]
+        for field_name, artifact_id, expected_type, required in artifact_expectations:
             if not artifact_id:
-                errors.append(f"{field_name} is required")
+                if required:
+                    errors.append(f"{field_name} is required")
                 continue
             artifact = artifact_by_id.get(str(artifact_id))
             if artifact is None:

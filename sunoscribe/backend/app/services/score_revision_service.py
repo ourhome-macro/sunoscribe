@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import shutil
 import uuid
 from pathlib import Path
 from typing import Any
@@ -377,6 +378,8 @@ def _register_analysis_artifacts(
         return
 
     workspace = ProjectWorkspace(project_id=str(project.id))
+    revision_dir = workspace.revision_dir(str(revision.id))
+    revision_dir.mkdir(parents=True, exist_ok=True)
     source_media_mime = _guess_source_media_mime(getattr(analysis_result, "source_audio_path", None))
     candidates = [
         (ArtifactType.SOURCE_MEDIA.value, getattr(analysis_result, "source_audio_path", None), source_media_mime),
@@ -410,6 +413,7 @@ def _register_analysis_artifacts(
             raw_path=raw_path,
             mime_type=mime_type,
             task_id=task_id,
+            revision_dir=revision_dir,
         )
 
 
@@ -423,6 +427,7 @@ def _record_file_artifact(
     raw_path: Any,
     mime_type: str,
     task_id: str | None,
+    revision_dir: Path | None = None,
 ) -> None:
     path_text = str(raw_path or "").strip()
     if not path_text:
@@ -431,7 +436,15 @@ def _record_file_artifact(
     if not path_obj.exists() or not path_obj.is_file():
         return
 
-    payload = path_obj.read_bytes()
+    frozen_path = path_obj
+    if revision_dir is not None:
+        frozen_root = revision_dir / "artifacts"
+        frozen_root.mkdir(parents=True, exist_ok=True)
+        frozen_path = frozen_root / path_obj.name
+        if path_obj.resolve(strict=False) != frozen_path.resolve(strict=False):
+            shutil.copy2(path_obj, frozen_path)
+
+    payload = frozen_path.read_bytes()
     artifact = Artifact(
         project_id=project_id,
         score_id=score_id,
@@ -440,12 +453,12 @@ def _record_file_artifact(
         artifact_type=artifact_type,
         status=ArtifactStatus.AVAILABLE.value,
         storage_backend=ArtifactStorageBackend.WORKSPACE.value,
-        storage_path=str(path_obj),
-        filename=path_obj.name,
+        storage_path=str(frozen_path),
+        filename=frozen_path.name,
         mime_type=mime_type,
         file_size_bytes=len(payload),
         checksum=hashlib.sha256(payload).hexdigest(),
-        artifact_metadata={},
+        artifact_metadata={"source_workspace_path": str(path_obj)},
     )
     db.add(artifact)
 

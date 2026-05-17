@@ -681,12 +681,19 @@ class TestAudioAnalysisService(unittest.TestCase):
             )
 
             self.assertIsNotNone(first.midi_path)
+            self.assertIsNotNone(first.musicxml_path)
+            self.assertIsNotNone(first.score_revision)
+            self.assertIsNotNone(first.artifact_manifest_path)
+            self.assertTrue(first.artifact_manifest)
             self.assertEqual(first.lyrics_segments, [{"start": 0.0, "end": 0.5, "text": "hello world"}])
             self.assertEqual(first.alignment_source, "baseline")
             self.assertTrue(first.alignment_accepted)
             self.assertNotEqual(first.baseline_alignment, {})
             self.assertNotEqual(first.final_alignment, {})
             self.assertEqual(second.alignment_source, "baseline")
+            self.assertTrue(Path(first.midi_path).exists())
+            self.assertTrue(Path(first.musicxml_path).exists())
+            self.assertTrue(Path(first.artifact_manifest_path).exists())
 
     def test_perception_stage_routes_stems_to_pitch_request(self) -> None:
         with TemporaryDirectory() as temp_dir:

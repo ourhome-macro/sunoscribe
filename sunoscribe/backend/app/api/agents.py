@@ -20,7 +20,9 @@ from app.schemas.agent_workflow import (
     ProposeAgentScorePatchRequest,
     PublicArtifactResponse,
     RegenerateExportsResponse,
+    RunRvcVoiceConversionRequest,
     RvcJobSpecResponse,
+    RvcVoiceConversionResponse,
     ScoreRevisionSummaryResponse,
 )
 from app.services.agent_workflow_service import agent_workflow_service
@@ -143,9 +145,31 @@ def prepare_agent_rvc_job_api(
         revision_id=str(revision_id),
         voice_model_id=payload.voice_model_id,
         transpose_semitones=payload.transpose_semitones,
+        mode=payload.mode,
     )
     response = RvcJobSpecResponse.model_validate(spec.model_dump())
     return success_response(response.model_dump(mode="json"))
+
+
+@router.post("/{revision_id}/agent/rvc/voice-conversion")
+def run_agent_rvc_voice_conversion_api(
+    revision_id: uuid.UUID,
+    payload: RunRvcVoiceConversionRequest,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    result, artifact = agent_workflow_service.run_rvc_voice_conversion(
+        db,
+        user=current_user,
+        revision_id=str(revision_id),
+        voice_model_id=payload.voice_model_id,
+        transpose_semitones=payload.transpose_semitones,
+    )
+    response = RvcVoiceConversionResponse(
+        **result.model_dump(),
+        artifact=_public_artifact(artifact),
+    )
+    return success_response(response.model_dump(mode="json"), "RVC voice conversion completed")
 
 
 @router.post("/{revision_id}/exports/regenerate")

@@ -99,11 +99,13 @@ class ScoreRevisionSummaryResponse(_AgentWorkflowSchema):
 
 
 class PrepareRvcJobRequest(_AgentWorkflowSchema):
+    mode: str = Field(default="score_guided", pattern="^(score_guided|voice_conversion)$")
     voice_model_id: str = Field(min_length=1, max_length=128)
     transpose_semitones: int = Field(default=0, ge=-24, le=24)
 
 
 class RvcJobSpecResponse(_AgentWorkflowSchema):
+    mode: str = "score_guided"
     project_id: uuid.UUID
     revision_id: uuid.UUID
     vocal_stem_artifact_id: uuid.UUID | None = None
@@ -111,7 +113,13 @@ class RvcJobSpecResponse(_AgentWorkflowSchema):
     corrected_f0_artifact_id: uuid.UUID | None = None
     voice_model_id: str
     transpose_semitones: int
+    rvc_backend: str | None = None
     warnings: list[str] = Field(default_factory=list)
+
+
+class RunRvcVoiceConversionRequest(_AgentWorkflowSchema):
+    voice_model_id: str = Field(min_length=1, max_length=128)
+    transpose_semitones: int = Field(default=0, ge=-24, le=24)
 
 
 class PublicArtifactResponse(_AgentWorkflowSchema):
@@ -124,6 +132,19 @@ class PublicArtifactResponse(_AgentWorkflowSchema):
     checksum: str | None = None
     created_at: datetime | None = None
     metadata: dict[str, Any] | None = None
+
+
+class RvcVoiceConversionResponse(_AgentWorkflowSchema):
+    mode: str = "voice_conversion"
+    project_id: uuid.UUID
+    revision_id: uuid.UUID
+    rvc_vocal_artifact_id: uuid.UUID
+    source_vocal_stem_artifact_id: uuid.UUID
+    voice_model_id: str
+    transpose_semitones: int
+    rvc_backend: str
+    artifact: PublicArtifactResponse
+    warnings: list[str] = Field(default_factory=list)
 
 
 class RegenerateExportsResponse(_AgentWorkflowSchema):

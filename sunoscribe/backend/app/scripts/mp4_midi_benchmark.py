@@ -252,6 +252,12 @@ async def _run_sample_logged(
         outputs = _pipeline_outputs(result_dict)
         outputs["workspace_path"] = str(project_dir)
         outputs["logs"] = logs
+        if analysis_result.score_revision is not None:
+            outputs["score_revision"] = analysis_result.score_revision
+        if analysis_result.artifact_manifest_path is not None:
+            outputs["artifact_manifest_path"] = analysis_result.artifact_manifest_path
+        if analysis_result.artifact_manifest:
+            outputs["artifact_manifest"] = analysis_result.artifact_manifest
         required_errors = _required_pipeline_errors(result_dict, produced_midi_path)
         pipeline_status = "success" if not required_errors else "failed"
         stage_records.append(

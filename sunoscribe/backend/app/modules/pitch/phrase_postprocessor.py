@@ -255,7 +255,13 @@ class PhraseAwarePostprocessor:
                 pitch_outlier = abs(cur_midi - anchor) >= max(1, tolerance + 1)
             weak_enough = cur_confidence <= min(0.70, min(prev_confidence, next_confidence) + 0.05)
             absorbable = shorter_than_neighbors and weak_enough and (pitch_outlier or cur_confidence <= min(prev_confidence, next_confidence) + 0.05)
-            if local_phrase and short_enough and same_neighbor_pitch and not_stronger_than_neighbors and absorbable:
+            if (
+                local_phrase
+                and short_enough
+                and same_neighbor_pitch
+                and not_stronger_than_neighbors
+                and absorbable
+            ):
                 anchor_midi = _weighted_pitch([prev_note, next_note])
                 merged = self._merge_note_group(
                     [prev_note, cur_note, next_note],

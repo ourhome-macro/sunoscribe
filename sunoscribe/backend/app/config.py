@@ -48,6 +48,9 @@ class Settings(BaseSettings):
     agent_llm_enabled: bool = False
     agent_llm_provider: str = "openai"
     agent_llm_model: str = "gpt-5.4-mini"
+    rvc_endpoint_url: str | None = None
+    rvc_api_key: str | None = None
+    rvc_request_timeout_seconds: int = 600
 
     # PRD 瑕佹眰 PostgreSQL锛涢粯璁ゅ€煎彲閫氳繃 .env 瑕嗙洊銆?
     # Avoid committing hard-coded credentials in code.
@@ -149,6 +152,20 @@ class Settings(BaseSettings):
         normalized = int(value)
         if normalized < 1:
             raise ValueError("task_timeout_seconds must be at least 1")
+        return normalized
+
+    @field_validator("rvc_endpoint_url", "rvc_api_key")
+    @classmethod
+    def _strip_optional_rvc_value(cls, value: str | None) -> str | None:
+        normalized = str(value or "").strip()
+        return normalized or None
+
+    @field_validator("rvc_request_timeout_seconds")
+    @classmethod
+    def _validate_rvc_request_timeout_seconds(cls, value: int) -> int:
+        normalized = int(value)
+        if normalized < 1:
+            raise ValueError("rvc_request_timeout_seconds must be at least 1")
         return normalized
 
     @model_validator(mode="after")

@@ -66,10 +66,15 @@ class TestTypedArtifactLineage(unittest.TestCase):
                     task_id=None,
                 )
 
-        artifact_types = {getattr(artifact, "artifact_type", None) for artifact in db.added}
-        self.assertIn(ArtifactType.F0_TRACK.value, artifact_types)
-        self.assertIn(ArtifactType.NOTE_CANDIDATES.value, artifact_types)
-        self.assertIn(ArtifactType.RHYTHM_GRID.value, artifact_types)
+            artifact_types = {getattr(artifact, "artifact_type", None) for artifact in db.added}
+            self.assertIn(ArtifactType.F0_TRACK.value, artifact_types)
+            self.assertIn(ArtifactType.NOTE_CANDIDATES.value, artifact_types)
+            self.assertIn(ArtifactType.RHYTHM_GRID.value, artifact_types)
+            for artifact in db.added:
+                storage_path = Path(str(getattr(artifact, "storage_path", "")))
+                self.assertIn(str(revision_id), str(storage_path))
+                self.assertTrue(storage_path.exists())
+                self.assertIn("source_workspace_path", getattr(artifact, "artifact_metadata", {}))
 
 
 if __name__ == "__main__":

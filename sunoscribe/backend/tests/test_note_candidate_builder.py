@@ -262,7 +262,9 @@ class TestNoteCandidateBuilder(unittest.TestCase):
 
         notes = result["melody_candidates"]["notes"]
         self.assertEqual(len(notes), 1)
-        self.assertAlmostEqual(notes[0]["duration_sec"], 0.12)
+        self.assertAlmostEqual(notes[0]["segmentation_evidence"]["stable_duration_sec"], 0.12)
+        self.assertGreater(notes[0]["duration_sec"], notes[0]["segmentation_evidence"]["stable_duration_sec"])
+        self.assertGreater(notes[0]["segmentation_evidence"]["context_extension_sec"], 0.0)
         self.assertEqual(notes[0]["candidate_origin"], "note_candidate_builder.contour_segment")
 
 

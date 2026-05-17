@@ -44,7 +44,7 @@ class NoteCandidateBuilderConfig:
     segmentation_max_pitch_range_semitones: float = 1.00
     segmentation_max_pitch_stddev_semitones: float = 0.60
     segmentation_max_frame_gap_sec: float = 0.04
-    segmentation_context_extension_sec: float = 0.12
+    segmentation_context_extension_sec: float = 0.35
 
 
 class NoteCandidateBuilder:
@@ -577,25 +577,16 @@ class NoteCandidateBuilder:
             segmentation_counts[CONTOUR_SEGMENTATION_NO_STABLE_SUBSEGMENT] += 1
             return []
 
-        accepted_segments: list[dict[str, Any]] = []
+        accepted_segment_items: list[tuple[list[dict[str, Any]], dict[str, Any]]] = []
         rejected_segment_reasons: Counter[str] = Counter()
         rejected_segment_count = 0
         for segment_index, segment in enumerate(segment_frames, start=1):
-            extended_start_time, extended_end_time = _extended_segment_bounds(
-                segment=segment,
-                segment_index=segment_index - 1,
-                segments=segment_frames,
-                contour=contour,
-                max_extension_sec=float(self.config.segmentation_context_extension_sec),
-            )
             candidate = self._build_candidate_from_segment(
                 contour=contour,
                 segment=segment,
                 segment_index=segment_index,
                 frames=frames,
                 source_backend=source_backend,
-                extended_start_time=extended_start_time,
-                extended_end_time=extended_end_time,
             )
             if candidate is None:
                 rejected_segment_count += 1
@@ -603,14 +594,21 @@ class NoteCandidateBuilder:
                 continue
             segment_rejections = self._contour_rejection_reasons(
                 candidate=candidate,
-                accepted_notes=accepted_notes + accepted_segments,
+                accepted_notes=accepted_notes + [item[1] for item in accepted_segment_items],
             )
             if segment_rejections:
                 rejected_segment_count += 1
                 for reason_code in segment_rejections:
                     rejected_segment_reasons[reason_code] += 1
                 continue
-            accepted_segments.append(candidate)
+            accepted_segment_items.append((segment, candidate))
+
+        accepted_segments = self._extend_accepted_segment_candidates(
+            contour=contour,
+            accepted_segment_items=accepted_segment_items,
+            frames=frames,
+            source_backend=source_backend,
+        )
 
         if accepted_segments:
             segmentation_counts[CONTOUR_SEGMENTATION_BRIDGE] += len(accepted_segments)
@@ -623,6 +621,72 @@ class NoteCandidateBuilder:
         for reason_code, count in rejected_segment_reasons.items():
             segmentation_counts[f"segment_rejected:{reason_code}"] += count
         return []
+
+    def _extend_accepted_segment_candidates(
+        self,
+        *,
+        contour: dict[str, Any],
+        accepted_segment_items: list[tuple[list[dict[str, Any]], dict[str, Any]]],
+        frames: list[dict[str, Any]],
+        source_backend: str,
+    ) -> list[dict[str, Any]]:
+        if not accepted_segment_items:
+            return []
+        accepted_segments = [segment for segment, _ in accepted_segment_items]
+        extended_candidates: list[dict[str, Any]] = []
+        for accepted_index, (segment, candidate) in enumerate(accepted_segment_items):
+            extended_start_time, extended_end_time = _extended_segment_bounds(
+                segment=segment,
+                segment_index=accepted_index,
+                segments=accepted_segments,
+                contour=contour,
+                max_extension_sec=float(self.config.segmentation_context_extension_sec),
+            )
+            stable_start_time = float(candidate["segmentation_evidence"].get("stable_start_time_sec") or candidate["start_time"])
+            stable_end_time = float(candidate["segmentation_evidence"].get("stable_end_time_sec") or candidate["end_time"])
+            if extended_end_time <= extended_start_time:
+                extended_candidates.append(candidate)
+                continue
+            if abs(float(candidate["start_time"]) - extended_start_time) < 1e-9 and abs(float(candidate["end_time"]) - extended_end_time) < 1e-9:
+                extended_candidates.append(candidate)
+                continue
+            source_frame_range = self._resolve_source_frame_range(
+                frames=frames,
+                start_time=extended_start_time,
+                end_time=extended_end_time,
+                frame_samples=segment,
+            )
+            candidate_id = self._stable_candidate_id(
+                origin="contour_segment",
+                source_backend=source_backend,
+                start_time=extended_start_time,
+                end_time=extended_end_time,
+                pitch_center_midi=float(candidate["pitch_center_midi"]),
+                source_f0_frame_range=source_frame_range,
+            )
+            extended = dict(candidate)
+            extended["candidate_id"] = candidate_id
+            extended["stable_id"] = candidate_id
+            extended["source_candidate_id"] = candidate_id
+            extended["source_candidate_ids"] = [candidate_id]
+            extended["source_f0_frame_range"] = source_frame_range
+            extended["start_time"] = round(float(extended_start_time), 6)
+            extended["end_time"] = round(float(extended_end_time), 6)
+            extended["duration_sec"] = round(max(0.0, float(extended_end_time) - float(extended_start_time)), 6)
+            segmentation_evidence = dict(candidate.get("segmentation_evidence") or {})
+            segmentation_evidence["frame_count"] = int(source_frame_range.get("frame_count") or segmentation_evidence.get("frame_count") or len(segment))
+            segmentation_evidence["voiced_frame_count"] = int(
+                source_frame_range.get("voiced_frame_count")
+                or segmentation_evidence.get("voiced_frame_count")
+                or len(segment)
+            )
+            segmentation_evidence["context_extension_sec"] = round(
+                max(0.0, float(extended_end_time) - float(extended_start_time) - (stable_end_time - stable_start_time)),
+                6,
+            )
+            extended["segmentation_evidence"] = segmentation_evidence
+            extended_candidates.append(extended)
+        return extended_candidates
 
     def _build_candidate_from_segment(
         self,

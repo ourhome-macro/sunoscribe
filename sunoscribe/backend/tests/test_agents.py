@@ -181,6 +181,26 @@ class TestRvcPrepareAgent(unittest.TestCase):
         self.assertEqual(spec.accompaniment_artifact_id, "a2")
         self.assertEqual(spec.corrected_f0_artifact_id, "a3")
 
+    def test_voice_conversion_mode_does_not_require_corrected_f0_or_accompaniment(self) -> None:
+        context = _sample_context().model_copy(
+            update={
+                "artifacts": [ArtifactReference(id="a1", artifact_type="vocals_stem")],
+            }
+        )
+        spec = RvcPrepareAgent().prepare(
+            context,
+            voice_model_id="voice-model-001",
+            transpose_semitones=2,
+            mode="voice_conversion",
+        )
+        validation = RvcSpecValidator().validate(context=context, spec=spec)
+
+        self.assertTrue(validation.accepted)
+        self.assertEqual(spec.mode, "voice_conversion")
+        self.assertEqual(spec.vocal_stem_artifact_id, "a1")
+        self.assertIsNone(spec.corrected_f0_artifact_id)
+        self.assertIn("voice_conversion_mode_not_score_guided", spec.warnings)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -32,11 +32,13 @@ from app.modules.agents import (
     AgentSkillContext,
     AgentSkillRegistry,
     TranscriptionDiagnosis,
+    RvcVoiceConversionResult,
 )
 from app.modules.agents.llm_client import ScorePatchLLMClient, make_openai_score_patch_llm_client
 from app.schemas.audio_analysis import AudioAnalysisReport
 from app.services.plugins import CallablePlugin, PluginContext, PluginRegistry
 from app.services.render_export_service import RenderExportService
+from app.services.rvc_voice_conversion_service import RvcVoiceConversionService
 from app.services.score_revision_service import get_score_revision_by_id
 from app.services.workspace import ProjectWorkspace
 from app.utils.errors import NotFoundError, ValidationAppError
@@ -56,6 +58,7 @@ class AgentWorkflowService:
         rvc_spec_validator: RvcSpecValidator | None = None,
         skill_registry: AgentSkillRegistry | None = None,
         export_service: RenderExportService | None = None,
+        rvc_voice_conversion_service: RvcVoiceConversionService | None = None,
         score_patch_llm_client: ScorePatchLLMClient | None = None,
         auto_configure_llm_client: bool = True,
         plugin_registry: PluginRegistry | None = None,
@@ -68,6 +71,7 @@ class AgentWorkflowService:
         self.rvc_spec_validator = rvc_spec_validator or RvcSpecValidator()
         self.skill_registry = skill_registry or AgentSkillRegistry()
         self.export_service = export_service or RenderExportService()
+        self.rvc_voice_conversion_service = rvc_voice_conversion_service or RvcVoiceConversionService()
         self.score_patch_llm_client = score_patch_llm_client or (
             self._try_make_score_patch_llm_client() if auto_configure_llm_client else None
         )
@@ -305,6 +309,7 @@ class AgentWorkflowService:
         revision_id: str,
         voice_model_id: str,
         transpose_semitones: int = 0,
+        mode: str = "score_guided",
     ) -> RvcJobSpec:
         context = self.load_context(db, user=user, revision_id=revision_id, skill_profile="rvc")
         result = self.plugin_registry.run(
@@ -313,14 +318,42 @@ class AgentWorkflowService:
                 agent_context=context,
                 artifacts=tuple(context.artifacts),
                 warnings=tuple(context.warnings),
-                params={"voice_model_id": voice_model_id, "transpose_semitones": transpose_semitones},
+                params={
+                    "voice_model_id": voice_model_id,
+                    "transpose_semitones": transpose_semitones,
+                    "mode": mode,
+                },
             ),
         )
         spec = result.payload
+        spec = spec if isinstance(spec, RvcJobSpec) else RvcJobSpec.model_validate(spec)
         validation = self.rvc_spec_validator.validate(context=context, spec=spec)
         if not validation.accepted:
             raise ValidationAppError("agent-generated RVC job spec is invalid", details={"errors": validation.errors})
         return spec
+
+    def run_rvc_voice_conversion(
+        self,
+        db: Session,
+        *,
+        user: User,
+        revision_id: str,
+        voice_model_id: str,
+        transpose_semitones: int = 0,
+    ) -> tuple[RvcVoiceConversionResult, Artifact]:
+        revision = get_score_revision_by_id(db, user=user, revision_id=revision_id)
+        spec = self.prepare_rvc_job(
+            db,
+            user=user,
+            revision_id=revision_id,
+            voice_model_id=voice_model_id,
+            transpose_semitones=transpose_semitones,
+            mode="voice_conversion",
+        )
+        result, artifact = self.rvc_voice_conversion_service.convert(db, revision=revision, spec=spec)
+        db.commit()
+        db.refresh(artifact)
+        return result, artifact
 
     def _run_score_patch_plugin(
         self,
@@ -381,6 +414,8 @@ class AgentWorkflowService:
                     self._require_agent_context(plugin_context),
                     voice_model_id=str(plugin_context.params.get("voice_model_id", "")),
                     transpose_semitones=int(plugin_context.params.get("transpose_semitones", 0)),
+                    mode=str(plugin_context.params.get("mode", "score_guided")),
+                    rvc_backend="external",
                 ),
             )
         )

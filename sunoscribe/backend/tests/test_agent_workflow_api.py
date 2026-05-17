@@ -10,7 +10,7 @@ from fastapi.testclient import TestClient
 
 from app.database import get_db
 from app.main import app
-from app.modules.agents import RvcJobSpec, TranscriptionDiagnosis
+from app.modules.agents import RvcJobSpec, RvcVoiceConversionResult, TranscriptionDiagnosis
 from app.modules.agents.types import (
     AgentScorePatch,
     DiagnosisAction,
@@ -246,6 +246,56 @@ class TestAgentWorkflowApi(unittest.TestCase):
         self.assertEqual(payload["data"]["corrected_f0_artifact_id"], "55555555-5555-4555-8555-555555555555")
         self.assertEqual(payload["data"]["warnings"], ["missing_optional_mix_preview"])
         service.prepare_rvc_job.assert_called_once_with(
+            self.db,
+            user=self.user,
+            revision_id=REVISION_ID,
+            voice_model_id="voice-a",
+            transpose_semitones=2,
+            mode="score_guided",
+        )
+
+    def test_rvc_voice_conversion_endpoint_returns_rvc_vocal_artifact(self) -> None:
+        service = MagicMock()
+        artifact_id = "66666666-6666-4666-8666-666666666666"
+        source_artifact_id = "33333333-3333-4333-8333-333333333333"
+        artifact = SimpleNamespace(
+            id=uuid.UUID(artifact_id),
+            artifact_type="rvc_vocal",
+            status="available",
+            filename="rvc_vocal.wav",
+            mime_type="audio/wav",
+            file_size_bytes=321,
+            checksum="abc",
+            created_at=None,
+            artifact_metadata={"mode": "voice_conversion"},
+        )
+        service.run_rvc_voice_conversion.return_value = (
+            RvcVoiceConversionResult(
+                project_id=PROJECT_ID,
+                revision_id=REVISION_ID,
+                rvc_vocal_artifact_id=artifact_id,
+                source_vocal_stem_artifact_id=source_artifact_id,
+                voice_model_id="voice-a",
+                transpose_semitones=2,
+                rvc_backend="external",
+                warnings=["voice_conversion_mode_not_score_guided"],
+            ),
+            artifact,
+        )
+
+        with self._patched_workflow_service(service):
+            response = self.client.post(
+                f"/api/score-revisions/{REVISION_ID}/agent/rvc/voice-conversion",
+                json={"voice_model_id": "voice-a", "transpose_semitones": 2},
+            )
+
+        self.assertEqual(response.status_code, 200, response.text)
+        payload = response.json()
+        self.assertTrue(payload["success"])
+        self.assertEqual(payload["data"]["mode"], "voice_conversion")
+        self.assertEqual(payload["data"]["rvc_vocal_artifact_id"], artifact_id)
+        self.assertEqual(payload["data"]["artifact"]["artifact_type"], "rvc_vocal")
+        service.run_rvc_voice_conversion.assert_called_once_with(
             self.db,
             user=self.user,
             revision_id=REVISION_ID,

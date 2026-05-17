@@ -197,11 +197,25 @@ class AudioAnalysisService:
         perception = await self._run_perception_stage(source_copy_path, canonical_audio_path, workspace, options)
         alignment = await self._run_alignment_stage(perception.score_ir_obj, options)
         persist_warnings = self._persist_artifacts(workspace, perception, alignment)
+        revision_state, revision_warnings = self._persist_machine_score_revision(
+            workspace,
+            perception,
+            alignment,
+            options,
+        )
+        revision_midi_path, revision_musicxml_path, revision_export_warnings = await self._run_revision_export_stage(
+            revision_state,
+            alignment,
+            workspace,
+        )
         final_midi_path, export_warnings = await self._run_export_stage(perception, alignment, workspace)
+        effective_midi_path = revision_midi_path or final_midi_path
 
         all_warnings = self._merge_warnings(
             perception.warnings,
             alignment.warnings,
+            revision_warnings,
+            revision_export_warnings,
             export_warnings,
             persist_warnings,
         )
@@ -230,7 +244,17 @@ class AudioAnalysisService:
             validator_warnings_before=alignment.validator_warnings_before,
             validator_warnings_after=alignment.validator_warnings_after,
             refine_debug=alignment.refine_debug,
-            midi_path=str(final_midi_path) if final_midi_path else None,
+            midi_path=str(effective_midi_path) if effective_midi_path else None,
+            musicxml_path=str(revision_musicxml_path) if revision_musicxml_path else None,
+            score_revision={
+                "revision_id": revision_state.revision_id,
+                "revision_number": revision_state.revision_number,
+                "revision_type": revision_state.revision_type,
+                "score_type": revision_state.score_type,
+                "revision_dir": revision_state.revision_dir,
+            },
+            artifact_manifest_path=revision_state.artifact_manifest_path,
+            artifact_manifest=[item.to_dict() for item in revision_state.artifact_manifest],
             stem_paths={name: str(path) for name, path in perception.stem_paths.items()},
             f0_track=perception.f0_track_dict,
             pitch_contours=perception.pitch_contours_dict,

@@ -13,6 +13,7 @@ from .types import (
     DiagnosisIssue,
     DiagnosisSectionFinding,
     RvcJobSpec,
+    RvcVoiceConversionResult,
     TranscriptionDiagnosis,
     UncertainNoteDiagnosis,
 )
@@ -43,6 +44,7 @@ __all__ = [
     "RvcPrepareAgent",
     "RvcSpecValidationResult",
     "RvcSpecValidator",
+    "RvcVoiceConversionResult",
     "ScorePatchAgent",
     "SkillRegistry",
     "TranscriptionDiagnosis",

@@ -12,7 +12,7 @@ from app.models.artifact import Artifact
 from app.models.score import Score
 from app.models.score_revision import ScoreRevision
 from app.models.user import User
-from app.modules.agents import AgentScorePatch, RvcJobSpec, TranscriptionDiagnosis
+from app.modules.agents import AgentScorePatch, RvcJobSpec, RvcVoiceConversionResult, TranscriptionDiagnosis
 from app.modules.agents.types import AgentSkill, AgentSkillContext
 from app.modules.agents.validators import RvcSpecValidationResult
 
@@ -149,6 +149,58 @@ class TestAgentWorkflowService(unittest.TestCase):
         self.assertEqual(diagnosis_agent.context.skill_context.names(), ["mir-transcription", "debug-diagnosis"])
         self.assertEqual(patch_agent.context.skill_context.names(), ["score-ir-editing"])
         self.assertEqual(rvc_agent.context.skill_context.names(), ["rvc-cover"])
+
+    def test_run_rvc_voice_conversion_uses_voice_conversion_spec_and_persists_artifact(self) -> None:
+        score, revision = _build_revision()
+        user = User(id=uuid.uuid4(), username="agent", email="agent@example.com", password_hash="x")
+        vocal_artifact = Artifact(
+            id=uuid.uuid4(),
+            project_id=score.project_id,
+            score_id=score.id,
+            score_revision_id=revision.id,
+            artifact_type="vocals_stem",
+            status="available",
+            storage_path="/tmp/vocals.wav",
+        )
+        revision.artifacts = [vocal_artifact]
+        conversion_artifact = Artifact(
+            id=uuid.uuid4(),
+            project_id=score.project_id,
+            score_id=score.id,
+            score_revision_id=revision.id,
+            artifact_type="rvc_vocal",
+            status="available",
+            storage_path="/tmp/rvc.wav",
+        )
+        conversion_result = RvcVoiceConversionResult(
+            project_id=str(score.project_id),
+            revision_id=str(revision.id),
+            rvc_vocal_artifact_id=str(conversion_artifact.id),
+            source_vocal_stem_artifact_id=str(vocal_artifact.id),
+            voice_model_id="voice-model-1",
+            transpose_semitones=3,
+            rvc_backend="external",
+        )
+        rvc_service = _SpyRvcVoiceConversionService(conversion_result, conversion_artifact)
+        service = AgentWorkflowService(
+            rvc_voice_conversion_service=rvc_service,
+            auto_configure_llm_client=False,
+        )
+        service._list_revision_artifacts = lambda *args, **kwargs: [vocal_artifact]
+
+        with patch.object(agent_workflow_module, "get_score_revision_by_id", return_value=revision):
+            result, artifact = service.run_rvc_voice_conversion(
+                _NoopDb(),
+                user=user,
+                revision_id=str(revision.id),
+                voice_model_id="voice-model-1",
+                transpose_semitones=3,
+            )
+
+        self.assertEqual(result.mode, "voice_conversion")
+        self.assertIs(artifact, conversion_artifact)
+        self.assertEqual(rvc_service.spec.mode, "voice_conversion")
+        self.assertEqual(rvc_service.spec.vocal_stem_artifact_id, str(vocal_artifact.id))
 
     def test_apply_patch_to_revision_creates_new_revision(self) -> None:
         score, revision = _build_revision()
@@ -322,14 +374,37 @@ class _SpyRvcPrepareAgent:
     def __init__(self) -> None:
         self.context = None
 
-    def prepare(self, context, *, voice_model_id: str, transpose_semitones: int = 0):
+    def prepare(self, context, *, voice_model_id: str, transpose_semitones: int = 0, mode: str = "score_guided", rvc_backend=None):
         self.context = context
         return RvcJobSpec(
+            mode=mode,
             project_id=context.project_id,
             revision_id=context.revision_id,
             voice_model_id=voice_model_id,
             transpose_semitones=transpose_semitones,
+            rvc_backend=rvc_backend,
         )
+
+
+class _SpyRvcVoiceConversionService:
+    def __init__(self, result, artifact) -> None:
+        self.result = result
+        self.artifact = artifact
+        self.spec = None
+
+    def convert(self, _db, *, revision, spec, task_id=None):
+        self.revision = revision
+        self.spec = spec
+        self.task_id = task_id
+        return self.result, self.artifact
+
+
+class _NoopDb:
+    def commit(self) -> None:
+        pass
+
+    def refresh(self, _entity) -> None:
+        pass
 
 
 class _SpyScorePatchLLMClient:

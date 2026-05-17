@@ -67,18 +67,28 @@ class _FakeAudioAnalysisService:
         project_id = getattr(options, "project_id")
         workspace = self.projects_root / project_id
         export_dir = workspace / "exports"
+        revision_dir = workspace / "revisions" / "machine-0001-fake"
+        revision_export_dir = revision_dir / "exports"
         preprocess_dir = workspace / "preprocess"
         separation_dir = workspace / "separation"
         pitch_dir = workspace / "pitch"
-        for directory in [export_dir, preprocess_dir, separation_dir, pitch_dir]:
+        for directory in [export_dir, revision_export_dir, preprocess_dir, separation_dir, pitch_dir]:
             directory.mkdir(parents=True, exist_ok=True)
-        midi_path = export_dir / "final_score.mid"
+        midi_path = revision_export_dir / "score.mid"
+        musicxml_path = revision_export_dir / "score.musicxml"
+        manifest_path = revision_dir / "artifact_manifest.json"
         if self.produced_midi_source is None:
             raise RuntimeError("missing produced MIDI fixture")
         midi_path.write_bytes(self.produced_midi_source.read_bytes())
+        musicxml_path.write_text("<score-partwise version='3.1'/>", encoding="utf-8")
+        manifest_path.write_text(json.dumps({"artifacts": [{"artifact_type": "midi", "path": str(midi_path)}]}), encoding="utf-8")
         print("fake pipeline stdout")
         return SimpleNamespace(
             midi_path=str(midi_path),
+            musicxml_path=str(musicxml_path),
+            score_revision={"revision_id": "machine-0001-fake", "revision_number": 1, "revision_type": "machine", "score_type": "lead_vocal", "revision_dir": str(revision_dir)},
+            artifact_manifest_path=str(manifest_path),
+            artifact_manifest=[{"artifact_type": "midi", "path": str(midi_path)}],
             to_dict=lambda: {
                 "source_audio_path": str(input_path),
                 "normalized_audio_path": str(preprocess_dir / "source.wav"),

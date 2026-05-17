@@ -204,6 +204,7 @@ class AgentScorePatch(_AgentModel):
 
 
 class RvcJobSpec(_AgentModel):
+    mode: Literal["score_guided", "voice_conversion"] = "score_guided"
     project_id: str = Field(min_length=1)
     revision_id: str = Field(min_length=1)
     vocal_stem_artifact_id: str | None = None
@@ -211,4 +212,17 @@ class RvcJobSpec(_AgentModel):
     corrected_f0_artifact_id: str | None = None
     voice_model_id: str = Field(min_length=1)
     transpose_semitones: int = Field(ge=-24, le=24, default=0)
+    rvc_backend: str | None = None
+    warnings: list[str] = Field(default_factory=list)
+
+
+class RvcVoiceConversionResult(_AgentModel):
+    mode: Literal["voice_conversion"] = "voice_conversion"
+    project_id: str = Field(min_length=1)
+    revision_id: str = Field(min_length=1)
+    rvc_vocal_artifact_id: str = Field(min_length=1)
+    source_vocal_stem_artifact_id: str = Field(min_length=1)
+    voice_model_id: str = Field(min_length=1)
+    transpose_semitones: int = Field(ge=-24, le=24, default=0)
+    rvc_backend: str
     warnings: list[str] = Field(default_factory=list)
