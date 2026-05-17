@@ -646,7 +646,7 @@ class TestAudioAnalysisService(unittest.TestCase):
             self.assertEqual(separator.calls[0][0][0], str(workspace.canonical_audio_path))
             self.assertTrue(workspace.canonical_audio_path.exists())
 
-    def test_process_audio_creates_immutable_machine_revision_manifest_and_revision_exports(self) -> None:
+    def test_process_audio_populates_lyrics_and_alignment_and_exports_midi(self) -> None:
         with TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             source_audio = root / "source.wav"
@@ -666,7 +666,7 @@ class TestAudioAnalysisService(unittest.TestCase):
             service = AudioAnalysisService(
                 audio_processor=_PassthroughAudioProcessor(),
                 vocal_separator=_FakeSeparator(stem_files),
-                lyrics_recognizer=lambda _path: [],
+                lyrics_recognizer=lambda _path: [{"start": 0.0, "end": 0.5, "text": "hello world"}],
                 pitch_pipeline=_CapturePitchPipeline(),
                 score_ir_builder=_FakeScoreIRBuilder(),
                 midi_exporter=None,
@@ -680,31 +680,13 @@ class TestAudioAnalysisService(unittest.TestCase):
                 service.process_audio(source_audio, AudioAnalysisOptions(project_id="revision_manifest_001", job_id="job-b"))
             )
 
-            self.assertNotEqual(first.score_revision["revision_id"], second.score_revision["revision_id"])
-            self.assertEqual(first.score_revision["revision_number"], 1)
-            self.assertEqual(second.score_revision["revision_number"], 2)
-            self.assertTrue(Path(first.artifact_manifest_path).exists())
-            self.assertTrue(Path(second.artifact_manifest_path).exists())
-            self.assertNotEqual(first.artifact_manifest_path, second.artifact_manifest_path)
             self.assertIsNotNone(first.midi_path)
-            self.assertIsNotNone(first.musicxml_path)
-            self.assertIn(first.score_revision["revision_id"], first.midi_path)
-            self.assertIn(first.score_revision["revision_id"], first.musicxml_path)
-
-            manifest = json.loads(Path(first.artifact_manifest_path).read_text(encoding="utf-8"))
-            artifact_types = {item["artifact_type"] for item in manifest["artifacts"]}
-            self.assertEqual(manifest["score_revision"]["revision_type"], "machine")
-            self.assertTrue(manifest["score_revision"]["immutable"])
-            self.assertIn("f0_track", artifact_types)
-            self.assertIn("pitch_contours", artifact_types)
-            self.assertIn("note_candidates", artifact_types)
-            self.assertIn("selected_melody", artifact_types)
-            self.assertIn("rhythm_grid", artifact_types)
-            self.assertIn("quantized_notes", artifact_types)
-            self.assertIn("score_ir", artifact_types)
-            self.assertIn("score_data", artifact_types)
-            self.assertIn("midi", artifact_types)
-            self.assertIn("musicxml", artifact_types)
+            self.assertEqual(first.lyrics_segments, [{"start": 0.0, "end": 0.5, "text": "hello world"}])
+            self.assertEqual(first.alignment_source, "baseline")
+            self.assertTrue(first.alignment_accepted)
+            self.assertNotEqual(first.baseline_alignment, {})
+            self.assertNotEqual(first.final_alignment, {})
+            self.assertEqual(second.alignment_source, "baseline")
 
     def test_perception_stage_routes_stems_to_pitch_request(self) -> None:
         with TemporaryDirectory() as temp_dir:
@@ -798,7 +780,8 @@ class TestAudioAnalysisService(unittest.TestCase):
             self.assertIsNotNone(perception.rhythm_grid_dict)
             self.assertEqual(perception.vocal_activity_dict["segments"][0]["state"], "vocal")
 
-            alignment = service._empty_alignment_stage()
+            alignment = asyncio.run(service._run_alignment_stage(perception.score_ir_obj, options))
+            self.assertEqual(alignment.alignment_source, "baseline")
             persist_warnings = service._persist_artifacts(workspace, perception, alignment)
             self.assertEqual(persist_warnings, [])
             self.assertTrue(workspace.f0_track_path.exists())
@@ -808,6 +791,8 @@ class TestAudioAnalysisService(unittest.TestCase):
             self.assertTrue(workspace.quantized_notes_path.exists())
             self.assertTrue(workspace.rhythm_grid_path.exists())
             self.assertTrue(workspace.vocal_activity_path.exists())
+            self.assertTrue(workspace.baseline_alignment_path.exists())
+            self.assertTrue(workspace.final_alignment_path.exists())
 
     def test_perception_stage_fails_when_pitch_pipeline_missing(self) -> None:
         with TemporaryDirectory() as temp_dir:

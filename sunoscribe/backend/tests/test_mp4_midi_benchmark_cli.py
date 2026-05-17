@@ -120,7 +120,7 @@ class Mp4MidiBenchmarkCliTests(unittest.TestCase):
             {
                 "sample_id": "octave_dtw",
                 "status": "quality_failed",
-                "metrics": {"expected_note_count": 100, "predicted_note_count": 90, "note_recall": 0.04},
+                "metrics": {"expected_note_count": 100, "predicted_note_count": 90, "note_recall": 0.04, "gap50_ratio": 0.1},
                 "audibility": {"expected_duration_sec": 80.0, "first_note_delay_sec": 0.0},
                 "alignment": {"best_time_shift_note_recall": 0.04, "dtw": {"dtw_pitch_match_recall_proxy": 0.22, "best_dtw_octave_shift_semitones": 12}},
                 "quality_gate": {"failed_checks": []},
@@ -130,6 +130,59 @@ class Mp4MidiBenchmarkCliTests(unittest.TestCase):
         self.assertEqual(sample["reference_status"], "reference_suspect")
         self.assertIn("octave_reference_suspect", sample["reference_suspect_reasons"])
         self.assertIn("dtw_sequence_alignment_suspect", sample["reference_suspect_reasons"])
+
+    def test_reference_review_treats_sparse_dtw_lift_as_prediction_diagnostic(self) -> None:
+        sample = _reference_review_sample(
+            {
+                "sample_id": "sparse_dtw",
+                "status": "quality_failed",
+                "metrics": {
+                    "expected_note_count": 408,
+                    "predicted_note_count": 93,
+                    "note_recall": 0.0392,
+                    "gap50_ratio": 0.8913,
+                    "octave_shift_applied": 0,
+                },
+                "audibility": {"expected_duration_sec": 176.3, "first_note_delay_sec": 1.67},
+                "alignment": {
+                    "best_time_shift_note_recall": 0.0564,
+                    "dtw": {"dtw_pitch_match_recall_proxy": 0.1936, "best_dtw_octave_shift_semitones": 0},
+                },
+                "quality_gate": {"failed_checks": ["midi_coverage_ratio", "note_recall"]},
+            }
+        )
+
+        self.assertEqual(sample["reference_status"], "likely_comparable")
+        self.assertNotIn("dtw_sequence_alignment_suspect", sample["reference_suspect_reasons"])
+        self.assertIn("sequence_alignment_improves_fragmented_prediction", sample["prediction_diagnostic_reasons"])
+
+    def test_reference_review_treats_fragmented_dtw_lift_as_prediction_diagnostic(self) -> None:
+        sample = _reference_review_sample(
+            {
+                "sample_id": "fragmented_dtw",
+                "status": "quality_failed",
+                "metrics": {
+                    "expected_note_count": 408,
+                    "predicted_note_count": 209,
+                    "note_recall": 0.0686,
+                    "note_f1": 0.0908,
+                    "gap50_ratio": 0.7163,
+                    "octave_shift_applied": 0,
+                },
+                "audibility": {"expected_duration_sec": 176.3, "first_note_delay_sec": 1.4},
+                "alignment": {
+                    "pred_to_exp_shift_sec": -0.942,
+                    "shift_corrected_f1": 0.5932,
+                    "best_time_shift_note_recall": 0.1152,
+                    "dtw": {"dtw_pitch_match_recall_proxy": 0.3799, "best_dtw_octave_shift_semitones": 0},
+                },
+                "quality_gate": {"failed_checks": ["midi_coverage_ratio"]},
+            }
+        )
+
+        self.assertEqual(sample["reference_status"], "likely_comparable")
+        self.assertNotIn("dtw_sequence_alignment_suspect", sample["reference_suspect_reasons"])
+        self.assertIn("sequence_alignment_improves_fragmented_prediction", sample["prediction_diagnostic_reasons"])
 
     def test_reference_review_flags_near_threshold_first_note_offset(self) -> None:
         sample = _reference_review_sample(
@@ -439,6 +492,17 @@ class Mp4MidiBenchmarkCliTests(unittest.TestCase):
         self.assertEqual(payload["instrumental_hook_note_count"], 1)
         self.assertIsNotNone(payload["predicted_lead_track"])
 
+    def test_manifest_loads_reference_pitch_shift(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            manifest = _write_manifest_fixture(root, reference_pitch_shift=-12)
+            from app.modules.benchmark.dataset import load_manifest
+
+            sample = load_manifest(manifest).samples[0]
+
+        self.assertEqual(sample.expected_reference_pitch_shift_semitones, -12)
+        self.assertEqual(sample.to_dict()["expected_reference_pitch_shift_semitones"], -12)
+
     def test_metrics_stage_records_octave_normalization(self) -> None:
         with TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -474,6 +538,7 @@ class Mp4MidiBenchmarkCliTests(unittest.TestCase):
                 input_mp4=root / "song.mp4",
                 expected_midi=expected,
                 expected_melody_track=1,
+                expected_reference_pitch_shift_semitones=-12,
             )
 
             stage, payload = _compute_metrics_stage(
@@ -484,12 +549,14 @@ class Mp4MidiBenchmarkCliTests(unittest.TestCase):
 
         self.assertEqual(stage.status, "success")
         self.assertIsNotNone(payload)
-        self.assertEqual(payload["metrics"]["octave_shift_applied"], 12)
-        self.assertEqual(payload["metrics"]["octave_shift_target"], "predicted")
+        self.assertEqual(payload["expected_reference_pitch_shift_semitones"], -12)
+        self.assertEqual(payload["expected_reference_extraction"]["details"]["pitch_shift_semitones"], -12)
+        self.assertEqual(payload["metrics"]["octave_shift_applied"], 0)
+        self.assertIsNone(payload["metrics"]["octave_shift_target"])
         self.assertEqual(payload["metrics"]["note_recall"], 0.5)
         self.assertEqual(payload["metrics"]["octave_normalized_note_recall"], 0.5)
         self.assertEqual(payload["metrics"]["octave_normalized_matched_note_count"], 6)
-        self.assertEqual(payload["diagnostics"]["octave_shift_applied"], 12)
+        self.assertEqual(payload["diagnostics"]["octave_shift_applied"], 0)
         self.assertEqual(payload["diagnostics"]["octave_normalized_note_recall"], 0.5)
 
     def test_quality_gate_uses_octave_normalized_matched_notes_for_diagnostics(self) -> None:
@@ -786,7 +853,7 @@ if __name__ == "__main__":
     unittest.main()
 
 
-def _write_manifest_fixture(root: Path, *, expected_writer=_write_midi) -> Path:
+def _write_manifest_fixture(root: Path, *, expected_writer=_write_midi, reference_pitch_shift: int | None = None) -> Path:
     samples = root / "samples"
     (samples / "source_mp4").mkdir(parents=True)
     (samples / "source_mid").mkdir()
@@ -804,6 +871,11 @@ def _write_manifest_fixture(root: Path, *, expected_writer=_write_midi) -> Path:
                         "input_mp4": "source_mp4/Song.mp4",
                         "expected_midi": "source_mid/Song.mid",
                         "expected_melody_track": 1,
+                        **(
+                            {"expected_reference_pitch_shift_semitones": reference_pitch_shift}
+                            if reference_pitch_shift is not None
+                            else {}
+                        ),
                     }
                 ],
             }

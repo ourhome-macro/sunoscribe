@@ -3,7 +3,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import contextlib
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime, timezone
 import json
 import logging
@@ -33,6 +33,7 @@ from app.modules.benchmark import (
     load_manifest,
     read_midi_notes,
     read_midi_track_info,
+    transpose_note_events,
     build_mvp_readiness_report,
 )
 from app.modules.benchmark.debug_package import (
@@ -357,6 +358,16 @@ def _compute_metrics_stage(
             track_index=sample.expected_melody_track,
             strategy=sample.expected_reference_strategy,
         )
+        reference_pitch_shift = int(sample.expected_reference_pitch_shift_semitones)
+        if reference_pitch_shift:
+            expected_notes = transpose_note_events(expected_notes, reference_pitch_shift)
+            reference_details = dict(reference_extraction.details or {})
+            reference_details["pitch_shift_semitones"] = reference_pitch_shift
+            reference_extraction = replace(
+                reference_extraction,
+                applied=True,
+                details=reference_details,
+            )
         predicted_tracks = read_midi_track_info(produced_midi_path)
         predicted_lead_track = find_midi_track_index_by_name(produced_midi_path, "Lead Vocal")
         if predicted_lead_track is None:
@@ -377,6 +388,7 @@ def _compute_metrics_stage(
             "expected_midi": str(sample.expected_midi),
             "expected_melody_track": sample.expected_melody_track,
             "expected_reference_strategy": sample.expected_reference_strategy or "track",
+            "expected_reference_pitch_shift_semitones": reference_pitch_shift,
             "expected_reference_extraction": reference_extraction.to_dict(),
             "produced_midi": str(produced_midi_path),
             "predicted_lead_track": predicted_lead_track,
@@ -397,7 +409,11 @@ def _compute_metrics_stage(
                 status="success",
                 started_at=started_at,
                 duration_sec=time.perf_counter() - start,
-                inputs={"expected_midi": str(sample.expected_midi), "produced_midi": str(produced_midi_path)},
+                inputs={
+                    "expected_midi": str(sample.expected_midi),
+                    "produced_midi": str(produced_midi_path),
+                    "expected_reference_pitch_shift_semitones": reference_pitch_shift,
+                },
                 outputs={
                     "expected_reference_extraction": reference_extraction.to_dict(),
                     "metrics": metrics.to_dict(),
@@ -676,15 +692,21 @@ def _build_reference_review(*, run_root: Path, result_rows: list[dict[str, Any]]
         "needs_manual_review": sum(1 for sample in samples if sample["reference_status"] == "needs_manual_review"),
     }
     reason_counts: dict[str, int] = {}
+    prediction_diagnostic_reason_counts: dict[str, int] = {}
     for sample in samples:
         for reason in sample["reference_suspect_reasons"]:
             reason_counts[reason] = reason_counts.get(reason, 0) + 1
+        for reason in sample.get("prediction_diagnostic_reasons") or []:
+            prediction_diagnostic_reason_counts[reason] = prediction_diagnostic_reason_counts.get(reason, 0) + 1
     return {
         "run_root": str(run_root),
         "created_at": _utc_now(),
         "thresholds": REFERENCE_REVIEW_THRESHOLDS,
         "status_counts": status_counts,
         "reason_counts": dict(sorted(reason_counts.items(), key=lambda item: (-item[1], item[0]))),
+        "prediction_diagnostic_reason_counts": dict(
+            sorted(prediction_diagnostic_reason_counts.items(), key=lambda item: (-item[1], item[0]))
+        ),
         "samples": samples,
     }
 
@@ -713,6 +735,7 @@ def _reference_review_sample(row: dict[str, Any]) -> dict[str, Any]:
         dtw_recall_lift = float(dtw_recall) - float(note_recall)
 
     reasons: list[str] = []
+    prediction_diagnostic_reasons: list[str] = []
     if expected_count is not None and int(expected_count) >= int(REFERENCE_REVIEW_THRESHOLDS["expected_note_count_high"]):
         reasons.append("expected_note_count_too_high")
     if expected_note_density is not None and expected_note_density >= float(REFERENCE_REVIEW_THRESHOLDS["expected_note_density_per_sec_high"]):
@@ -764,7 +787,24 @@ def _reference_review_sample(row: dict[str, Any]) -> dict[str, Any]:
         and dtw_recall_lift >= float(REFERENCE_REVIEW_THRESHOLDS["dtw_recall_lift_min"])
         and not _octave_shift_was_applied(octave_shift_applied)
     ):
-        reasons.append("dtw_sequence_alignment_suspect")
+        fragmented_prediction = metrics.get("gap50_ratio") is not None and float(metrics.get("gap50_ratio")) >= 0.5
+        low_or_fragmented_prediction = (
+            predicted_expected_ratio is not None
+            and predicted_expected_ratio < 0.65
+            and fragmented_prediction
+        )
+        strong_shift_rescue = (
+            alignment.get("shift_corrected_f1") is not None
+            and metrics.get("note_f1") is not None
+            and float(alignment.get("shift_corrected_f1")) - float(metrics.get("note_f1")) >= 0.20
+            and abs(float(alignment.get("pred_to_exp_shift_sec") or 0.0)) < 2.0
+        )
+        if low_or_fragmented_prediction:
+            prediction_diagnostic_reasons.append("sequence_alignment_improves_fragmented_prediction")
+        elif strong_shift_rescue:
+            prediction_diagnostic_reasons.append("time_shift_rescues_prediction_alignment")
+        else:
+            reasons.append("dtw_sequence_alignment_suspect")
 
     if row.get("metrics") is None:
         reference_status = "needs_manual_review"
@@ -777,6 +817,7 @@ def _reference_review_sample(row: dict[str, Any]) -> dict[str, Any]:
         "sample_id": row.get("sample_id"),
         "reference_status": reference_status,
         "reference_suspect_reasons": reasons,
+        "prediction_diagnostic_reasons": prediction_diagnostic_reasons,
         "expected_note_count": expected_count,
         "predicted_note_count": predicted_count,
         "expected_duration_sec": expected_duration,

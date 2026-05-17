@@ -130,6 +130,23 @@ class PitchPipeline:
             min_stability=float(self.config.note_candidate_min_stability),
             vocal_min_midi=float(self.config.melody_pitch_min_midi),
             vocal_max_midi=float(self.config.melody_pitch_max_midi),
+            segmentation_min_source_duration_sec=float(
+                self.config.note_candidate_segmentation_min_source_duration_sec
+            ),
+            segmentation_min_subsegment_duration_sec=float(
+                self.config.note_candidate_segmentation_min_subsegment_duration_sec
+            ),
+            segmentation_max_subsegment_duration_sec=float(
+                self.config.note_candidate_segmentation_max_subsegment_duration_sec
+            ),
+            segmentation_max_pitch_range_semitones=float(
+                self.config.note_candidate_segmentation_max_pitch_range_semitones
+            ),
+            segmentation_max_pitch_stddev_semitones=float(
+                self.config.note_candidate_segmentation_max_pitch_stddev_semitones
+            ),
+            segmentation_max_frame_gap_sec=float(self.config.note_candidate_segmentation_max_frame_gap_sec),
+            segmentation_context_extension_sec=float(self.config.note_candidate_segmentation_context_extension_sec),
         )
 
     def _melody_selection_config(self) -> MelodySelectionConfig:
@@ -155,6 +172,27 @@ class PitchPipeline:
             "note_candidate_min_confidence": float(self.config.note_candidate_min_confidence),
             "note_candidate_min_voiced_ratio": float(self.config.note_candidate_min_voiced_ratio),
             "note_candidate_min_stability": float(self.config.note_candidate_min_stability),
+            "note_candidate_segmentation_min_source_duration_sec": float(
+                self.config.note_candidate_segmentation_min_source_duration_sec
+            ),
+            "note_candidate_segmentation_min_subsegment_duration_sec": float(
+                self.config.note_candidate_segmentation_min_subsegment_duration_sec
+            ),
+            "note_candidate_segmentation_max_subsegment_duration_sec": float(
+                self.config.note_candidate_segmentation_max_subsegment_duration_sec
+            ),
+            "note_candidate_segmentation_max_pitch_range_semitones": float(
+                self.config.note_candidate_segmentation_max_pitch_range_semitones
+            ),
+            "note_candidate_segmentation_max_pitch_stddev_semitones": float(
+                self.config.note_candidate_segmentation_max_pitch_stddev_semitones
+            ),
+            "note_candidate_segmentation_max_frame_gap_sec": float(
+                self.config.note_candidate_segmentation_max_frame_gap_sec
+            ),
+            "note_candidate_segmentation_context_extension_sec": float(
+                self.config.note_candidate_segmentation_context_extension_sec
+            ),
             "melody_selection_min_confidence": float(self.config.melody_min_confidence),
             "melody_selection_min_duration_sec": float(self.config.melody_min_duration_sec),
             "melody_selection_min_voiced_ratio": float(self.config.melody_selection_min_voiced_ratio),

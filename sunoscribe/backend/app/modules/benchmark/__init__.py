@@ -30,6 +30,7 @@ from .midi_metrics import (
     infer_midi_failure_modes,
     read_midi_notes,
     read_midi_track_info,
+    transpose_note_events,
 )
 from .readiness import MvpReadinessReport, ReadinessCheck, build_mvp_readiness_report
 
@@ -66,4 +67,5 @@ __all__ = [
     "normalize_sample_key",
     "read_midi_notes",
     "read_midi_track_info",
+    "transpose_note_events",
 ]

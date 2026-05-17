@@ -78,6 +78,26 @@ class TestPitchPipeline(unittest.TestCase):
         self.assertIn("adjusted_confidence", evidence)
         self.assertIn(DP_VITERBI_SEGMENTATION, notes[0].reason_codes)
 
+    def test_note_candidate_builder_config_uses_pipeline_segmentation_thresholds(self):
+        config = PitchDetectionConfig(
+            note_candidate_segmentation_min_subsegment_duration_sec=0.13,
+            note_candidate_segmentation_max_subsegment_duration_sec=1.5,
+            note_candidate_segmentation_max_pitch_range_semitones=1.1,
+            note_candidate_segmentation_max_pitch_stddev_semitones=0.65,
+            note_candidate_segmentation_max_frame_gap_sec=0.05,
+            note_candidate_segmentation_context_extension_sec=0.15,
+        )
+        pipeline = PitchPipeline(config)
+
+        builder_config = pipeline._note_candidate_builder_config()
+
+        self.assertEqual(builder_config.segmentation_min_subsegment_duration_sec, 0.13)
+        self.assertEqual(builder_config.segmentation_max_subsegment_duration_sec, 1.5)
+        self.assertEqual(builder_config.segmentation_max_pitch_range_semitones, 1.1)
+        self.assertEqual(builder_config.segmentation_max_pitch_stddev_semitones, 0.65)
+        self.assertEqual(builder_config.segmentation_max_frame_gap_sec, 0.05)
+        self.assertEqual(builder_config.segmentation_context_extension_sec, 0.15)
+
     def test_dp_frames_to_notes_suppresses_short_pitch_spike(self):
         detector = PitchDetector(PitchDetectionConfig())
         times = np.arange(70, dtype=float) * 0.01

@@ -3,7 +3,7 @@ from __future__ import annotations
 import unittest
 
 from app.modules.pitch.note_candidate_builder import NoteCandidateBuilder
-from app.modules.pitch.reason_codes import LOW_CONFIDENCE, TOO_UNSTABLE, UNCERTAIN
+from app.modules.pitch.reason_codes import CONTOUR_SEGMENTATION_BRIDGE, LOW_CONFIDENCE, TOO_UNSTABLE, UNCERTAIN
 
 
 def _frame(
@@ -168,6 +168,102 @@ class TestNoteCandidateBuilder(unittest.TestCase):
         second_note = second["melody_candidates"]["notes"][0]
         self.assertEqual(first_note["candidate_id"], second_note["candidate_id"])
         self.assertEqual(first_note["source_f0_frame_range"], second_note["source_f0_frame_range"])
+
+    def test_segments_unstable_long_contour_into_stable_candidates(self) -> None:
+        frames = []
+        frame_index = 0
+        for segment_start, pitch_start in [(0.00, 60.0), (0.18, 61.6), (0.36, 66.0)]:
+            for offset in range(18):
+                frames.append(_frame(segment_start + offset * 0.01, pitch_start + offset * 0.04, frame_index=frame_index))
+                frame_index += 1
+        pitch_contours = {
+            "version": "pitch_contours_v1",
+            "source_f0_track": "rmvpe",
+            "contours": [
+                {
+                    "id": "pc_glide_phrase",
+                    "start_time_sec": 0.0,
+                    "end_time_sec": 0.54,
+                    "duration_sec": 0.54,
+                    "pitch_center_midi": 62.0,
+                    "mean_confidence": 0.9,
+                    "voiced_ratio": 1.0,
+                    "stability": 0.0,
+                    "frame_count": len(frames),
+                    "reason_codes": [TOO_UNSTABLE],
+                    "frame_samples": [
+                        {
+                            "time_sec": frame["time_sec"],
+                            "pitch_midi": frame["midi_float"],
+                            "confidence": frame["confidence"],
+                            "voiced": frame["voiced"],
+                        }
+                        for frame in frames
+                    ],
+                }
+            ],
+        }
+
+        result = NoteCandidateBuilder().build(
+            f0_track={"backend": "rmvpe", "frames": frames},
+            pitch_contours=pitch_contours,
+            raw_candidates=None,
+        )
+
+        notes = result["melody_candidates"]["notes"]
+        self.assertEqual(len(notes), 3)
+        self.assertEqual(result["analysis_info"]["rejected_candidates"], [])
+        self.assertEqual(result["analysis_info"]["segmentation_counts"][CONTOUR_SEGMENTATION_BRIDGE], 3)
+        for note in notes:
+            self.assertEqual(note["candidate_origin"], "note_candidate_builder.contour_segment")
+            self.assertIn(CONTOUR_SEGMENTATION_BRIDGE, note["reason_codes"])
+            self.assertLessEqual(note["segmentation_evidence"]["pitch_range_semitones"], 1.0)
+            self.assertEqual(note["source_contour_ids"], ["pc_glide_phrase"])
+
+    def test_segments_realistic_short_syllable_windows(self) -> None:
+        frames = []
+        for index in range(12):
+            frames.append(_frame(index * 0.01, 60.0 + index * 0.06, confidence=0.9, frame_index=index))
+        for index in range(12, 26):
+            frames.append(_frame(index * 0.01, 63.0 + (index - 12) * 0.16, confidence=0.9, frame_index=index))
+        pitch_contours = {
+            "version": "pitch_contours_v1",
+            "source_f0_track": "rmvpe",
+            "contours": [
+                {
+                    "id": "pc_short_syllable",
+                    "start_time_sec": 0.0,
+                    "end_time_sec": 0.26,
+                    "duration_sec": 0.26,
+                    "pitch_center_midi": 60.3,
+                    "mean_confidence": 0.9,
+                    "voiced_ratio": 1.0,
+                    "stability": 0.0,
+                    "frame_count": len(frames),
+                    "reason_codes": [TOO_UNSTABLE],
+                    "frame_samples": [
+                        {
+                            "time_sec": frame["time_sec"],
+                            "pitch_midi": frame["midi_float"],
+                            "confidence": frame["confidence"],
+                            "voiced": frame["voiced"],
+                        }
+                        for frame in frames
+                    ],
+                }
+            ],
+        }
+
+        result = NoteCandidateBuilder().build(
+            f0_track={"backend": "rmvpe", "frames": frames},
+            pitch_contours=pitch_contours,
+            raw_candidates=None,
+        )
+
+        notes = result["melody_candidates"]["notes"]
+        self.assertEqual(len(notes), 1)
+        self.assertAlmostEqual(notes[0]["duration_sec"], 0.12)
+        self.assertEqual(notes[0]["candidate_origin"], "note_candidate_builder.contour_segment")
 
 
 if __name__ == "__main__":

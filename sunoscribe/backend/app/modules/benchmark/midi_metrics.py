@@ -394,6 +394,29 @@ def extract_reference_melody_notes(
     raise MidiReadError(f"unknown expected reference strategy: {strategy}")
 
 
+def transpose_note_events(notes: list[NoteEvent], semitones: int) -> list[NoteEvent]:
+    shift = int(semitones)
+    if shift == 0:
+        return list(notes)
+    transposed: list[NoteEvent] = []
+    for note in notes:
+        pitch = int(note.pitch) + shift
+        if pitch < 0 or pitch > 127:
+            raise MidiReadError(f"transposed reference pitch out of MIDI range: {pitch}")
+        transposed.append(
+            NoteEvent(
+                start=note.start,
+                end=note.end,
+                pitch=pitch,
+                velocity=note.velocity,
+                track_index=note.track_index,
+                channel=note.channel,
+                program=note.program,
+            )
+        )
+    return transposed
+
+
 def extract_skyline_melody(
     notes: list[NoteEvent],
     *,

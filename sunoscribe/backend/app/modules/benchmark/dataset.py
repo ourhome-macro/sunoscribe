@@ -20,6 +20,7 @@ class BenchmarkSample:
     expected_midi: Path
     expected_melody_track: int | None
     expected_reference_strategy: str | None = None
+    expected_reference_pitch_shift_semitones: int = 0
     enabled: bool = True
     tags: list[str] = field(default_factory=list)
     notes: str | None = None
@@ -151,6 +152,18 @@ def load_manifest(path: str | Path) -> BenchmarkManifest:
             except Exception as exc:
                 raise ManifestValidationError(f"sample[{index}].expected_melody_track must be an integer") from exc
 
+        reference_pitch_shift = raw_sample.get("expected_reference_pitch_shift_semitones", 0)
+        try:
+            reference_pitch_shift = int(reference_pitch_shift)
+        except Exception as exc:
+            raise ManifestValidationError(
+                f"sample[{index}].expected_reference_pitch_shift_semitones must be an integer"
+            ) from exc
+        if reference_pitch_shift < -24 or reference_pitch_shift > 24:
+            raise ManifestValidationError(
+                f"sample[{index}].expected_reference_pitch_shift_semitones must be between -24 and 24"
+            )
+
         tags = raw_sample.get("tags") or []
         if not isinstance(tags, list):
             raise ManifestValidationError(f"sample[{index}].tags must be a list")
@@ -162,6 +175,7 @@ def load_manifest(path: str | Path) -> BenchmarkManifest:
                 expected_midi=expected_midi,
                 expected_melody_track=melody_track,
                 expected_reference_strategy=raw_sample.get("expected_reference_strategy"),
+                expected_reference_pitch_shift_semitones=reference_pitch_shift,
                 enabled=bool(raw_sample.get("enabled", True)),
                 tags=[str(tag) for tag in tags],
                 notes=raw_sample.get("notes"),

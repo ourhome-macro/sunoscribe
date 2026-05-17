@@ -195,21 +195,15 @@ class AudioAnalysisService:
         canonical_audio_path = await self._run_media_ingest_stage(source_copy_path, workspace)
 
         perception = await self._run_perception_stage(source_copy_path, canonical_audio_path, workspace, options)
-        alignment = self._empty_alignment_stage()
+        alignment = await self._run_alignment_stage(perception.score_ir_obj, options)
         persist_warnings = self._persist_artifacts(workspace, perception, alignment)
-        machine_revision, revision_warnings = self._persist_machine_score_revision(workspace, perception, alignment, options)
-        final_midi_path, musicxml_path, export_warnings = await self._run_revision_export_stage(
-            machine_revision,
-            alignment,
-            workspace,
-        )
+        final_midi_path, export_warnings = await self._run_export_stage(perception, alignment, workspace)
 
         all_warnings = self._merge_warnings(
             perception.warnings,
             alignment.warnings,
             export_warnings,
             persist_warnings,
-            revision_warnings,
         )
 
         result = AudioAnalysisResult(
@@ -237,10 +231,6 @@ class AudioAnalysisService:
             validator_warnings_after=alignment.validator_warnings_after,
             refine_debug=alignment.refine_debug,
             midi_path=str(final_midi_path) if final_midi_path else None,
-            musicxml_path=str(musicxml_path) if musicxml_path else None,
-            score_revision=machine_revision.to_dict(),
-            artifact_manifest_path=machine_revision.artifact_manifest_path,
-            artifact_manifest=[item.to_dict() for item in machine_revision.artifact_manifest],
             stem_paths={name: str(path) for name, path in perception.stem_paths.items()},
             f0_track=perception.f0_track_dict,
             pitch_contours=perception.pitch_contours_dict,
@@ -336,6 +326,15 @@ class AudioAnalysisService:
             message = f"pitch_pipeline_failed:{self._short_exception(exc)}"
             warnings.append(message)
             raise RuntimeError(message) from exc
+
+        lyrics_audio_path = vocals_path or fallback_audio_path
+        try:
+            lyrics_segments = await self._invoke_lyrics_recognizer(str(lyrics_audio_path))
+            if not isinstance(lyrics_segments, list):
+                raise RuntimeError("lyrics recognizer returned non-list payload")
+        except Exception as exc:
+            warnings.append(f"lyrics_recognition_failed:{self._short_exception(exc)}")
+            lyrics_segments = []
 
         score_ir_obj: ScoreIR | None = None
         if self.score_build_service.score_ir_builder is None:

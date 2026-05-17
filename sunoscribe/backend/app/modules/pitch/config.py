@@ -99,6 +99,13 @@ class PitchDetectionConfig:
     note_candidate_min_confidence: float = 0.50
     note_candidate_min_voiced_ratio: float = 0.68
     note_candidate_min_stability: float = 0.55
+    note_candidate_segmentation_min_source_duration_sec: float = 0.20
+    note_candidate_segmentation_min_subsegment_duration_sec: float = 0.12
+    note_candidate_segmentation_max_subsegment_duration_sec: float = 1.25
+    note_candidate_segmentation_max_pitch_range_semitones: float = 1.00
+    note_candidate_segmentation_max_pitch_stddev_semitones: float = 0.60
+    note_candidate_segmentation_max_frame_gap_sec: float = 0.04
+    note_candidate_segmentation_context_extension_sec: float = 0.12
     melody_selection_min_voiced_ratio: float = 0.45
     melody_selection_min_stability: float = 0.30
 
